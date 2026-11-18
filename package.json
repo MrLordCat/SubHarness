@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/ai-agent-bridge.git"
 	},
-	"version": "1.21.4",
+	"version": "1.21.7",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -51,6 +51,11 @@
 		"views": {
 			"llamacpp-sidebar": [
 				{
+					"type": "webview",
+					"id": "llamacpp.chat",
+					"name": "Chat"
+				},
+				{
 					"id": "llamacpp-quick-actions",
 					"name": "Quick Access",
 					"visibility": "visible"
@@ -60,6 +65,41 @@
 		"configuration": {
 			"title": "AI Agent Bridge",
 			"properties": {
+				"llamacpp.chat.dangerousCommands": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [
+						"\\bgit\\b[^\\n;&|]*\\bpush\\b[^\\n;&|]*\\s(?:--force(?:-with-lease|-if-includes)?|--mirror|--delete|--prune|-[a-z]*[fd])\\b",
+						"\\bgit\\b[^\\n;&|]*\\bpush\\b[^\\n;&|]*\\s[+:][^\\s]",
+						"\\bgit\\b[^\\n;&|]*\\breset\\b[^\\n;&|]*\\s--(?:hard|merge|keep)\\b",
+						"\\bgit\\b[^\\n;&|]*\\bclean\\b[^\\n;&|]*\\s-[a-z]*f",
+						"\\bgit\\b[^\\n;&|]*\\bcheckout\\b[^\\n;&|]*(?:\\s--(?=\\s|$)|\\s\\.(?=\\s|$)|\\s-f\\b|\\s--force\\b)",
+						"\\bgit\\b[^\\n;&|]*\\brestore\\b",
+						"\\bgit\\b[^\\n;&|]*\\bbranch\\b[^\\n;&|]*\\s(?:-[a-z]*d|--delete)\\b",
+						"\\bgit\\b[^\\n;&|]*\\btag\\b[^\\n;&|]*\\s(?:-d|--delete)\\b",
+						"\\bgit\\b[^\\n;&|]*\\bstash\\s+(?:drop|clear)\\b",
+						"\\bgit\\b[^\\n;&|]*\\b(?:filter-branch|filter-repo|update-ref\\s+-d|reflog\\s+expire)\\b",
+						"\\brm\\b[^\\n;&|]*\\s(?:-[a-z]*r|--recursive\\b)",
+						"\\b(?:Remove-Item|ri|rmdir|rd|del|erase)\\b[^\\n;&|]*\\s-r[a-z]*\\b",
+						"\\b(?:rmdir|rd|del|erase)\\b[^\\n&|]*\\s/s\\b",
+						"\\b(?:format(?:\\.com)?\\s+[a-z]:|(?:mkfs(?:\\.\\w+)?|diskpart|Format-Volume|Clear-Disk|Initialize-Disk|Remove-Partition)\\b)",
+						"\\bdd\\b[^\\n;&|]*\\bof=",
+						"\\b(?:shutdown|reboot|poweroff|halt|Stop-Computer|Restart-Computer)\\b",
+						"\\b(?:chmod|chown)\\b[^\\n;&|]*\\s-[a-z]*R",
+						"\\b(?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\\b[^\\n]*\\|\\s*(?:sh|bash|zsh|iex|Invoke-Expression|pwsh|powershell)\\b",
+						"\\b(?:reg\\s+delete|Remove-ItemProperty)\\b",
+						"\\b(?:npm|pnpm|yarn)\\s+(?:publish|unpublish|deprecate)\\b",
+						"\\b(?:vsce|ovsx)\\s+(?:publish|unpublish)\\b",
+						"\\bgh\\s+(?:release\\s+(?:create|delete|upload|edit)|repo\\s+(?:delete|archive|rename)|pr\\s+merge)\\b",
+						"\\bdocker\\s+(?:(?:system|volume|image|container|network)\\s+prune|(?:rm|rmi)\\b[^\\n;&|]*\\s-[a-z]*f)\\b",
+						"\\b(?:kubectl\\s+delete|terraform\\s+(?:apply|destroy))\\b",
+						"\\b(?:drop\\s+(?:table|database|schema)|truncate\\s+table)\\b",
+						"\\b(?:taskkill|Stop-Process|pkill|killall)\\b[^\\n;&|]*\\bcode(?:\\.exe)?\\b"
+					],
+					"markdownDescription": "Regular expressions (case-insensitive) for terminal commands that the AI Agent Bridge chat runs only after you allow them in the chat. Every other tool call runs without asking. Remove an entry to stop asking for it, or add patterns for commands you want to confirm."
+				},
 				"llamacpp.serverUrl": {
 					"type": "string",
 					"default": "http://localhost:8000",
@@ -1264,6 +1304,16 @@
 		],
 		"commands": [
 			{
+				"command": "llamacpp.chat.new",
+				"title": "AI Agent Bridge: New Chat",
+				"icon": "$(add)"
+			},
+			{
+				"command": "llamacpp.chat.openInEditor",
+				"title": "AI Agent Bridge: Open Chat in Editor",
+				"icon": "$(link-external)"
+			},
+			{
 				"command": "llamacpp.openSidebar",
 				"title": "AI Agent Bridge: Open Sidebar"
 			},
@@ -1560,6 +1610,16 @@
 		"menus": {
 			"view/title": [
 				{
+					"command": "llamacpp.chat.new",
+					"when": "view == llamacpp.chat",
+					"group": "navigation"
+				},
+				{
+					"command": "llamacpp.chat.openInEditor",
+					"when": "view == llamacpp.chat",
+					"group": "navigation"
+				},
+				{
 					"command": "llamacpp.chooseModelByProvider",
 					"when": "view == llamacpp-quick-actions || view == workbench.panel.chat.view.copilot",
 					"group": "navigation@1"
@@ -1582,7 +1642,7 @@
 		"vscode:prepublish": "npm run clean && npm run compile",
 		"clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
 		"update-vscode-api": "dts main && node ./scripts/move-vscode-api.mjs",
-		"compile": "tsc -p ./",
+		"compile": "tsc -p ./ && tsc -p src/chat/webview && node scripts/build-webview.mjs",
 		"lint": "eslint",
 		"check": "npm run lint && npm test",
 		"check:metadata": "node --test scripts/check-repository.test.mjs scripts/prune-releases.test.mjs && node scripts/check-repository.mjs",
@@ -1592,6 +1652,7 @@
 		"package": "vsce package",
 		"format": "prettier --write .",
 		"watch": "tsc -watch -p ./",
+		"watch:webview": "node scripts/build-webview.mjs --dev --watch",
 		"test:chat-repair": "node --test scripts/repair-chat-sessions.test.mjs",
 		"test": "npm run compile && npm run test:chat-repair && vscode-test"
 	},
@@ -1605,7 +1666,10 @@
 		"@vscode/test-cli": "^0.0.15",
 		"@vscode/test-electron": "^3.1.0",
 		"@vscode/vsce": "4.0.0",
+		"esbuild": "^0.28.2",
 		"eslint": "^10.8.1",
+		"marked": "^18.2.1",
+		"preact": "^11.2.0",
 		"prettier": "^3.9.6",
 		"typescript": "^5.9.3",
 		"typescript-eslint": "^8.67.0"

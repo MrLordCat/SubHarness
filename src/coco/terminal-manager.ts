@@ -89,6 +89,7 @@ export class CocoTerminalManager implements vscode.Disposable {
 		private readonly host: CocoTerminalHost = vscode.window,
 		private readonly integrationTimeoutMs = 20_000,
 		private readonly onLog?: (event: string, data: Record<string, unknown>) => void,
+		private readonly terminalName = "Coco",
 	) {
 		this.subscriptions = [
 			host.onDidStartTerminalShellExecution(event => {
@@ -287,13 +288,13 @@ export class CocoTerminalManager implements vscode.Disposable {
 			}
 		}
 		if ([...this.sessions.values()].filter(session => !session.closed).length >= 32) {
-			throw new Error("Close an unused Coco terminal before creating another.");
+			throw new Error(`Close an unused ${this.terminalName} terminal before creating another.`);
 		}
 		const session: Session = {
 			id: randomUUID(), closed: false, starting: false,
 			createdCwd: cwd,
 			terminal: this.host.createTerminal({
-				name: `Coco ${++this.sequence}`, cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri,
+				name: `${this.terminalName} ${++this.sequence}`, cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri,
 				location: vscode.TerminalLocation.Panel,
 			}),
 		};

@@ -1,0 +1,522 @@
+import { randomUUID } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import type { ChatMessage, ChatPart, ChatSessionMeta, ChatUsage } from "./shared/protocol";
+
+export const DEFAULT_CHAT_TITLE = "New chat";
+
+const INDEX_VERSION = 1;
+const INDEX_FILE = "index.json";
+const INDEX_TEMP_FILE = "index.json.tmp";
+const LOG_SUFFIX = ".jsonl";
+const SESSION_ID = /^[A-Za-z0-9-]{1,64}$/;
+const TITLE_MAX_CHARS = 60;
+const INDEX_THROTTLE_MS = 1_000;
+
+/** One event per line; load replays them in file order. */
+type LogEvent =
+	| { t: "message"; message: ChatMessage }
+	| { t: "part"; messageId: string; part: ChatPart }
+	| { t: "usage"; messageId: string; usage: ChatUsage }
+	/** Drops the message and everything after it; an earlier message was edited. */
+	| { t: "truncate"; messageId: string };
+
+export class ChatSessionStore {
+	private readonly _root: string;
+	private readonly _sessions = new Map<string, ChatSessionMeta>();
+	private readonly _lastIndexWrite = new Map<string, number>();
+	private readonly _safeTails = new Set<string>();
+	private _indexLoaded = false;
+	private _queue: Promise<unknown> = Promise.resolve();
+
+	constructor(root: string) {
+		this._root = root;
+	}
+
+	async list(): Promise<ChatSessionMeta[]> {
+		return this._enqueue(async () => {
+			await this._ensureIndex();
+			return [...this._sessions.values()]
+				.map(meta => ({ ...meta }))
+				.sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+		});
+	}
+
+	async get(sessionId: string): Promise<ChatSessionMeta | undefined> {
+		assertSessionId(sessionId);
+		return this._enqueue(async () => {
+			await this._ensureIndex();
+			const meta = this._sessions.get(sessionId);
+			return meta ? { ...meta } : undefined;
+		});
+	}
+
+	async create(modelId?: string): Promise<ChatSessionMeta> {
+		return this._enqueue(async () => {
+			await this._ensureIndex();
+			const now = Date.now();
+			const meta: ChatSessionMeta = { id: randomUUID(), title: DEFAULT_CHAT_TITLE, createdAt: now, updatedAt: now, messageCount: 0 };
+			if (modelId !== undefined) {
+				meta.modelId = modelId;
+			}
+			this._sessions.set(meta.id, meta);
+			await this._writeIndex();
+			this._lastIndexWrite.set(meta.id, now);
+			return { ...meta };
+		});
+	}
+
+	async load(sessionId: string): Promise<ChatMessage[]> {
+		assertSessionId(sessionId);
+		return this._enqueue(async () => (await this._replay(this._logFile(sessionId))) ?? []);
+	}
+
+	async appendMessage(sessionId: string, message: ChatMessage): Promise<void> {
+		assertSessionId(sessionId);
+		const event: LogEvent = { t: "message", message };
+		const line = `${JSON.stringify(event)}\n`;
+		await this._enqueue(async () => {
+			await this._ensureIndex();
+			const meta = this._requireSession(sessionId);
+			await this._appendLine(sessionId, line);
+			const now = Date.now();
+			meta.updatedAt = now;
+			meta.messageCount += 1;
+			if (meta.title === DEFAULT_CHAT_TITLE && message.role === "user") {
+				const title = titleFromParts(message.parts);
+				if (title) {
+					meta.title = title;
+				}
+			}
+			await this._writeIndex();
+			this._lastIndexWrite.set(sessionId, now);
+		});
+	}
+
+	async appendPart(sessionId: string, messageId: string, part: ChatPart): Promise<void> {
+		assertSessionId(sessionId);
+		const event: LogEvent = { t: "part", messageId, part };
+		const line = `${JSON.stringify(event)}\n`;
+		await this._enqueue(async () => {
+			await this._ensureIndex();
+			const meta = this._requireSession(sessionId);
+			await this._appendLine(sessionId, line);
+			await this._touchIndex(sessionId, meta);
+		});
+	}
+
+	async setUsage(sessionId: string, messageId: string, usage: ChatUsage): Promise<void> {
+		assertSessionId(sessionId);
+		const event: LogEvent = { t: "usage", messageId, usage };
+		const line = `${JSON.stringify(event)}\n`;
+		await this._enqueue(async () => {
+			await this._ensureIndex();
+			const meta = this._requireSession(sessionId);
+			await this._appendLine(sessionId, line);
+			await this._touchIndex(sessionId, meta);
+		});
+	}
+
+	/** Removes the message and every later one; returns the number of messages left. */
+	async truncateFrom(sessionId: string, messageId: string): Promise<number> {
+		assertSessionId(sessionId);
+		const event: LogEvent = { t: "truncate", messageId };
+		const line = `${JSON.stringify(event)}\n`;
+		return this._enqueue(async () => {
+			await this._ensureIndex();
+			const meta = this._requireSession(sessionId);
+			await this._appendLine(sessionId, line);
+			const messages = (await this._replay(this._logFile(sessionId))) ?? [];
+			const now = Date.now();
+			meta.updatedAt = now;
+			meta.messageCount = messages.length;
+			const firstUser = messages.find(message => message.role === "user");
+			meta.title = (firstUser ? titleFromParts(firstUser.parts) : undefined) ?? DEFAULT_CHAT_TITLE;
+			await this._writeIndex();
+			this._lastIndexWrite.set(sessionId, now);
+			return messages.length;
+		});
+	}
+
+	async updateMeta(sessionId: string, patch: { title?: string; modelId?: string }): Promise<ChatSessionMeta | undefined> {
+		assertSessionId(sessionId);
+		return this._enqueue(async () => {
+			await this._ensureIndex();
+			const meta = this._sessions.get(sessionId);
+			if (!meta) {
+				return undefined;
+			}
+			let changed = false;
+			if (patch.title !== undefined && patch.title !== meta.title) {
+				meta.title = patch.title;
+				changed = true;
+			}
+			if (patch.modelId !== undefined && patch.modelId !== meta.modelId) {
+				meta.modelId = patch.modelId;
+				changed = true;
+			}
+			if (changed) {
+				const now = Date.now();
+				meta.updatedAt = now;
+				await this._writeIndex();
+				this._lastIndexWrite.set(sessionId, now);
+			}
+			return { ...meta };
+		});
+	}
+
+	async delete(sessionId: string): Promise<void> {
+		assertSessionId(sessionId);
+		await this._enqueue(async () => {
+			await this._ensureIndex();
+			const existed = this._sessions.delete(sessionId);
+			this._lastIndexWrite.delete(sessionId);
+			this._safeTails.delete(sessionId);
+			await fs.rm(this._logFile(sessionId), { force: true });
+			if (existed) {
+				await this._writeIndex();
+			}
+		});
+	}
+
+	async flush(): Promise<void> {
+		await this._queue;
+	}
+
+	private _enqueue<T>(task: () => Promise<T>): Promise<T> {
+		const result = this._queue.then(task, task);
+		this._queue = result.then(() => undefined, () => undefined);
+		return result;
+	}
+
+	private async _ensureIndex(): Promise<void> {
+		if (this._indexLoaded) {
+			return;
+		}
+		await this._loadIndex();
+		this._indexLoaded = true;
+	}
+
+	private async _loadIndex(): Promise<void> {
+		this._sessions.clear();
+		this._lastIndexWrite.clear();
+		let raw: string;
+		try {
+			raw = await fs.readFile(path.join(this._root, INDEX_FILE), "utf8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+				await this._rebuild(false);
+				return;
+			}
+			throw error;
+		}
+		const sessions = parseIndex(raw);
+		if (!sessions) {
+			await this._rebuild(true);
+			return;
+		}
+		for (const meta of sessions) {
+			this._sessions.set(meta.id, meta);
+			this._lastIndexWrite.set(meta.id, meta.updatedAt);
+		}
+	}
+
+	private async _rebuild(forceWrite: boolean): Promise<void> {
+		this._sessions.clear();
+		this._lastIndexWrite.clear();
+		let names: string[];
+		try {
+			names = await fs.readdir(this._root);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				throw error;
+			}
+			names = [];
+		}
+		for (const name of names) {
+			if (!name.endsWith(LOG_SUFFIX)) {
+				continue;
+			}
+			const id = name.slice(0, -LOG_SUFFIX.length);
+			if (!SESSION_ID.test(id)) {
+				continue;
+			}
+			const file = this._logFile(id);
+			let createdAt: number;
+			let updatedAt: number;
+			try {
+				const stat = await fs.stat(file);
+				updatedAt = stat.mtimeMs;
+				createdAt = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.mtimeMs;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+					continue;
+				}
+				throw error;
+			}
+			const messages = await this._replay(file);
+			if (!messages) {
+				continue;
+			}
+			const firstUser = messages.find(message => message.role === "user");
+			const meta: ChatSessionMeta = {
+				id,
+				title: (firstUser ? titleFromParts(firstUser.parts) : undefined) ?? DEFAULT_CHAT_TITLE,
+				createdAt,
+				updatedAt,
+				messageCount: messages.length,
+			};
+			const modelId = messages.findLast(message => message.modelId !== undefined)?.modelId;
+			if (modelId !== undefined) {
+				meta.modelId = modelId;
+			}
+			this._sessions.set(id, meta);
+			this._lastIndexWrite.set(id, updatedAt);
+		}
+		if (forceWrite || this._sessions.size > 0) {
+			await this._writeIndex();
+		}
+	}
+
+	private async _writeIndex(): Promise<void> {
+		const target = path.join(this._root, INDEX_FILE);
+		const temporary = path.join(this._root, INDEX_TEMP_FILE);
+		await fs.mkdir(this._root, { recursive: true });
+		await fs.writeFile(temporary, JSON.stringify({ version: INDEX_VERSION, sessions: [...this._sessions.values()] }), "utf8");
+		await fs.rename(temporary, target);
+	}
+
+	private async _touchIndex(sessionId: string, meta: ChatSessionMeta): Promise<void> {
+		const now = Date.now();
+		if (now - (this._lastIndexWrite.get(sessionId) ?? 0) < INDEX_THROTTLE_MS) {
+			return;
+		}
+		meta.updatedAt = now;
+		await this._writeIndex();
+		this._lastIndexWrite.set(sessionId, now);
+	}
+
+	private async _appendLine(sessionId: string, line: string): Promise<void> {
+		await fs.mkdir(this._root, { recursive: true });
+		const file = this._logFile(sessionId);
+		if (!this._safeTails.has(sessionId)) {
+			await ensureTrailingNewline(file);
+			this._safeTails.add(sessionId);
+		}
+		await fs.appendFile(file, line, "utf8");
+	}
+
+	private async _replay(file: string): Promise<ChatMessage[] | undefined> {
+		let raw: string;
+		try {
+			raw = await fs.readFile(file, "utf8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+				return undefined;
+			}
+			throw error;
+		}
+		return replayEvents(raw);
+	}
+
+	private _requireSession(sessionId: string): ChatSessionMeta {
+		const meta = this._sessions.get(sessionId);
+		if (!meta) {
+			throw new Error(`Unknown chat session: ${sessionId}`);
+		}
+		return meta;
+	}
+
+	private _logFile(sessionId: string): string {
+		return path.join(this._root, `${sessionId}${LOG_SUFFIX}`);
+	}
+}
+
+function assertSessionId(sessionId: string): void {
+	if (!SESSION_ID.test(sessionId)) {
+		throw new Error(`Invalid chat session id: ${sessionId}`);
+	}
+}
+
+/** Cuts at 60 characters and marks truncation, so the list stays readable. */
+function titleFromParts(parts: ChatPart[]): string | undefined {
+	for (const part of parts) {
+		if (part.kind !== "text") {
+			continue;
+		}
+		for (const line of part.text.split("\n")) {
+			const text = line.trim();
+			if (text) {
+				return text.length > TITLE_MAX_CHARS ? `${text.slice(0, TITLE_MAX_CHARS)}…` : text;
+			}
+		}
+	}
+	return undefined;
+}
+
+function parseIndex(raw: string): ChatSessionMeta[] | undefined {
+	let value: unknown;
+	try {
+		value = JSON.parse(raw);
+	} catch {
+		return undefined;
+	}
+	if (!isRecord(value) || value.version !== INDEX_VERSION || !Array.isArray(value.sessions)) {
+		return undefined;
+	}
+	const sessions: ChatSessionMeta[] = [];
+	for (const entry of value.sessions) {
+		const meta = asSessionMeta(entry);
+		if (!meta) {
+			return undefined;
+		}
+		sessions.push(meta);
+	}
+	return sessions;
+}
+
+function asSessionMeta(value: unknown): ChatSessionMeta | undefined {
+	if (!isRecord(value) || typeof value.id !== "string" || !SESSION_ID.test(value.id)
+		|| typeof value.title !== "string" || typeof value.createdAt !== "number"
+		|| typeof value.updatedAt !== "number" || typeof value.messageCount !== "number") {
+		return undefined;
+	}
+	if (value.modelId !== undefined && typeof value.modelId !== "string") {
+		return undefined;
+	}
+	const meta: ChatSessionMeta = { id: value.id, title: value.title, createdAt: value.createdAt, updatedAt: value.updatedAt, messageCount: value.messageCount };
+	if (typeof value.modelId === "string") {
+		meta.modelId = value.modelId;
+	}
+	return meta;
+}
+
+function replayEvents(raw: string): ChatMessage[] {
+	const messages: ChatMessage[] = [];
+	const byId = new Map<string, ChatMessage>();
+	for (const line of raw.split("\n")) {
+		const event = asLogEvent(line);
+		if (!event) {
+			continue;
+		}
+		if (event.t === "message") {
+			messages.push(event.message);
+			byId.set(event.message.id, event.message);
+		} else if (event.t === "part") {
+			byId.get(event.messageId)?.parts.push(event.part);
+		} else if (event.t === "truncate") {
+			const index = messages.findIndex(message => message.id === event.messageId);
+			if (index >= 0) {
+				for (const removed of messages.splice(index)) {
+					byId.delete(removed.id);
+				}
+			}
+		} else {
+			const message = byId.get(event.messageId);
+			if (message) {
+				message.usage = event.usage;
+			}
+		}
+	}
+	return messages;
+}
+
+function asLogEvent(line: string): LogEvent | undefined {
+	const text = line.trim();
+	if (!text) {
+		return undefined;
+	}
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	if (value.t === "message" && isChatMessage(value.message)) {
+		return { t: "message", message: value.message };
+	}
+	if (value.t === "part" && typeof value.messageId === "string" && isChatPart(value.part)) {
+		return { t: "part", messageId: value.messageId, part: value.part };
+	}
+	if (value.t === "usage" && typeof value.messageId === "string" && isChatUsage(value.usage)) {
+		return { t: "usage", messageId: value.messageId, usage: value.usage };
+	}
+	if (value.t === "truncate" && typeof value.messageId === "string") {
+		return { t: "truncate", messageId: value.messageId };
+	}
+	return undefined;
+}
+
+function isChatMessage(value: unknown): value is ChatMessage {
+	if (!isRecord(value)) {
+		return false;
+	}
+	return typeof value.id === "string"
+		&& (value.role === "user" || value.role === "assistant")
+		&& typeof value.turn === "number"
+		&& typeof value.createdAt === "number"
+		&& Array.isArray(value.parts)
+		&& value.parts.every(isChatPart)
+		&& (value.modelId === undefined || typeof value.modelId === "string")
+		&& (value.usage === undefined || isChatUsage(value.usage));
+}
+
+function isChatPart(value: unknown): value is ChatPart {
+	if (!isRecord(value)) {
+		return false;
+	}
+	switch (value.kind) {
+		case "text":
+		case "thinking":
+			return typeof value.text === "string";
+		case "toolCall":
+			return typeof value.callId === "string" && typeof value.name === "string";
+		case "toolResult":
+			return typeof value.callId === "string" && typeof value.text === "string";
+		case "notice":
+			return (value.level === "info" || value.level === "warning" || value.level === "error") && typeof value.text === "string";
+		default:
+			return false;
+	}
+}
+
+function isChatUsage(value: unknown): value is ChatUsage {
+	if (!isRecord(value)) {
+		return false;
+	}
+	return ["promptTokens", "completionTokens", "totalTokens", "cachedTokens"]
+		.every(key => value[key] === undefined || typeof value[key] === "number");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+/** A crash can leave a partial last line; a newline turns it into a skippable line. */
+async function ensureTrailingNewline(file: string): Promise<void> {
+	const handle = await fs.open(file, "r").catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT") {
+			return undefined;
+		}
+		throw error;
+	});
+	if (!handle) {
+		return;
+	}
+	try {
+		const { size } = await handle.stat();
+		if (size === 0) {
+			return;
+		}
+		const tail = Buffer.alloc(1);
+		await handle.read(tail, 0, 1, size - 1);
+		if (tail[0] !== 0x0a) {
+			await fs.appendFile(file, "\n", "utf8");
+		}
+	} finally {
+		await handle.close();
+	}
+}

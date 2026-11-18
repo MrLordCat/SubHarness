@@ -65,6 +65,7 @@ import {
 	type ExperimentVariant,
 } from "./usage-experiment";
 import { registerCopilotPatchIntegration } from "./copilot-patch-runtime";
+import { registerChatWindow } from "./chat";
 
 interface ContextUsageDisplay {
 	summary: string;
@@ -714,6 +715,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	], history: conversationHistory });
 	context.subscriptions.push(compositeProvider);
 	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, compositeProvider));
+	registerChatWindow(context, { composite: compositeProvider, log: (event, data) => logService.log(event, data) });
 
 	let lastThroughput: string | undefined;
 	let lastPromptCache: string | undefined;

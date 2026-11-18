@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { registerLocalTool } from "../tools/local-tools";
 import { getCurrentWorkspaceScopeId, getCurrentWorkspaceScopeLabel } from "./scope";
 import type { SharedMemoryService } from "./shared-memory-service";
 import type { SharedMemoryKind } from "./types";
@@ -183,8 +184,8 @@ class DeleteMemoryTool implements vscode.LanguageModelTool<DeleteMemoryInput> {
 
 export function registerMemoryTools(context: vscode.ExtensionContext, memory: SharedMemoryService): void {
 	context.subscriptions.push(
-		vscode.lm.registerTool("llamacpp_store_memory", new StoreMemoryTool(memory)),
-		vscode.lm.registerTool("llamacpp_search_memory", new SearchMemoryTool(memory)),
-		vscode.lm.registerTool("llamacpp_delete_memory", new DeleteMemoryTool(memory))
+		registerLocalTool("llamacpp_store_memory", new StoreMemoryTool(memory)),
+		registerLocalTool("llamacpp_search_memory", new SearchMemoryTool(memory)),
+		registerLocalTool("llamacpp_delete_memory", new DeleteMemoryTool(memory))
 	);
 }

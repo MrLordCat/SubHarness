@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { registerLocalTool } from "./local-tools";
 
 /**
  * Wait for the next terminal command notification.
@@ -216,7 +217,7 @@ export class WaitForTerminalTool implements vscode.LanguageModelTool<WaitForTerm
 
 export function registerWaitForTerminalTool(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
-		vscode.lm.registerTool(WAIT_TERMINAL_TOOL_NAME, new WaitForTerminalTool())
+		registerLocalTool(WAIT_TERMINAL_TOOL_NAME, new WaitForTerminalTool())
 	);
 }
 

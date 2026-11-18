@@ -19,5 +19,12 @@
 		"noImplicitReturns": true,
 		"noFallthroughCasesInSwitch": true,
 		"noUnusedParameters": true
-	}
+	},
+	"exclude": [
+		"node_modules",
+		"out",
+		".vscode-test",
+		"subprojects",
+		"src/chat/webview"
+	]
 }

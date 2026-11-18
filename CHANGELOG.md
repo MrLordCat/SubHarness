@@ -1,5 +1,74 @@
 # Changelog
 
+## 1.21.7 (development patch) - 2026-11-18
+
+- The bridge chat collects the files the agent changes. A panel above the
+  input shows how many files changed, with added and removed lines; it lists
+  each file with a diff against its earlier content, and **Keep** or **Undo**
+  works for all files or one file. Changes add up across turns until you keep
+  or undo them, and they survive a window reload.
+- **Undo** restores the exact earlier bytes, deletes files the agent created
+  and brings back files it deleted. A file you edited by hand after the agent
+  is left as is, and the panel says so.
+- Editing an earlier message offers to undo the file changes made since that
+  message (checked by default). Changes you already kept stay.
+- The chat records changes with a separate git repository in the extension's
+  storage, never the project's own `.git`. It reuses the project's git objects,
+  honours `.gitignore`, skips `node_modules` and similar folders, and keeps
+  line endings exactly. A snapshot is taken only before the first tool in a
+  turn that may write, so turns that only read files cost nothing. Without
+  git the panel explains that change tracking is off.
+
+## 1.21.6 (development patch) - 2026-11-18
+
+- The bridge chat no longer asks before every command. VS Code shows its own
+  confirmation dialog whenever a tool is called outside Copilot Chat, so the
+  chat now runs its own tools and the bridge's tools directly. Every call runs
+  at once, except commands that match the new
+  `llamacpp.chat.dangerousCommands` list: those wait for **Allow** or **Deny**
+  in the chat, and **Stop** counts as Deny. The default list covers force
+  pushes, `git reset --hard`, discarding changes, branch and tag deletion,
+  recursive deletes, disk formatting, shutdown, piping a download into a
+  shell, publishing and similar commands. Files created or edited outside the
+  open workspace folders also ask first.
+- The chat has its own tools: `read_file`, `list_dir`, `file_search`,
+  `grep_search` (the ripgrep that ships with VS Code), `create_file`,
+  `replace_string_in_file`, `get_errors`, and `run_in_terminal`,
+  `read_terminal`, `send_to_terminal` and `kill_terminal` in visible **Chat**
+  terminals.
+- A **Tools** picker in the chat input turns tools on and off by group, with
+  search. The chat's tools and the bridge's tools start on. Tools from other
+  extensions, MCP servers and Copilot start off because VS Code may ask
+  before each of them runs.
+- An earlier message can be edited: **Edit** on a sent message replaces it,
+  drops the replies after it and sends the new text. Changed files are not
+  rolled back yet.
+- The model picker has a search field: words match the provider, the model
+  name and the id, and the arrow keys and Enter pick a model.
+- The input box no longer shows a scroll bar for a single line.
+
+## 1.21.5 (development patch) - 2026-11-18
+
+- First preview of the bridge's own chat, which works without GitHub Copilot
+  Chat. A **Chat** view sits at the top of the AI Agent Bridge sidebar and can be
+  moved like any view; **AI Agent Bridge: Open Chat in Editor** opens the same
+  chat in an editor tab. It talks to the bridge's models directly: Codex,
+  Claude, Coco, Cursor, DeepSeek and local models appear in a model picker
+  grouped by provider, so identical model names from two providers stay apart.
+- The agent loop runs tool calls until the model finishes and sends the whole
+  history with a stable conversation id on every request, so native Codex,
+  Claude and Coco sessions continue as they do in Copilot Chat. **Stop** ends
+  the turn; a tool that was asked for but never ran is reported to the model as
+  not executed. This preview offers the bridge's own `llamacpp_*` tools only;
+  the full VS Code tool set, the tool picker and confirmation of dangerous
+  commands come next.
+- Chats are saved per workspace as append-only files and reopen after a window
+  reload. A large tool result shows its first 4,000 characters; the rest loads
+  on request.
+- The message list renders only the visible messages. In a 5,000-message test
+  chat about 20 messages are in the page, a streamed text update takes about
+  1 ms, and typing stays responsive while the answer streams.
+
 ## 1.21.4 (development patch) - 2026-11-15
 
 - Fewer Snowflake sign-ins. With Snowflake 1.44.0 every Cortex CLI process
