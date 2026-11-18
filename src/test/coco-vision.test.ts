@@ -126,7 +126,7 @@ suite("Coco vision", () => {
 					const target = readTarget(saved);
 					handlers?.onUpdate?.({ sessionUpdate: "tool_call", toolCallId: "native-read", title: "read", kind: "read", status: "pending", rawInput: { file_path: target } });
 					permissions.push(await handlers?.onPermission?.({ toolCall: { title: `read: ${target}` },
-						options: [{ kind: "allow_once", optionId: "allow" }, { kind: "allow_always", optionId: "always_0" }] }));
+						options: [{ kind: "allow_once", optionId: "allow" }, { kind: "allow_always", optionId: "always_0" }, { kind: "reject_once", optionId: "deny" }] }));
 					handlers?.onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "The capture shows a dark toolbar." } });
 					return { stopReason: "end_turn" };
 				},
@@ -156,10 +156,11 @@ suite("Coco vision", () => {
 		assert.match(run.text, /dark toolbar/);
 	});
 
-	test("the built-in read stays blocked for any file the bridge did not save", async () => {
+	test("a built-in read of any file the bridge did not save is refused once and the turn continues", async () => {
 		const run = await sameTurnRead(saved => path.join(path.dirname(saved), "..", "sessions.json"));
-		assert.match(String(run.outcome?.message), /internal action \(read/);
-		assert.ok(run.permissions.every(permission => permission === undefined));
+		assert.strictEqual(run.outcome, undefined, "the refusal must not stop the turn");
+		assert.deepStrictEqual(run.permissions, ["deny"], "only the one-time reject option");
+		assert.match(run.text, /dark toolbar/);
 	});
 
 	test("advertises negotiated vision and clears it when the Snowflake source changes", async () => {

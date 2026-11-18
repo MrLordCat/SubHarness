@@ -21,7 +21,12 @@ import { CocoHistoryArchive } from "./history-transfer";
 import { CocoTurnMetrics, type CocoLiveTurn, type CocoRecordedUsage } from "./turn-metrics";
 import type { ProviderRuntimeMetrics } from "../provider-metrics";
 
-const DISCOVERY_RETRY_MS = 60_000;
+/**
+ * Every background check starts its own CLI process, and every process repeats the CLI's sign-in work:
+ * Cortex 1.44 opens a browser OAuth flow for each one. Checks stay rare, and native sessions refresh the catalog.
+ */
+const DISCOVERY_RETRY_MS = 5 * 60_000;
+const DISCOVERY_CONNECTED_TTL_MS = 6 * 60 * 60_000;
 /** A native turn that ends after reasoning alone is asked to continue at most this often. */
 const COCO_EMPTY_TURN_NUDGES = 2;
 const COCO_EMPTY_TURN_NUDGE = "Your previous reply ended after reasoning, without visible text or a tool call, so VS Code Chat received an empty response. "
@@ -253,7 +258,8 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 				turn.bridge.dispose();
 			}
 		}
-		if (!this.discovery) { this.lastDiscoveryAt = 0; }
+		// Context limits change often; only a new CLI or connection needs a new process to list models.
+		if (changed && !this.discovery) { this.lastDiscoveryAt = 0; }
 		this.releaseStaleCompaction();
 		this.changes.fire();
 	}
@@ -372,6 +378,11 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 					this.diagnostic("coco.tool.image_read", { requestId: metrics.requestId });
 					return option;
 				}
+				const denied = bridge.denyRead(request);
+				if (denied) {
+					this.diagnostic("coco.tool.read_denied", { requestId: metrics.requestId });
+					return denied;
+				}
 				bridge.blockInternalAction(request.toolCall?.title ?? "permission request");
 				return undefined;
 			},
@@ -403,6 +414,9 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 				const thinking = parseCocoThinkingConfiguration(session) ?? this.thinking;
 				sessionReady = true;
 				if (generation === this.discoveryGeneration) {
+					// A ready native session is a fresh status check; no separate CLI process is needed.
+					this.lastDiscoveryAt = Date.now();
+					this.catalogSource = JSON.stringify([this.enabled, executable, connection]);
 					if (discovered.length) { this.updateModels(discovered); }
 					this.updateThinking(thinking);
 					this.updateImageInput(imageInput);
@@ -535,7 +549,7 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 		if (this.discovery) {
 			return this.discovery;
 		}
-		const cacheMs = this.status.state === "connected" ? 10 * DISCOVERY_RETRY_MS : DISCOVERY_RETRY_MS;
+		const cacheMs = this.status.state === "connected" ? DISCOVERY_CONNECTED_TTL_MS : DISCOVERY_RETRY_MS;
 		if (Date.now() - this.lastDiscoveryAt < cacheMs) {
 			return Promise.resolve();
 		}

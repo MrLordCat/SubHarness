@@ -32,6 +32,8 @@ export interface CocoAcpHandlers {
 export interface CocoSessionClient {
 	readonly transport?: "acp" | "sdk";
 	readonly lastPromptSent?: boolean;
+	/** True once the CLI process exited or the client was disposed; such a client never answers again. */
+	readonly isClosed?: boolean;
 	initialize(): Promise<CocoInitializeResult>;
 	newSession(cwd: string, tools?: JsonObject[]): Promise<JsonObject>;
 	loadSession(sessionId: string, cwd: string, tools?: JsonObject[]): Promise<JsonObject>;
@@ -132,6 +134,7 @@ export class CocoAcpClient {
 		this.send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
 	}
 	async waitForExit(): Promise<void> { await this.exit; }
+	get isClosed(): boolean { return this.closed; }
 
 	dispose(): void {
 		if (this.closed) {

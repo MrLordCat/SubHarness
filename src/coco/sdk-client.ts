@@ -55,6 +55,7 @@ export class CocoSdkClient implements CocoSessionClient {
 	private failure?: Error;
 	private exit = Promise.resolve();
 	lastPromptSent = false;
+	get isClosed(): boolean { return this.closed; }
 	constructor(private readonly executable: string, private readonly cwd: string, private readonly connection: string | undefined,
 		private readonly model: string | undefined, private readonly handlers: CocoAcpHandlers = {}, private readonly dependencies: CocoSdkDependencies = {},
 		private readonly environment: Readonly<Record<string, string>> = {}) {}

@@ -133,8 +133,11 @@ file in the tool result; Coco opens it with `read` and sees it in the same turn.
 That `read` is the single built-in action the bridge permits, only for files it
 saved during the current turn, and only with the one-time `allow_once` option.
 The `tool_call` event carries the path in `rawInput.file_path`; the permission
-request carries it in its `read: <path>` title. Any other internal action still
-stops the turn.
+request carries it in its `read: <path>` title. A `read` of any other file that
+asks for permission is refused with the one-time `reject_once` option: the CLI
+tells Coco the read was denied and the turn continues. The CLI reads files
+inside the workspace without asking; ending the turn afterwards would not undo
+that read, so it is not stopped. Any other internal action still stops the turn.
 
 If the image could not be saved or Coco does not read it, the bridge attaches
 the bytes to a follow-up prompt
@@ -184,6 +187,12 @@ Quick Access has a **Coco** section with live ACP connection status, the
 discovered model count, an on/off source toggle, Snowflake connection selection,
 catalog refresh, and links to the native thinking picker, Coco settings, and the
 Snowflake Coco panel. Status checks open an ACP session without running inference.
+Each check starts its own Cortex CLI process, and with Snowflake 1.44.0 each
+process may open a browser sign-in (a CLI token-cache issue). Background
+checks therefore run at most every six hours while connected and five minutes
+after a failure; a ready native session counts as a check, and context-limit
+changes do not reset it. An exited CLI is replaced on the next turn and its
+native session reloads.
 Background discovery reuses fresh status results. Since 1.18.10, manual
 **Connection Status** and **Refresh Models** force one shared check, preserving
 the catalog and thinking levels while it runs. Selecting the existing

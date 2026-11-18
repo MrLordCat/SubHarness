@@ -27,14 +27,15 @@ async function fixture() {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "coco-continuity-"));
 	const data = new Map<string, unknown>();
 	const state = { get: (key: string, fallback?: unknown) => data.get(key) ?? fallback, update: async (key: string, value: unknown) => { data.set(key, value); }, keys: () => [...data.keys()] } as vscode.Memento;
-	let created = 0, disposed = 0, loads = 0, sessions = 0, failLoad = false, importedToolBlocked = false;
+	let created = 0, disposed = 0, loads = 0, sessions = 0, failLoad = false, importedToolBlocked = false, exited = false;
 	const prompts: string[] = [], updates: CocoLiveTurn[] = [], usage: CocoRecordedUsage[] = [];
 	const providers: CocoChatModelProvider[] = [];
 	const make = () => {
 		const provider = new CocoChatModelProvider({ isEnabled: () => true, resolveCli: () => "mock", resolveConnection: () => "test-connection", state, storageRoot: root,
 			createClient: (_exe, _cwd, _connection, _model, handlers) => {
-				created++;
+				created++; exited = false;
 				return {
+					get isClosed() { return exited; },
 					initialize: async () => ({ agentCapabilities: { loadSession: true, promptCapabilities: { image: true } } }),
 					newSession: async () => { sessions++; return { sessionId: `session-${sessions}` }; },
 					loadSession: async () => { loads++; if (failLoad) { throw new Error("Cannot load session"); } handlers?.onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "OLD REPLAY MUST STAY HIDDEN" } }); return {}; },
@@ -55,7 +56,7 @@ async function fixture() {
 		const parts: vscode.LanguageModelResponsePart[] = [];
 		await provider.provideLanguageModelChatResponse(model, messages, { ...options(id), tools }, { report: p => parts.push(p) }, none); return parts;
 	};
-	return { root, state, data, prompts, updates, usage, make, send, stats: () => ({ created, disposed, loads, sessions, importedToolBlocked }), failLoad: () => { failLoad = true; }, allowLoad: () => { failLoad = false; }, dispose: async () => { providers.forEach(p => p.dispose()); await fs.rm(root, { recursive: true, force: true }); } };
+	return { root, state, data, prompts, updates, usage, make, send, stats: () => ({ created, disposed, loads, sessions, importedToolBlocked }), exit: () => { exited = true; }, failLoad: () => { failLoad = true; }, allowLoad: () => { failLoad = false; }, dispose: async () => { providers.forEach(p => p.dispose()); await fs.rm(root, { recursive: true, force: true }); } };
 }
 
 suite("Coco conversation continuity", () => {
@@ -140,6 +141,16 @@ suite("Coco conversation continuity", () => {
 			assert.strictEqual(f.updates.at(-1)?.turn.inputMode, "user-turn");
 		} finally { await f.dispose(); }
 	});
+	test("a CLI that exited between turns is replaced and its native session reloads", async () => {
+		const f = await fixture();
+		try {
+			const p = f.make(); await f.send(p, [user("BEFORE_EXIT")]);
+			f.exit();
+			const parts = await f.send(p, [user("BEFORE_EXIT"), assistant("Visible answer"), user("AFTER_EXIT")]);
+			assert.strictEqual(f.stats().created, 2); assert.strictEqual(f.stats().loads, 1); assert.strictEqual(f.stats().sessions, 1);
+			assert.strictEqual(text(parts), "Visible answer"); assert.ok(!f.prompts[1].includes("BEFORE_EXIT"));
+		} finally { await f.dispose(); }
+	});
 	test("a failed native restore preserves its binding without cold replay", async () => {
 		const f = await fixture();
 		try {
@@ -147,7 +158,9 @@ suite("Coco conversation continuity", () => {
 			const restored = f.make(), messages = [user("Original requirement"), assistant("Answer"), user("Next")];
 			await assert.rejects(f.send(restored, messages), /binding was preserved/);
 			assert.strictEqual(f.prompts.length, 1); assert.strictEqual(f.stats().sessions, 1);
+			const before = f.stats().created;
 			f.allowLoad(); await f.send(restored, messages);
+			assert.strictEqual(f.stats().created, before + 1, "the retry starts a new CLI process");
 			assert.ok(!f.prompts[1].includes("Original requirement")); assert.match(f.prompts[1], /Next/);
 		} finally { await f.dispose(); }
 	});

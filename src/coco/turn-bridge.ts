@@ -65,6 +65,7 @@ export interface CocoPreservedResult { output: string; imageFiles?: readonly { f
  * The bridge allows it, read-only and once per call, for image files it saved itself; every other internal action stays blocked.
  */
 const COCO_READ_TOOL = "read";
+const isCocoReadTitle = (title: unknown) => title === COCO_READ_TOOL || typeof title === "string" && title.startsWith(`${COCO_READ_TOOL}: `);
 const imageFileKey = (file: string) => { const resolved = path.resolve(file); return process.platform === "win32" ? resolved.toLowerCase() : resolved; };
 
 /**
@@ -150,8 +151,7 @@ export class CocoTurnBridge implements vscode.Disposable {
 	}
 	/** A built-in `read` of an image file the bridge saved in this turn: Coco sees the image in the same turn. */
 	private acceptImageRead(update: JsonObject): boolean {
-		const title = update.title;
-		if (title !== COCO_READ_TOOL && !(typeof title === "string" && title.startsWith(`${COCO_READ_TOOL}: `))) { return false; }
+		if (!isCocoReadTitle(update.title)) { return false; }
 		const input = update.rawInput as JsonObject | undefined;
 		const file = typeof input?.file_path === "string" ? input.file_path : typeof input?.path === "string" ? input.path : undefined;
 		const saved = file ? this.imageFiles.get(imageFileKey(file)) : undefined;
@@ -176,6 +176,15 @@ export class CocoTurnBridge implements vscode.Disposable {
 		const option = request.options?.find(candidate => candidate.kind === "allow_once")?.optionId;
 		if (option) { this.pendingImageReads.splice(index, 1); }
 		return option;
+	}
+	/**
+	 * Any other built-in `read` that asks for permission is refused with the CLI's one-time `reject_once` option.
+	 * The CLI reports the refusal to Coco and the turn continues; stopping it would discard the turn's work.
+	 */
+	denyRead(request: CocoPermissionRequest): string | undefined {
+		const title = request.toolCall?.title;
+		if (this.terminal || typeof title !== "string" || !title.startsWith(`${COCO_READ_TOOL}: `)) { return undefined; }
+		return request.options?.find(candidate => candidate.kind === "reject_once")?.optionId;
 	}
 	rememberResults(messages: readonly vscode.LanguageModelChatRequestMessage[]): void {
 		for (const message of messages) { for (const part of message.content) {
@@ -228,7 +237,10 @@ export class CocoTurnBridge implements vscode.Disposable {
 		}
 		if (update.sessionUpdate === "tool_call") {
 			// Client tools emit an ACP event too; Chat renders their delegated call, once.
-			if (typeof update.title !== "string" || (!this.tools.has(update.title) && !COCO_CATALOG_ACTIONS.has(update.title) && !this.acceptImageRead(update))) {
+			// A built-in read is decided by its permission request (allowed for saved images, refused otherwise).
+			// Reads the CLI runs without asking cannot be stopped by ending the turn: the file is read by then.
+			if (typeof update.title !== "string" || (!this.tools.has(update.title) && !COCO_CATALOG_ACTIONS.has(update.title)
+				&& !this.acceptImageRead(update) && !isCocoReadTitle(update.title))) {
 				this.blockInternalAction(typeof update.title === "string" ? update.title : "unknown tool");
 			}
 			return;

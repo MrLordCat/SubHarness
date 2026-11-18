@@ -80,6 +80,11 @@ export class CocoSessionStore {
 		const key = persistent ? digest([identity, conversation]) : randomUUID();
 		let session = this.live.get(key);
 		if (session?.busy) { throw new Error("This Coco conversation still has an active request. Finish or cancel it before starting another."); }
+		// A CLI that exited (a sign-in timeout, a crash) never answers again; its saved binding reloads in a new process.
+		if (session?.client.isClosed) {
+			this.drop(key, false);
+			session = undefined;
+		}
 		if (callbackTools && session?.client.transport === "sdk") {
 			const client = session.client;
 			this.drop(key, false);
@@ -194,6 +199,8 @@ export class CocoSessionStore {
 			else if (session.promptPrepared) { this.saved.delete(session.key); }
 			if (session.promptPrepared) { void this.flush(); }
 			if (session.promptSent && session.client.lastPromptSent === false) { this.drop(session.key,false); return; }
+			// A session that never became ready may hold a CLI that already exited; the next turn starts a new process.
+			if (!session.ready) { this.drop(session.key, false); return; }
 		}
 		if (!session.persistent) { this.drop(session.key, true); return; }
 		session.idle = setTimeout(() => this.drop(session.key, false), 30 * 60_000); session.idle.unref?.();

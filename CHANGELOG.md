@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.21.4 (development patch) - 2026-11-15
+
+- Fewer Snowflake sign-ins. With Snowflake 1.44.0 every Cortex CLI process
+  opened a browser OAuth flow (Edge completes it on its own, so a tab flashes):
+  38 flows in three days, each about ten seconds after a CLI start. The cause
+  is in the CLI: every start moves its token cache into Windows Credential
+  Manager and deletes the file, a later token exceeds the 2,560-character
+  limit, the CLI falls back to the file and no longer reads the moved tokens.
+  The bridge cannot change that, but it no longer starts extra processes: the
+  background status check now runs at most every six hours while connected
+  (five minutes after a failure), a ready native session counts as a check, and
+  context-limit changes no longer reset it. Manual **Connection Status** and
+  **Refresh Models** still check at once.
+- A built-in `read` of a file the bridge did not save is refused with the
+  CLI's one-time `reject_once` option instead of stopping the turn. Coco is
+  told the read was denied and continues; before, every such read stopped the
+  turn and the next request replayed the whole history (about 256k tokens) in
+  a new session. The policy points Coco to `view_image` for other images.
+- A Coco CLI that exited (for example after a sign-in timeout) is no longer
+  kept as a live session: the next turn starts a new process and reloads the
+  saved native session instead of failing with "Coco session closed" until a
+  window reload.
+
 ## 1.21.3 (development patch) - 2026-11-14
 
 - Coco now sees a tool image in the same turn, like the other providers. The

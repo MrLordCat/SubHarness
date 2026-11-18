@@ -40,7 +40,34 @@ suite("Snowflake Coco provider", () => {
 			assert.strictEqual(probes, 1, "a fresh catalog must be reused");
 			await provider.refreshStatus(true);
 			assert.strictEqual(probes, 2, "manual recheck must bypass the catalog TTL");
+			// Context-limit changes re-advertise models; they must not start another CLI process.
+			provider.refreshLanguageModelChatInformation();
+			await provider.refreshStatus();
+			assert.strictEqual(probes, 2, "an unchanged CLI and connection keep the fresh catalog");
 		} finally { subscription.dispose(); provider.dispose(); }
+	});
+
+	test("a ready native session counts as a status check", async () => {
+		let probes = 0, chats = 0;
+		const provider = new CocoChatModelProvider({
+			isEnabled: () => true, resolveCli: () => "mock-cli",
+			createClient: (_exe, _cwd, _connection, model, handlers) => {
+				if (!model) { probes++; return fakeClient(async () => sessionResult()); }
+				chats++;
+				return { initialize: async () => undefined, newSession: async () => sessionResult("chat"),
+					prompt: async () => { handlers?.onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hi" } }); return { stopReason: "end_turn" }; },
+					cancel: () => undefined, dispose: () => undefined } as unknown as CocoAcpClient;
+			},
+		});
+		const token = new vscode.CancellationTokenSource();
+		try {
+			await provider.provideLanguageModelChatResponse(mapCocoModel({ id: "auto", name: "Auto" }), [vscode.LanguageModelChatMessage.User("Hello")],
+				{ toolMode: vscode.LanguageModelChatToolMode.Auto }, { report: () => undefined }, token.token);
+			await provider.refreshStatus();
+			assert.strictEqual(chats, 1);
+			assert.strictEqual(probes, 0, "no separate CLI process after a ready session");
+			assert.strictEqual(provider.providerStatus.state, "connected");
+		} finally { token.dispose(); provider.dispose(); }
 	});
 
 	test("a manual connection check retries a cached startup failure immediately", async () => {
