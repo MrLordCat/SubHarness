@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.21.25 (development patch) - 2026-11-19
+
+- Added: the bridge chat's model picker shows each provider's limits or
+  balance and fetches them again when it opens or a model is picked. A provider
+  with a used-up limit is dimmed with its reset time, and a warning above the
+  input says so while one of its models is selected.
+
 ## 1.21.24 (development patch) - 2026-11-19
 
 - Added: you can write to the bridge chat while the agent works. Send queues

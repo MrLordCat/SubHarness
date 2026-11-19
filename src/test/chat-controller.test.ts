@@ -990,6 +990,28 @@ suite("chat controller", () => {
 		}
 	});
 
+	test("refreshes provider limits after a model selection, at most once per interval", async () => {
+		const quota = fakeQuota([{ provider: "Codex", windows: [{ label: "5h", percent: 42 }] }]);
+		try {
+			const current = createHarness(root, new FakeBackend(), undefined, undefined, { quota: quota.source });
+			harness = current;
+			current.webview.receive({ type: "ready" });
+			await waitFor(() => current.webview.ofType("init").length === 1, "init");
+			assert.strictEqual(quota.refreshes, 0);
+
+			current.webview.receive({ type: "selectModel", modelId: "claude::smart" });
+			await waitFor(() => quota.refreshes === 1, "the refresh after the first selection");
+			await waitFor(() => current.webview.ofType("models").at(-1)?.selectedModelId === "claude::smart", "the first selection");
+
+			current.webview.receive({ type: "selectModel", modelId: "codex::fast" });
+			await waitFor(() => current.webview.ofType("models").at(-1)?.selectedModelId === "codex::fast", "the second selection");
+			await new Promise<void>(resolve => setTimeout(resolve, 50));
+			assert.strictEqual(quota.refreshes, 1);
+		} finally {
+			quota.dispose();
+		}
+	});
+
 	test("newChat creates another session and sends init", async () => {
 		const current = createHarness(root, new FakeBackend());
 		harness = current;

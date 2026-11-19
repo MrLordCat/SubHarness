@@ -1041,6 +1041,12 @@ body {
 	padding: 6px 10px 10px;
 }
 
+.quota-warning-line {
+	padding: 2px 2px 0;
+	color: var(--vscode-errorForeground);
+	font-size: 12px;
+}
+
 .composer-box {
 	display: flex;
 	flex-direction: column;
@@ -1510,11 +1516,45 @@ body {
 }
 
 .picker-group-label {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	min-width: 0;
 	padding: 2px 4px;
 	color: var(--vscode-descriptionForeground);
 	font-size: 11px;
 	font-weight: 600;
 	text-transform: uppercase;
+}
+
+.picker-group-quota {
+	margin-left: auto;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	color: var(--vscode-descriptionForeground);
+	font-size: 10px;
+	font-weight: 400;
+	text-transform: none;
+}
+
+.picker-group-quota.quota-warning {
+	color: var(--vscode-editorWarning-foreground);
+}
+
+.picker-group-quota.quota-error {
+	color: var(--vscode-errorForeground);
+}
+
+.picker-group-note {
+	padding: 0 4px 2px;
+	color: var(--vscode-errorForeground);
+	font-size: 11px;
+}
+
+.picker-group-exhausted .picker-option {
+	opacity: 0.6;
 }
 
 .picker-option {

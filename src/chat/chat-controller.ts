@@ -1352,6 +1352,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		await this._deps.state.update(LAST_MODEL_KEY, modelId);
 		this._refreshSelection();
 		this._broadcastModels();
+		void this._refreshQuota();
 	}
 
 	/** The remembered level when the model still offers it; otherwise the provider's default applies. */

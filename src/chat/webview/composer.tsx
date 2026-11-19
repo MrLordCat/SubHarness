@@ -2,7 +2,7 @@ import type { ComponentChildren, TargetedDragEvent } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { attachmentLabel, attachmentTitle } from "../shared/attachment-label";
 import type { ChatAttachment, ChatModelGroup, ChatProviderQuota, ChatRunState, ChatToolGroup } from "../shared/protocol";
-import { parseUriList, type CacheHitLabel } from "./format";
+import { formatQuotaExhausted, parseUriList, type CacheHitLabel } from "./format";
 import { ModelPicker } from "./model-picker";
 import { QuotaIndicator } from "./quota-indicator";
 import { ThinkingPicker } from "./thinking-picker";
@@ -144,6 +144,8 @@ export function Composer({
 	const canSend = text.trim().length > 0 && (!run.running || !onCancel);
 	const selectedGroup = models.find(group => group.models.some(model => model.id === selectedModelId));
 	const selectedModel = selectedGroup?.models.find(model => model.id === selectedModelId);
+	const selectedQuota = selectedGroup === undefined ? undefined : quota.find(entry => entry.provider === selectedGroup.provider);
+	const quotaWarning = onCancel === undefined && selectedQuota ? formatQuotaExhausted(selectedQuota, Date.now()) : undefined;
 	const submit = () => {
 		if (!canSend) {
 			return;
@@ -229,6 +231,7 @@ export function Composer({
 			onDragLeave={onDragLeave}
 			onDrop={onDrop}
 		>
+			{quotaWarning ? <div class="quota-warning-line" role="status">{quotaWarning} Pick another model or wait.</div> : null}
 			<div class="composer-box">
 				{attachments.length > 0 ? (
 					<div class="attachment-chips">
@@ -278,7 +281,7 @@ export function Composer({
 								<path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
 							</svg>
 						</button>
-						<ModelPicker models={models} selectedModelId={selectedModelId} onSelectModel={onSelectModel} />
+						<ModelPicker models={models} selectedModelId={selectedModelId} quota={quota} onRefreshQuota={onRefreshQuota} onSelectModel={onSelectModel} />
 						{selectedModel?.thinking
 							? <ThinkingPicker thinking={selectedModel.thinking} selected={selectedThinking} onSelect={onSelectThinking} />
 							: null}

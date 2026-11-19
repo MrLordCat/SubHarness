@@ -1,6 +1,6 @@
 import * as assert from "node:assert";
-import type { ChatMessage, ChatUsageTotals } from "../chat/shared/protocol";
-import { describeToolCall, formatAge, formatCacheHit, formatReset, modelCacheStats, parseUriList, sessionGroup } from "../chat/webview/format";
+import type { ChatMessage, ChatProviderQuota, ChatUsageTotals } from "../chat/shared/protocol";
+import { describeToolCall, exhaustedWindow, formatAge, formatCacheHit, formatQuotaExhausted, formatQuotaSummary, formatReset, modelCacheStats, parseUriList, sessionGroup } from "../chat/webview/format";
 
 function time(date: Date): string {
 	return date.toLocaleString([], { hour: "2-digit", minute: "2-digit" });
@@ -37,6 +37,41 @@ suite("Chat webview formatting", () => {
 		const now = new Date(2026, 10, 18, 9, 0).getTime();
 		const past = new Date(2026, 10, 18, 8, 0);
 		assert.strictEqual(formatReset(past.getTime(), now), `${time(past)} (now)`);
+	});
+});
+
+suite("Chat webview quota formatting", () => {
+	function quota(provider: string, windows: ChatProviderQuota["windows"], balance?: string): ChatProviderQuota {
+		return { provider, windows, ...(balance === undefined ? {} : { balance }) };
+	}
+
+	test("summarizes every window in order and appends the balance", () => {
+		const windows = [{ label: "5h", percent: 42 }, { label: "Week", percent: 17.6 }];
+		assert.strictEqual(formatQuotaSummary(quota("Codex", windows)), "5h 42% · Week 18%");
+		assert.strictEqual(formatQuotaSummary(quota("DeepSeek", [], "$12.30")), "$12.30");
+		assert.strictEqual(formatQuotaSummary(quota("Codex", windows, "$3.10")), "5h 42% · Week 18% · $3.10");
+		assert.strictEqual(formatQuotaSummary(quota("Local", [])), "");
+	});
+
+	test("picks the exhausted window that resets last", () => {
+		assert.strictEqual(exhaustedWindow(quota("Codex", [{ label: "5h", percent: 99 }])), undefined);
+		const fiveHour = { label: "5h", percent: 100, resetsAt: 1_000 };
+		assert.deepStrictEqual(exhaustedWindow(quota("Codex", [fiveHour, { label: "Week", percent: 40 }])), fiveHour);
+		const week = { label: "Week", percent: 100, resetsAt: 2_000 };
+		assert.deepStrictEqual(exhaustedWindow(quota("Codex", [{ label: "5h", percent: 100, resetsAt: 1_000 }, week])), week);
+		assert.deepStrictEqual(exhaustedWindow(quota("Codex", [{ label: "5h", percent: 100, resetsAt: 3_000 }, week]), 2_500), { label: "5h", percent: 100, resetsAt: 3_000 });
+		assert.strictEqual(exhaustedWindow(quota("Codex", [week]), 2_000), undefined);
+	});
+
+	test("describes the exhausted limit with and without a reset", () => {
+		const now = new Date(2026, 10, 18, 9, 0).getTime();
+		const resetsAt = new Date(2026, 10, 18, 14, 30).getTime();
+		const text = formatQuotaExhausted(quota("Codex", [{ label: "Week", percent: 100, resetsAt }]), now);
+		assert.strictEqual(text, `Codex: the Week limit is used up; it resets ${formatReset(resetsAt, now)}.`);
+		assert.ok(text?.includes("the Week limit is used up"));
+		assert.ok(text?.endsWith(`it resets ${formatReset(resetsAt, now)}.`));
+		assert.strictEqual(formatQuotaExhausted(quota("Codex", [{ label: "5h", percent: 100 }]), now), "Codex: the 5h limit is used up.");
+		assert.strictEqual(formatQuotaExhausted(quota("Codex", [{ label: "5h", percent: 20 }]), now), undefined);
 	});
 });
 

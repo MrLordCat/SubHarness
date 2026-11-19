@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
-import type { ChatModelEntry, ChatModelGroup } from "../shared/protocol";
+import type { ChatModelEntry, ChatModelGroup, ChatProviderQuota } from "../shared/protocol";
 import { OPEN_MODEL_PICKER_EVENT } from "./events";
+import { exhaustedWindow, formatQuotaExhausted, formatQuotaSummary, formatQuotaTitle, quotaSeverity } from "./format";
 import { matchesQuery, popupPlacement, useDismiss, useKeepInView } from "./popup";
 
 interface ModelPickerProps {
 	models: ChatModelGroup[];
 	selectedModelId: string | undefined;
+	quota?: ChatProviderQuota[];
+	onRefreshQuota?: () => void;
 	onSelectModel: (modelId: string) => void;
 }
 
@@ -19,7 +22,7 @@ interface VisibleGroup {
 	models: VisibleModel[];
 }
 
-export function ModelPicker({ models, selectedModelId, onSelectModel }: ModelPickerProps) {
+export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, onSelectModel }: ModelPickerProps) {
 	const instanceId = useId();
 	const [open, setOpen] = useState(false);
 	const [placement, setPlacement] = useState<"above" | "below">("above");
@@ -91,13 +94,14 @@ export function ModelPicker({ models, selectedModelId, onSelectModel }: ModelPic
 		setHighlight(selectedIndex >= 0 ? selectedIndex : 0);
 		setPlacement(popupPlacement(triggerRef.current));
 		setOpen(true);
+		onRefreshQuota?.();
 	};
 
 	useEffect(() => {
 		const openFromNotice = () => openPopup();
 		window.addEventListener(OPEN_MODEL_PICKER_EVENT, openFromNotice);
 		return () => window.removeEventListener(OPEN_MODEL_PICKER_EVENT, openFromNotice);
-	}, [models, selectedModelId]);
+	}, [models, selectedModelId, onRefreshQuota]);
 
 	const choose = (modelId: string) => {
 		onSelectModel(modelId);
@@ -181,24 +185,42 @@ export function ModelPicker({ models, selectedModelId, onSelectModel }: ModelPic
 						onKeyDown={onSearchKeyDown}
 					/>
 					<div id={listId} class="picker-list" role="listbox" aria-label="Models">
-						{groups.map(group => (
-							<div class="picker-group" role="group" aria-label={group.provider} key={group.provider}>
-								<div class="picker-group-label">{group.provider}</div>
-								{group.models.map(entry => (
-									<div
-										key={entry.model.id}
-										id={optionId(entry.index)}
-										class={`picker-option${entry.index === highlight ? " picker-option-active" : ""}`}
-										role="option"
-										aria-selected={entry.model.id === selectedModelId}
-										onClick={() => choose(entry.model.id)}
-									>
-										<span class="picker-option-name">{entry.model.name}</span>
-										<span class="picker-option-check" aria-hidden="true">{entry.model.id === selectedModelId ? "✓" : ""}</span>
+						{groups.map(group => {
+							const quotaEntry = quota?.find(candidate => candidate.provider === group.provider);
+							const summary = quotaEntry ? formatQuotaSummary(quotaEntry) : "";
+							const now = Date.now();
+							const exhausted = quotaEntry ? exhaustedWindow(quotaEntry, now) : undefined;
+							const note = quotaEntry && exhausted ? formatQuotaExhausted(quotaEntry, now) : undefined;
+							return (
+								<div
+									class={`picker-group${exhausted ? " picker-group-exhausted" : ""}`}
+									role="group"
+									aria-label={group.provider}
+									key={group.provider}
+								>
+									<div class="picker-group-label">
+										<span class="picker-group-name">{group.provider}</span>
+										{quotaEntry && summary
+											? <span class={`picker-group-quota quota-${quotaSeverity(quotaEntry)}`} title={formatQuotaTitle(quotaEntry)}>{summary}</span>
+											: null}
 									</div>
-								))}
-							</div>
-						))}
+									{note ? <div class="picker-group-note">{note}</div> : null}
+									{group.models.map(entry => (
+										<div
+											key={entry.model.id}
+											id={optionId(entry.index)}
+											class={`picker-option${entry.index === highlight ? " picker-option-active" : ""}`}
+											role="option"
+											aria-selected={entry.model.id === selectedModelId}
+											onClick={() => choose(entry.model.id)}
+										>
+											<span class="picker-option-name">{entry.model.name}</span>
+											<span class="picker-option-check" aria-hidden="true">{entry.model.id === selectedModelId ? "✓" : ""}</span>
+										</div>
+									))}
+								</div>
+							);
+						})}
 						{flat.length === 0 ? <div class="picker-empty">No models match</div> : null}
 					</div>
 				</div>

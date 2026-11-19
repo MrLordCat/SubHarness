@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatModelGroup, ChatProviderQuota, ChatUsage } from "../shared/protocol";
+import type { ChatMessage, ChatModelGroup, ChatProviderQuota, ChatQuotaWindow, ChatUsage } from "../shared/protocol";
 
 /** 312000 → "312k", 1_200_000 → "1.2M"; used wherever token counts are shown. */
 export function formatTokens(value: number): string {
@@ -313,6 +313,42 @@ export function formatQuotaTitle(quota: ChatProviderQuota): string {
 		parts.push(quota.balance.trim());
 	}
 	return parts.length > 0 ? `${quota.provider} limits: ${parts.join(" · ")}` : `${quota.provider} limits`;
+}
+
+/** Every window with its used share, then the balance: "5h 42% · Week 18% · $12.30". */
+export function formatQuotaSummary(quota: ChatProviderQuota): string {
+	const parts = quota.windows.map(window => `${window.label} ${Math.round(window.percent)}%`);
+	if (quota.balance?.trim()) {
+		parts.push(quota.balance.trim());
+	}
+	return parts.join(" · ");
+}
+
+/** The used-up window that resets last, so a weekly limit outranks the 5h one; with now, windows already reset are skipped. */
+export function exhaustedWindow(quota: ChatProviderQuota, now?: number): ChatQuotaWindow | undefined {
+	let found: ChatQuotaWindow | undefined;
+	for (const window of quota.windows) {
+		if (!(window.percent >= 100)) {
+			continue;
+		}
+		if (now !== undefined && window.resetsAt !== undefined && window.resetsAt <= now) {
+			continue;
+		}
+		if (found === undefined || (window.resetsAt ?? Number.NEGATIVE_INFINITY) > (found.resetsAt ?? Number.NEGATIVE_INFINITY)) {
+			found = window;
+		}
+	}
+	return found;
+}
+
+/** "Codex: the Week limit is used up; it resets 14:30 (in 2 h 5 min)." for the window exhaustedWindow picks. */
+export function formatQuotaExhausted(quota: ChatProviderQuota, now: number): string | undefined {
+	const window = exhaustedWindow(quota, now);
+	if (!window) {
+		return undefined;
+	}
+	const reset = window.resetsAt === undefined ? "" : `; it resets ${formatReset(window.resetsAt, now)}`;
+	return `${quota.provider}: the ${window.label} limit is used up${reset}.`;
 }
 
 export type SessionGroup = "Today" | "Yesterday" | "Last 7 days" | "Older";

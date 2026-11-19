@@ -15,7 +15,11 @@ tab show the same chat.
   input, and the agent reads it after the tool calls it is running now. Several
   queued messages go out together; **×** removes one. **Stop** ends the answer
   and puts the queued messages back into the input.
-- The model picker groups models by provider and has a search box.
+- The model picker groups models by provider and has a search box. Each group
+  shows that provider's limits or balance, fetched again when the picker opens
+  or a model is picked. A provider with a used-up limit is dimmed with its reset
+  time, and a warning above the input says so while one of its models is
+  selected.
 - **Thinking** appears for models with reasoning levels. The choice is
   remembered per model.
 - **Tools** lists every tool the model may use. The bridge's own tools are on;
