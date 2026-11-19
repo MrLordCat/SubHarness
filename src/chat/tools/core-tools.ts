@@ -35,14 +35,14 @@ interface GrepRequest {
 	token: vscode.CancellationToken;
 }
 
-function inputRecord(input: unknown): Record<string, unknown> {
+export function inputRecord(input: unknown): Record<string, unknown> {
 	if (typeof input !== "object" || input === null || Array.isArray(input)) {
 		throw new Error("Tool input must be an object.");
 	}
 	return input as Record<string, unknown>;
 }
 
-function stringField(record: Record<string, unknown>, key: string, allowEmpty = false): string {
+export function stringField(record: Record<string, unknown>, key: string, allowEmpty = false): string {
 	const value = record[key];
 	if (typeof value !== "string") {
 		throw new Error(`"${key}" must be a string.`);
@@ -53,7 +53,7 @@ function stringField(record: Record<string, unknown>, key: string, allowEmpty = 
 	return value;
 }
 
-function optionalStringField(record: Record<string, unknown>, key: string): string | undefined {
+export function optionalStringField(record: Record<string, unknown>, key: string): string | undefined {
 	const value = record[key];
 	if (value === undefined) {
 		return undefined;
@@ -75,7 +75,7 @@ function booleanField(record: Record<string, unknown>, key: string, fallback: bo
 	return value;
 }
 
-function integerField(
+export function integerField(
 	record: Record<string, unknown>,
 	key: string,
 	fallback: number,
@@ -111,7 +111,7 @@ function readFailure(error: unknown, shown: string): Error {
 	return new Error(`Cannot read ${shown}: ${message}`);
 }
 
-function checkCancellation(token: vscode.CancellationToken): void {
+export function checkCancellation(token: vscode.CancellationToken): void {
 	if (token.isCancellationRequested) {
 		throw new vscode.CancellationError();
 	}
@@ -788,6 +788,47 @@ export function createCoreTools(options: {
 		},
 	};
 
+	const replaceOnce = async (file: string, oldRaw: string, newRaw: string, token: vscode.CancellationToken): Promise<string> => {
+		const shown = displayPath(file, roots());
+		const diskText = await fsp.readFile(file, "utf8").catch((error: unknown) => {
+			throw readFailure(error, shown);
+		});
+		checkCancellation(token);
+		const hadBom = diskText.startsWith("\uFEFF");
+		const diskBody = hadBom ? diskText.slice(1) : diskText;
+		const document = vscode.workspace.textDocuments.find(candidate => sameFile(candidate.uri.fsPath, file));
+		const base = document?.getText() ?? diskBody;
+		const crlf = base.includes("\r\n");
+		const oldString = crlf ? oldRaw.replace(/\r?\n/g, "\r\n") : oldRaw;
+		const newString = crlf ? newRaw.replace(/\r?\n/g, "\r\n") : newRaw;
+		const occurrences = countOccurrences(base, oldString);
+		if (occurrences === 0) {
+			throw new Error(`oldString was not found in ${shown}. Read the file again and copy the exact text, including whitespace.`);
+		}
+		if (occurrences > 1) {
+			throw new Error(`oldString occurs ${occurrences} times in ${shown}; include more surrounding lines so it is unique.`);
+		}
+		const offset = base.indexOf(oldString);
+		const startLine = lineNumberAt(base, offset);
+		const endLine = lineNumberAt(base, offset + oldString.length);
+		if (document) {
+			const edit = new vscode.WorkspaceEdit();
+			edit.replace(
+				document.uri,
+				new vscode.Range(document.positionAt(offset), document.positionAt(offset + oldString.length)),
+				newString
+			);
+			if (!(await vscode.workspace.applyEdit(edit))) {
+				throw new Error(`Could not apply the edit to ${shown}.`);
+			}
+			await document.save();
+		} else {
+			const updated = base.slice(0, offset) + newString + base.slice(offset + oldString.length);
+			await fsp.writeFile(file, hadBom ? `\uFEFF${updated}` : updated, "utf8");
+		}
+		return `Edited ${shown}: replaced 1 occurrence (lines ${startLine}-${endLine}).`;
+	};
+
 	const replaceString: ChatTool = {
 		name: "replace_string_in_file",
 		group: CHAT_TOOL_GROUPS.files,
@@ -811,44 +852,126 @@ export function createCoreTools(options: {
 			const file = resolveToolPath(record.filePath, roots());
 			const oldRaw = stringField(record, "oldString");
 			const newRaw = stringField(record, "newString", true);
-			const shown = displayPath(file, roots());
-			const diskText = await fsp.readFile(file, "utf8").catch((error: unknown) => {
-				throw readFailure(error, shown);
-			});
-			checkCancellation(token);
-			const hadBom = diskText.startsWith("\uFEFF");
-			const diskBody = hadBom ? diskText.slice(1) : diskText;
-			const document = vscode.workspace.textDocuments.find(candidate => sameFile(candidate.uri.fsPath, file));
-			const base = document?.getText() ?? diskBody;
-			const crlf = base.includes("\r\n");
-			const oldString = crlf ? oldRaw.replace(/\r?\n/g, "\r\n") : oldRaw;
-			const newString = crlf ? newRaw.replace(/\r?\n/g, "\r\n") : newRaw;
-			const occurrences = countOccurrences(base, oldString);
-			if (occurrences === 0) {
-				throw new Error(`oldString was not found in ${shown}. Read the file again and copy the exact text, including whitespace.`);
-			}
-			if (occurrences > 1) {
-				throw new Error(`oldString occurs ${occurrences} times in ${shown}; include more surrounding lines so it is unique.`);
-			}
-			const offset = base.indexOf(oldString);
-			const startLine = lineNumberAt(base, offset);
-			const endLine = lineNumberAt(base, offset + oldString.length);
-			if (document) {
-				const edit = new vscode.WorkspaceEdit();
-				edit.replace(
-					document.uri,
-					new vscode.Range(document.positionAt(offset), document.positionAt(offset + oldString.length)),
-					newString
-				);
-				if (!(await vscode.workspace.applyEdit(edit))) {
-					throw new Error(`Could not apply the edit to ${shown}.`);
+			return replaceOnce(file, oldRaw, newRaw, token);
+		},
+	};
+
+	const multiReplaceString: ChatTool = {
+		name: "multi_replace_string_in_file",
+		group: CHAT_TOOL_GROUPS.files,
+		description: "Applies several exact replacements, in order, across one or more files. Each oldString must match the current file text exactly once (earlier replacements in the same call already applied). Failed items are reported and the rest still run.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				explanation: { type: "string", description: "Short note on what the edits do." },
+				replacements: {
+					type: "array",
+					minItems: 1,
+					maxItems: 50,
+					items: {
+						type: "object",
+						properties: {
+							filePath: { type: "string", description: "Absolute path or a path relative to the workspace folder." },
+							oldString: { type: "string", description: "Exact text to replace, including whitespace." },
+							newString: { type: "string", description: "Replacement text; may be empty to delete." },
+						},
+						required: ["filePath", "oldString", "newString"],
+					},
+				},
+			},
+			required: ["replacements"],
+		},
+		needsConfirmation(input: unknown): ChatToolConfirmation | undefined {
+			try {
+				const record = inputRecord(input);
+				const items = record.replacements;
+				if (!Array.isArray(items)) {
+					return undefined;
 				}
-				await document.save();
-			} else {
-				const updated = base.slice(0, offset) + newString + base.slice(offset + oldString.length);
-				await fsp.writeFile(file, hadBom ? `\uFEFF${updated}` : updated, "utf8");
+				const currentRoots = roots();
+				const outside: string[] = [];
+				for (const item of items) {
+					try {
+						const entry = inputRecord(item);
+						if (currentRoots.length === 0) {
+							if (typeof entry.filePath === "string" && entry.filePath.trim() !== "") {
+								outside.push(path.resolve(entry.filePath));
+							}
+							continue;
+						}
+						const file = resolveToolPath(entry.filePath, currentRoots);
+						if (!isInsideWorkspace(file, currentRoots)) {
+							outside.push(file);
+						}
+					} catch {
+						continue;
+					}
+				}
+				if (outside.length === 0) {
+					return undefined;
+				}
+				return {
+					title: "Edit files outside the workspace",
+					detail: outside.join("\n"),
+					reason: "The path is outside the open workspace folders.",
+				};
+			} catch {
+				return undefined;
 			}
-			return `Edited ${shown}: replaced 1 occurrence (lines ${startLine}-${endLine}).`;
+		},
+		writes(input: unknown): string[] {
+			try {
+				const record = inputRecord(input);
+				const items = record.replacements;
+				if (!Array.isArray(items)) {
+					return [];
+				}
+				const files = new Set<string>();
+				for (const item of items) {
+					try {
+						files.add(resolveToolPath(inputRecord(item).filePath, roots()));
+					} catch {
+						continue;
+					}
+				}
+				return [...files];
+			} catch {
+				return [];
+			}
+		},
+		async invoke(input: unknown, token: vscode.CancellationToken): Promise<string> {
+			checkCancellation(token);
+			const record = inputRecord(input);
+			const items = record.replacements;
+			if (!Array.isArray(items) || items.length === 0) {
+				throw new Error('"replacements" must be a non-empty array.');
+			}
+			if (items.length > 50) {
+				throw new Error('"replacements" must have at most 50 items.');
+			}
+			const lines: string[] = [];
+			let applied = 0;
+			for (let index = 0; index < items.length; index++) {
+				checkCancellation(token);
+				try {
+					const entry = inputRecord(items[index]);
+					const file = resolveToolPath(entry.filePath, roots());
+					const oldRaw = stringField(entry, "oldString");
+					const newRaw = stringField(entry, "newString", true);
+					const result = await replaceOnce(file, oldRaw, newRaw, token);
+					applied += 1;
+					lines.push(`${index + 1}. ${result}`);
+				} catch (error) {
+					if (error instanceof vscode.CancellationError) {
+						throw error;
+					}
+					lines.push(`${index + 1}. Failed: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+			if (applied === 0) {
+				throw new Error(`None of the ${items.length} replacements applied:\n${lines.join("\n")}`);
+			}
+			return `Applied ${applied} of ${items.length} replacements:\n${lines.join("\n")}`;
 		},
 	};
 
@@ -976,5 +1099,5 @@ export function createCoreTools(options: {
 		},
 	};
 
-	return [readFile, listDir, fileSearch, grepSearch, createFile, replaceString, deleteFile, getErrors];
+	return [readFile, listDir, fileSearch, grepSearch, createFile, replaceString, multiReplaceString, deleteFile, getErrors];
 }

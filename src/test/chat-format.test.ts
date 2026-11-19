@@ -279,6 +279,27 @@ suite("Chat webview tool call descriptions", () => {
 		assert.deepStrictEqual(describeToolCall("grep_search", { query: "x" }), { title: "Searched for \"x\"" });
 	});
 
+	test("describes symbol searches and renames", () => {
+		assert.deepStrictEqual(
+			describeToolCall("list_code_usages", { symbol: "parseArgs", filePath: "src/cli.ts" }),
+			{ title: "Usages of parseArgs" },
+		);
+		assert.deepStrictEqual(
+			describeToolCall("rename_symbol", { symbol: "parseArgs", filePath: "src/cli.ts", newName: "readArgs" }),
+			{ title: "Renamed parseArgs to readArgs" },
+		);
+		assert.deepStrictEqual(describeToolCall("workspace_symbols", { query: "parse" }), { title: "Symbols matching \"parse\"" });
+		assert.deepStrictEqual(describeToolCall("list_code_usages", {}), { title: "list_code_usages", detail: "{}" });
+		assert.deepStrictEqual(
+			describeToolCall("rename_symbol", { symbol: "parseArgs" }),
+			{ title: "rename_symbol", detail: "{\"symbol\":\"parseArgs\"}" },
+		);
+		assert.deepStrictEqual(
+			describeToolCall("workspace_symbols", { query: 42 }),
+			{ title: "workspace_symbols", detail: "{\"query\":42}" },
+		);
+	});
+
 	test("describes writes, problems and terminal tools", () => {
 		assert.deepStrictEqual(describeToolCall("create_file", { filePath: "src/new.ts" }), { title: "Created new.ts" });
 		assert.deepStrictEqual(describeToolCall("replace_string_in_file", { filePath: "a\\b\\message.tsx" }), { title: "Edited message.tsx" });
@@ -296,6 +317,24 @@ suite("Chat webview tool call descriptions", () => {
 	test("cuts a long command at 120 characters", () => {
 		const command = `node ${"x".repeat(200)}`;
 		assert.deepStrictEqual(describeToolCall("run_in_terminal", { command }), { title: `Ran ${command.slice(0, 119)}…` });
+	});
+
+	test("describes multi-file edits and web fetches", () => {
+		const replacements = [
+			{ filePath: "src/a/message.tsx", oldString: "a", newString: "b" },
+			{ filePath: "src/a/message.tsx", oldString: "c", newString: "d" },
+		];
+		assert.deepStrictEqual(describeToolCall("multi_replace_string_in_file", { replacements }), { title: "Edited message.tsx" });
+		assert.deepStrictEqual(
+			describeToolCall("multi_replace_string_in_file", { replacements: [...replacements, { filePath: "src/b/store.ts", oldString: "e", newString: "f" }] }),
+			{ title: "Edited 2 files" }
+		);
+		assert.deepStrictEqual(describeToolCall("multi_replace_string_in_file", {}), { title: "Edited files" });
+		assert.deepStrictEqual(describeToolCall("multi_replace_string_in_file", { replacements: "x" }), { title: "Edited files" });
+		assert.deepStrictEqual(describeToolCall("fetch_webpage", { urls: ["https://example.com/docs"] }), { title: "Fetched example.com" });
+		assert.deepStrictEqual(describeToolCall("fetch_webpage", { urls: ["not a url"] }), { title: "Fetched not a url" });
+		assert.deepStrictEqual(describeToolCall("fetch_webpage", { urls: ["https://a.test", "https://b.test"] }), { title: "Fetched 2 pages" });
+		assert.deepStrictEqual(describeToolCall("fetch_webpage", {}), { title: "fetch_webpage", detail: "{}" });
 	});
 
 	test("falls back to the tool name and a one-line input summary", () => {

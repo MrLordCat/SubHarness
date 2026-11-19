@@ -49,6 +49,7 @@ export function isCopilotOnlyTool(name: string, copilotNames: readonly string[])
 const BUILTIN_GROUP_LABELS: Record<string, string> = {
 	[CHAT_TOOL_GROUPS.files]: "Files",
 	[CHAT_TOOL_GROUPS.search]: "Search",
+	[CHAT_TOOL_GROUPS.web]: "Web",
 	[CHAT_TOOL_GROUPS.terminal]: "Terminal",
 	[CHAT_TOOL_GROUPS.diagnostics]: "Diagnostics",
 	[CHAT_TOOL_GROUPS.agents]: "Subagents",

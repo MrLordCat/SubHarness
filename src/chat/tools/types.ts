@@ -50,6 +50,7 @@ export interface ChatTool {
 export const CHAT_TOOL_GROUPS = {
 	files: "files",
 	search: "search",
+	web: "web",
 	terminal: "terminal",
 	diagnostics: "diagnostics",
 	agents: "agents",

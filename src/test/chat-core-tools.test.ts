@@ -207,6 +207,116 @@ suite("Chat core tools", () => {
 		assert.strictEqual(await fsp.readFile(file, "utf8"), "one\nthree\n");
 	});
 
+	test("multi_replace_string_in_file applies edits in order across files", async () => {
+		await fsp.writeFile(path.join(tmpDir, "first.txt"), "alpha\nbeta\n", "utf8");
+		await fsp.writeFile(path.join(tmpDir, "second.txt"), "one\ntwo\n", "utf8");
+		const result = await invoke("multi_replace_string_in_file", {
+			replacements: [
+				{ filePath: "first.txt", oldString: "alpha", newString: "ALPHA" },
+				{ filePath: "first.txt", oldString: "ALPHA\nbeta", newString: "ALPHA\nBETA" },
+				{ filePath: "second.txt", oldString: "two", newString: "TWO" },
+			],
+		});
+		assert.strictEqual(
+			result,
+			"Applied 3 of 3 replacements:\n1. Edited first.txt: replaced 1 occurrence (lines 1-1).\n"
+			+ "2. Edited first.txt: replaced 1 occurrence (lines 1-2).\n3. Edited second.txt: replaced 1 occurrence (lines 2-2)."
+		);
+		assert.strictEqual(await fsp.readFile(path.join(tmpDir, "first.txt"), "utf8"), "ALPHA\nBETA\n");
+		assert.strictEqual(await fsp.readFile(path.join(tmpDir, "second.txt"), "utf8"), "one\nTWO\n");
+	});
+
+	test("multi_replace_string_in_file reports failed items and keeps going", async () => {
+		await fsp.writeFile(path.join(tmpDir, "partial.txt"), "one\ntwo\nthree\n", "utf8");
+		const result = await invoke("multi_replace_string_in_file", {
+			replacements: [
+				{ filePath: "partial.txt", oldString: "one", newString: "ONE" },
+				{ filePath: "partial.txt", oldString: "absent", newString: "x" },
+				{ filePath: "partial.txt", oldString: "three", newString: "THREE" },
+			],
+		});
+		assert.match(result, /^Applied 2 of 3 replacements:\n/);
+		assert.match(result, /\n2\. Failed: oldString was not found in partial\.txt\./);
+		assert.match(result, /\n3\. Edited partial\.txt: replaced 1 occurrence/);
+		assert.strictEqual(await fsp.readFile(path.join(tmpDir, "partial.txt"), "utf8"), "ONE\ntwo\nTHREE\n");
+	});
+
+	test("multi_replace_string_in_file throws when every replacement fails", async () => {
+		await fsp.writeFile(path.join(tmpDir, "none.txt"), "only\n", "utf8");
+		await assert.rejects(
+			invoke("multi_replace_string_in_file", {
+				replacements: [
+					{ filePath: "none.txt", oldString: "missing", newString: "x" },
+					{ filePath: "gone.txt", oldString: "a", newString: "b" },
+				],
+			}),
+			/None of the 2 replacements applied:\n1\. Failed: oldString was not found[\s\S]*2\. Failed: File not found/
+		);
+	});
+
+	test("multi_replace_string_in_file validates its replacements array", async () => {
+		await assert.rejects(invoke("multi_replace_string_in_file", { replacements: [] }), /non-empty array/);
+		await assert.rejects(invoke("multi_replace_string_in_file", { replacements: "x" }), /non-empty array/);
+		await assert.rejects(invoke("multi_replace_string_in_file", {}), /non-empty array/);
+		await assert.rejects(
+			invoke("multi_replace_string_in_file", { replacements: Array.from({ length: 51 }, () => ({ filePath: "x.txt", oldString: "a", newString: "b" })) }),
+			/at most 50 items/
+		);
+	});
+
+	test("multi_replace_string_in_file keeps CRLF files in CRLF", async () => {
+		await fsp.writeFile(path.join(tmpDir, "multi-crlf.txt"), "alpha\r\nbeta\r\ngamma\r\n", "utf8");
+		await invoke("multi_replace_string_in_file", {
+			replacements: [
+				{ filePath: "multi-crlf.txt", oldString: "alpha\nbeta", newString: "alpha\nBETA" },
+				{ filePath: "multi-crlf.txt", oldString: "gamma", newString: "GAMMA" },
+			],
+		});
+		const text = await fsp.readFile(path.join(tmpDir, "multi-crlf.txt"), "utf8");
+		assert.strictEqual(text, "alpha\r\nBETA\r\nGAMMA\r\n");
+		assert.ok(!/(?<!\r)\n/.test(text), "the file must not contain bare LF");
+	});
+
+	test("multi_replace_string_in_file reports its resolved write paths once", () => {
+		const multi = tool("multi_replace_string_in_file");
+		assert.deepStrictEqual(
+			multi.writes?.({
+				replacements: [
+					{ filePath: "one.txt", oldString: "a", newString: "b" },
+					{ filePath: path.join(tmpDir, "one.txt"), oldString: "c", newString: "d" },
+					{ filePath: "two.txt", oldString: "e", newString: "f" },
+					{ filePath: 42, oldString: "g", newString: "h" },
+				],
+			}),
+			[path.resolve(tmpDir, "one.txt"), path.resolve(tmpDir, "two.txt")]
+		);
+		assert.deepStrictEqual(multi.writes?.({}), []);
+		assert.deepStrictEqual(multi.writes?.("not an object"), []);
+	});
+
+	test("multi_replace_string_in_file needs confirmation for outside paths", () => {
+		const multi = tool("multi_replace_string_in_file");
+		assert.strictEqual(multi.needsConfirmation?.({
+			replacements: [{ filePath: "inside.txt", oldString: "a", newString: "b" }],
+		}), undefined);
+		assert.strictEqual(multi.needsConfirmation?.({}), undefined);
+		const outside = path.join(tmpDir, "..", "outside-multi.txt");
+		const confirmation = multi.needsConfirmation?.({
+			replacements: [
+				{ filePath: "inside.txt", oldString: "a", newString: "b" },
+				{ filePath: outside, oldString: "c", newString: "d" },
+			],
+		});
+		assert.strictEqual(confirmation?.title, "Edit files outside the workspace");
+		assert.strictEqual(confirmation?.detail, path.resolve(outside));
+		assert.strictEqual(confirmation?.reason, "The path is outside the open workspace folders.");
+		const unrooted = createCoreTools({ roots: { roots: () => [] } }).find(candidate => candidate.name === "multi_replace_string_in_file");
+		const unrootedConfirmation = unrooted?.needsConfirmation?.({
+			replacements: [{ filePath: "relative.txt", oldString: "a", newString: "b" }],
+		});
+		assert.strictEqual(unrootedConfirmation?.detail, path.resolve("relative.txt"));
+	});
+
 	test("delete_file deletes a file and reports missing files", async () => {
 		await fsp.writeFile(path.join(tmpDir, "gone.txt"), "bye\n", "utf8");
 		assert.strictEqual(await invoke("delete_file", { filePath: "gone.txt" }), "Deleted gone.txt.");

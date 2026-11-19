@@ -164,6 +164,14 @@ export function describeToolCall(name: string, input: unknown): ToolCallDescript
 					? { title: `Searched for "${query}"` }
 					: { title: `Searched for "${query}"`, detail: include };
 			}
+			case "list_code_usages": {
+				const symbol = textField(record, "symbol");
+				return symbol === undefined ? fallbackDescription(name, input) : { title: `Usages of ${symbol}` };
+			}
+			case "workspace_symbols": {
+				const query = textField(record, "query");
+				return query === undefined ? fallbackDescription(name, input) : { title: `Symbols matching "${query}"` };
+			}
 			case "create_file": {
 				const file = textField(record, "filePath");
 				return file === undefined ? fallbackDescription(name, input) : { title: `Created ${baseName(file)}` };
@@ -171,6 +179,47 @@ export function describeToolCall(name: string, input: unknown): ToolCallDescript
 			case "replace_string_in_file": {
 				const file = textField(record, "filePath");
 				return file === undefined ? fallbackDescription(name, input) : { title: `Edited ${baseName(file)}` };
+			}
+			case "rename_symbol": {
+				const symbol = textField(record, "symbol");
+				const newName = textField(record, "newName");
+				return symbol === undefined || newName === undefined
+					? fallbackDescription(name, input)
+					: { title: `Renamed ${symbol} to ${newName}` };
+			}
+			case "multi_replace_string_in_file": {
+				const items = Array.isArray(record.replacements) ? record.replacements : [];
+				const files = new Set<string>();
+				for (const item of items) {
+					const file = textField(inputRecord(item), "filePath");
+					if (file !== undefined) {
+						files.add(file);
+					}
+				}
+				if (files.size === 0) {
+					return { title: "Edited files" };
+				}
+				return files.size === 1
+					? { title: `Edited ${baseName([...files][0])}` }
+					: { title: `Edited ${files.size} files` };
+			}
+			case "fetch_webpage": {
+				const urls = record.urls;
+				if (!Array.isArray(urls) || urls.length === 0) {
+					return fallbackDescription(name, input);
+				}
+				if (urls.length > 1) {
+					return { title: `Fetched ${urls.length} pages` };
+				}
+				const raw = urls[0];
+				if (typeof raw !== "string" || raw.length === 0) {
+					return fallbackDescription(name, input);
+				}
+				try {
+					return { title: `Fetched ${new URL(raw).host || raw}` };
+				} catch {
+					return { title: `Fetched ${raw}` };
+				}
 			}
 			case "delete_file": {
 				const file = textField(record, "filePath");

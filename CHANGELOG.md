@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.21.26 (development patch) - 2026-11-19
+
+- Added: native bridge chat tools that replace Copilot's:
+  multi_replace_string_in_file (several exact edits in one call, failures
+  reported per item), fetch_webpage (http(s) pages as text with links, long
+  pages filtered by a query), and list_code_usages, rename_symbol and
+  workspace_symbols through the language servers. They appear in the Tools
+  picker under Files, Search and the new Web group.
+
 ## 1.21.25 (development patch) - 2026-11-19
 
 - Added: the bridge chat's model picker shows each provider's limits or

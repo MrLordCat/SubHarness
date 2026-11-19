@@ -49,6 +49,12 @@ editor content. Each file is capped at 60,000 characters and a message at
 
 ## Tools and approvals
 
+The chat's own tools read, search, create, edit (`replace_string_in_file`,
+`multi_replace_string_in_file`) and delete files, run terminals, fetch web
+pages (`fetch_webpage`), work with symbols through the language servers
+(`list_code_usages`, `rename_symbol`, `workspace_symbols`), report problems and
+start subagents.
+
 The model runs tools without asking, with one exception: a terminal command
 that matches a rule in `llamacpp.chat.dangerousCommands` waits for your
 approval in the chat. The default rules cover force pushes, hard resets,

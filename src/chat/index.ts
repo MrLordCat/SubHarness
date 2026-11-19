@@ -15,8 +15,10 @@ import { ChatToolCatalog } from "./tools/catalog";
 import { getSubagentModelProfiles } from "../subagent-guidance";
 import { createCoreTools } from "./tools/core-tools";
 import { createSubagentTool } from "./tools/subagent-tool";
+import { createSymbolTools } from "./tools/symbol-tools";
 import { configuredDangerousCommandRules } from "./tools/danger";
 import { createChatTerminalTools } from "./tools/terminal-tools";
+import { createWebTools } from "./tools/web-tools";
 
 type CompositeChatProvider = Pick<vscode.LanguageModelChatProvider, "provideLanguageModelChatResponse" | "provideLanguageModelChatInformation"> & {
 	onDidChangeLanguageModelChatInformation?: vscode.Event<void>;
@@ -86,6 +88,8 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 	const catalog = new ChatToolCatalog({
 		builtins: [
 			...createCoreTools(),
+			...createWebTools(),
+			...createSymbolTools(),
 			...createChatTerminalTools({ manager: terminals, rules: () => configuredDangerousCommandRules(reportInvalidRule) }),
 			createSubagentTool({
 				// The bridge's subagent catalog: cheapest first, premium flagships and exhausted subscriptions left out.
