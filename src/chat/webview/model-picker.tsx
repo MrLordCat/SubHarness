@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 import type { ChatModelEntry, ChatModelGroup } from "../shared/protocol";
+import { OPEN_MODEL_PICKER_EVENT } from "./events";
 import { matchesQuery, popupPlacement, useDismiss } from "./popup";
 
 interface ModelPickerProps {
@@ -89,6 +90,12 @@ export function ModelPicker({ models, selectedModelId, onSelectModel }: ModelPic
 		setPlacement(popupPlacement(triggerRef.current));
 		setOpen(true);
 	};
+
+	useEffect(() => {
+		const openFromNotice = () => openPopup();
+		window.addEventListener(OPEN_MODEL_PICKER_EVENT, openFromNotice);
+		return () => window.removeEventListener(OPEN_MODEL_PICKER_EVENT, openFromNotice);
+	}, [models, selectedModelId]);
 
 	const choose = (modelId: string) => {
 		onSelectModel(modelId);

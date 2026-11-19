@@ -6,6 +6,7 @@ import { ProviderRegistry, ownsHttpModel, providerSourceId, type ChatProviderReg
 import type { ConversationHistory } from "./providers/conversation-history";
 import { detectLimitError, formatLimitNotice, type LimitProvider, type LimitMatch } from "./providers/limit-errors";
 import { detectBalanceError, formatBalanceNotice } from "./providers/balance-errors";
+import { balanceSignal, isLimitSignalPart, LIMIT_SIGNAL_OPTION, limitSignal, limitSignalPart } from "./providers/limit-signal";
 import { PROVIDER_SWITCH_OPTION } from "./providers/provider-switch";
 import { ChatMarkdownLinkStream } from "./providers/markdown-links";
 
@@ -105,8 +106,12 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 			progress.report(part);
 		};
 		const emitText = (value: string): void => { if (value) { emit(new vscode.LanguageModelTextPart(value)); } };
+		// Copilot Chat would ignore the signal at best; it is neither history nor shown text.
+		const wantsSignals = options.modelOptions?.[LIMIT_SIGNAL_OPTION] === true;
+		const signal = (part: vscode.LanguageModelDataPart): void => { if (wantsSignals) { emitText(links.flush()); progress.report(part); } };
 		// A non-text part must not jump ahead of buffered prose.
 		const report = (part: vscode.LanguageModelResponsePart): void => {
+			if (isLimitSignalPart(part)) { signal(part); return; }
 			if (part instanceof vscode.LanguageModelTextPart) { emitText(links.push(part.value)); return; }
 			emitText(links.flush());
 			emit(part);
@@ -124,12 +129,16 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 				// could not answer itself; the short notice keeps the host from retrying.
 				const balance = detectBalanceError(providerError, providerLabelForModel(model.id));
 				if (balance) {
-					emit(new vscode.LanguageModelTextPart(formatBalanceNotice(balance)));
+					const text = formatBalanceNotice(balance);
+					signal(limitSignalPart(balanceSignal(balance, text)));
+					emit(new vscode.LanguageModelTextPart(text));
 					failed = false;
 				}
 				const limit = resolveLimit(model.id, providerError);
 				if (limit) {
-					emit(new vscode.LanguageModelTextPart(formatLimitNotice(limit.provider, limit)));
+					const text = formatLimitNotice(limit.provider, limit);
+					signal(limitSignalPart(limitSignal(limit.provider, limit, text)));
+					emit(new vscode.LanguageModelTextPart(text));
 					failed = false;
 				}
 			}
@@ -137,6 +146,11 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 		try { await history?.complete(emitted, emitted.length > 0 || !failed ? model.id : undefined); }
 		catch (error) { if (usesHistory && !failed) { throw new Error("Cannot save the local handoff transcript. Check workspace storage before reloading.", { cause: error }); } this.warnHistory(); }
 		if (failed) { throw providerError; }
+	}
+
+	/** For callers other than Copilot Chat, which never says when a chat is left. */
+	abandonConversation(conversationId: string): Promise<void> {
+		return this.registry.abandonConversation(conversationId);
 	}
 
 	provideTokenCount(

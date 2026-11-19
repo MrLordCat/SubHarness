@@ -15,9 +15,43 @@ export type ChatPart =
 	| { kind: "toolCall"; callId: string; name: string; input: unknown }
 	/** truncated: the model received a cut result; preview: the webview holds only the first WEBVIEW_TOOL_RESULT_PREVIEW_CHARS. */
 	| { kind: "toolResult"; callId: string; text: string; isError?: boolean; truncated?: boolean; preview?: boolean }
+	| { kind: "notice"; level: "info" | "warning" | "error"; text: string; limit?: ChatLimitInfo }
+	/** Messages before keepFromMessageId reach the model only as this summary. */
+	| {
+		kind: "compaction"; summary: string; keepFromMessageId: string; summarizedMessages: number;
+		tokensBefore: number; tokensAfter: number; method: "deepseek" | "extractive";
+	}
+	/** What a subagent tool call did; the model sees only the subagent's report in the tool result. */
+	| ({ kind: "subagent" } & ChatSubagentRun);
+
+export type ChatSubagentStep =
+	| { kind: "tool"; name: string; summary: string; isError?: boolean }
+	| { kind: "text"; text: string }
 	| { kind: "notice"; level: "info" | "warning" | "error"; text: string };
 
+export interface ChatSubagentRun {
+	/** The subagent tool call this run answers. */
+	callId: string;
+	description: string;
+	modelId: string;
+	modelName: string;
+	status: "running" | "done" | "failed" | "stopped";
+	steps: ChatSubagentStep[];
+	startedAt: number;
+	durationMs?: number;
+	usage?: ChatUsage;
+}
+
 export type ChatStructuredPart = Exclude<ChatPart, { kind: ChatTextKind }>;
+
+/** A provider refused the request because of a subscription limit or an empty balance. */
+export interface ChatLimitInfo {
+	kind: "limit" | "balance";
+	provider: string;
+	window?: string;
+	/** Epoch milliseconds. */
+	resetAt?: number;
+}
 
 export interface ChatMessage {
 	id: string;
@@ -28,6 +62,8 @@ export interface ChatMessage {
 	modelId?: string;
 	parts: ChatPart[];
 	usage?: ChatUsage;
+	/** Host context sent with this user message (date, active file); kept so every later request repeats it byte for byte. */
+	hostContext?: string;
 }
 
 export interface ChatSessionMeta {
@@ -113,6 +149,7 @@ export type HostMessage =
 	}
 	| { type: "changes"; changes: ChatChangeSet }
 	| { type: "models"; models: ChatModelGroup[]; selectedModelId?: string }
+	| { type: "session"; session: ChatSessionMeta }
 	| { type: "tools"; tools: ChatToolGroup[] }
 	| { type: "messageAdded"; message: ChatMessage }
 	| { type: "partAdded"; messageId: string; part: ChatStructuredPart }
@@ -123,7 +160,9 @@ export type HostMessage =
 	| { type: "run"; run: ChatRunState }
 	| { type: "approval"; request: ChatApprovalRequest }
 	| { type: "approvalResolved"; id: string; allowed: boolean }
-	| { type: "toolResultFull"; messageId: string; callId: string; text: string };
+	| { type: "toolResultFull"; messageId: string; callId: string; text: string }
+	/** Live state of a running subagent; the finished run arrives as a "subagent" part. */
+	| { type: "subagent"; messageId: string; run: ChatSubagentRun };
 
 /** Webview → host. */
 export type WebviewMessage =

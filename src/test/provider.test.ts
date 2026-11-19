@@ -1802,6 +1802,68 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.ok(!names.includes("y_tool"), `removed tool must disappear: ${names.join(",")}`);
         });
 
+        test("rebuilds the catalog when a retained tool's schema changed but keeps it for a new description", () => {
+            const providerAny = provider as unknown as {
+                stabilizeToolCatalog: (
+                    modelId: string,
+                    options: vscode.ProvideLanguageModelChatResponseOptions,
+                    config: ReturnType<typeof convertTools>,
+                    messages: readonly OpenAIChatMessage[],
+                    requestId: string
+                ) => ReturnType<typeof convertTools>;
+            };
+            const options = (description: string, modelSchema: object) => ({
+                modelOptions: { _copilotConversationId: "conversation-cache-schema" },
+                tools: [
+                    { name: "a_tool", description: "a_tool", inputSchema: { type: "object", properties: {} } },
+                    { name: "subagent", description, inputSchema: { type: "object", properties: { model: modelSchema } } },
+                ],
+                toolMode: vscode.LanguageModelChatToolMode.Auto,
+            } as vscode.ProvideLanguageModelChatResponseOptions);
+            const stabilize = (value: vscode.ProvideLanguageModelChatResponseOptions, requestId: string) =>
+                providerAny.stabilizeToolCatalog("deepseek-flash", value, convertTools(value, { mode: "apiDirect", apiDirectMaxTools: 10 }), [{ role: "user", content: requestId }], requestId);
+            const modelSchema = (definition: ReturnType<typeof convertTools>) =>
+                JSON.stringify(definition.tools?.find(toolDef => toolDef.function.name === "subagent")?.function.parameters);
+
+            const first = stabilize(options("Models: A", { type: "string", enum: ["A"] }), "request-1");
+            // A description change alone keeps the cached prefix.
+            const described = stabilize(options("Models: A, B", { type: "string", enum: ["A"] }), "request-2");
+            assert.deepStrictEqual(described.tools, first.tools);
+            // A schema change must reach the model and the call validator; the old enum would reject valid calls.
+            const changed = stabilize(options("Models: A, B", { type: "string" }), "request-3");
+            assert.ok(!modelSchema(changed).includes("enum"), modelSchema(changed));
+        });
+
+        test("rebuilds the catalog when a retained tool is gone at the same count, but not for a swapped MCP tool", () => {
+            const providerAny = provider as unknown as {
+                stabilizeToolCatalog: (
+                    modelId: string,
+                    options: vscode.ProvideLanguageModelChatResponseOptions,
+                    config: ReturnType<typeof convertTools>,
+                    messages: readonly OpenAIChatMessage[],
+                    requestId: string
+                ) => ReturnType<typeof convertTools>;
+            };
+            const options = (conversation: string, names: string[]) => ({
+                modelOptions: { _copilotConversationId: conversation },
+                tools: names.map(name => ({ name, description: name, inputSchema: { type: "object", properties: {} } })),
+                toolMode: vscode.LanguageModelChatToolMode.Auto,
+            } as vscode.ProvideLanguageModelChatResponseOptions);
+            const names = (conversation: string, tools: string[], requestId: string) => {
+                const value = options(conversation, tools);
+                const result = providerAny.stabilizeToolCatalog("deepseek-flash", value, convertTools(value, { mode: "apiDirect", apiDirectMaxTools: 10 }), [{ role: "user", content: requestId }], requestId);
+                return (result.tools ?? []).map(toolDef => toolDef.function.name).sort();
+            };
+
+            names("conversation-renamed", ["a_tool", "run_subagent"], "request-1");
+            // The renamed tool must be offered; the old name would be called and checked against its old schema.
+            assert.deepStrictEqual(names("conversation-renamed", ["a_tool", "subagent"], "request-2"), ["a_tool", "subagent"]);
+
+            names("conversation-mcp", ["a_tool", "mcp_server_old"], "request-1");
+            // MCP servers swap tools between restarts; the cached prefix is kept for them as before.
+            assert.deepStrictEqual(names("conversation-mcp", ["a_tool", "mcp_server_new"], "request-2"), ["a_tool", "mcp_server_old"]);
+        });
+
         test("restores host-rewritten history without dropping the new turn", () => {
             const providerAny = provider as unknown as {
                 stabilizeMessagePrefix: (

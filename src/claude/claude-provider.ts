@@ -7,7 +7,8 @@ import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk" with { "res
 import { buildCacheDiagnostics, promptCacheUsageFromCacheReads } from "../context/cache-diagnostics";
 import { resolveProviderSwitchContextTokens, resolveSharedContextLimit } from "../context/provider-handoff";
 import type { SubscriptionObservation } from "../diagnostics/subscription-usage";
-import { detectLimitError, formatLimitNotice, LimitGate } from "../providers/limit-errors";
+import { detectLimitError, LimitGate } from "../providers/limit-errors";
+import { reportLimitNotice } from "../providers/limit-signal";
 import type { LlamaLogSink } from "../logger";
 import type { ProviderRuntimeMetrics } from "../provider-metrics";
 import { PROVIDER_ACTIVE_SESSION_IDLE_MS, PROVIDER_DURABLE_SESSION_TTL_MS, PROVIDER_PENDING_ROLLOVER_TTL_MS } from "../session-retention";
@@ -1335,7 +1336,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 				// A limit is not a request failure: answer with one short line so the host does not
 				// retry the request and no provider turn is started.
 				this.logSink?.log("claude.chat.limit_short_circuit", { model: modelId, notice: unresolved });
-				progress.report(new vscode.LanguageModelTextPart(unresolved));
+				reportLimitNotice(progress, "claude", this.limitGate.get("claude"), unresolved);
 				return;
 			}
 		}
@@ -1432,7 +1433,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 					timeZone: limit.timeZone,
 				}, "warn");
 				this.removeSession(continuation.session.key);
-				progress.report(new vscode.LanguageModelTextPart(formatLimitNotice("claude", limit)));
+				reportLimitNotice(progress, "claude", limit);
 				return;
 			}
 			continuation.session.lastUsedAt = Date.now();
@@ -1842,7 +1843,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 						timeZone: limit.timeZone,
 					}, "warn");
 					this.removeSession(session.key);
-					progress.report(new vscode.LanguageModelTextPart(formatLimitNotice("claude", limit)));
+					reportLimitNotice(progress, "claude", limit);
 					return;
 				}
 				if (session.restoredFromDisk && session.client.canRetryLastTurn) {
@@ -2002,7 +2003,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 								window: fallbackLimit.window,
 								resetsAt: fallbackLimit.resetAt?.toISOString(),
 							}, "warn");
-							progress.report(new vscode.LanguageModelTextPart(formatLimitNotice("claude", fallbackLimit)));
+							reportLimitNotice(progress, "claude", fallbackLimit);
 							return;
 						}
 						throw fallbackError;
@@ -2577,6 +2578,16 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			.sort((left, right) => left.lastUsedAt - right.lastUsedAt);
 		while (this.sessions.size > MAX_CLAUDE_SESSIONS && candidates.length > 0) {
 			this.removeSession(candidates.shift()!.key);
+		}
+	}
+
+	/** The chat left this conversation; a session waiting for tool results would never be pruned. */
+	abandonConversation(conversationId: string): void {
+		for (const session of [...this.sessions.values()]) {
+			if (session.conversationId === conversationId && session.client.pendingCallIds.size > 0) {
+				this.logSink?.log("claude.chat.conversation_abandoned", { model: session.modelId, pendingCalls: session.client.pendingCallIds.size });
+				this.removeSession(session.key);
+			}
 		}
 	}
 

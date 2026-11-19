@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { LIMIT_SIGNAL_OPTION, parseLimitSignal, type LimitSignal } from "../providers/limit-signal";
 import { toLanguageModelMessages } from "./lm-messages";
 import { appendChatText, type ChatMessage, type ChatPart, type ChatStructuredPart, type ChatTextKind, type ChatUsage } from "./shared/protocol";
 
@@ -24,6 +25,10 @@ export interface AgentTurnRequest {
 	token: vscode.CancellationToken;
 	maxRounds?: number;
 	modelOptions?: Record<string, unknown>;
+	/** System message text sent before the history. */
+	system?: string;
+	/** Parts the turn's assistant message already holds, e.g. a compaction made before the first request. */
+	initialParts?: readonly ChatPart[];
 }
 
 export const MAX_TOOL_RESULT_CHARS = 200_000;
@@ -66,6 +71,20 @@ function parseUsage(part: vscode.LanguageModelDataPart): ChatUsage | undefined {
 	return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
+function limitNotice(signal: LimitSignal): ChatStructuredPart {
+	return {
+		kind: "notice",
+		level: "warning",
+		text: signal.text,
+		limit: {
+			kind: signal.kind,
+			provider: signal.provider,
+			...(signal.window ? { window: signal.window } : {}),
+			...(signal.resetAt !== undefined ? { resetAt: signal.resetAt } : {}),
+		},
+	};
+}
+
 function thinkingText(part: vscode.LanguageModelResponsePart): string {
 	const value = (part as { value?: unknown }).value;
 	if (typeof value === "string") {
@@ -79,24 +98,43 @@ function thinkingText(part: vscode.LanguageModelResponsePart): string {
 
 export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds: number; stopReason: "done" | "maxRounds" }> {
 	const maxRounds = request.maxRounds ?? DEFAULT_MAX_ROUNDS;
-	const parts: ChatPart[] = [];
+	const parts: ChatPart[] = [...(request.initialParts ?? [])];
 	const assistant: ChatMessage = { id: "agent-message", role: "assistant", turn: request.turn, createdAt: Date.now(), parts };
 	for (let round = 1; round <= maxRounds; round++) {
 		const calls: Array<{ callId: string; name: string; input: unknown }> = [];
+		// The notice text that follows a limit signal is already shown by the notice part.
+		let signalledText = "";
 		const progress: vscode.Progress<vscode.LanguageModelResponsePart> = {
 			report: part => {
 				if (part instanceof vscode.LanguageModelTextPart) {
-					if (!part.value) {
+					let value = part.value;
+					if (signalledText) {
+						if (signalledText.startsWith(value)) {
+							signalledText = signalledText.slice(value.length);
+							return;
+						}
+						value = value.startsWith(signalledText) ? value.slice(signalledText.length) : value;
+						signalledText = "";
+					}
+					if (!value) {
 						return;
 					}
-					request.sink.text("text", part.value);
-					appendChatText(parts, "text", part.value);
+					request.sink.text("text", value);
+					appendChatText(parts, "text", value);
 				} else if (part instanceof vscode.LanguageModelToolCallPart) {
 					const call: ChatStructuredPart = { kind: "toolCall", callId: part.callId, name: part.name, input: part.input };
 					request.sink.part(call);
 					parts.push(call);
 					calls.push({ callId: part.callId, name: part.name, input: part.input });
 				} else if (part instanceof vscode.LanguageModelDataPart) {
+					const signal = parseLimitSignal(part);
+					if (signal) {
+						const notice = limitNotice(signal);
+						request.sink.part(notice);
+						parts.push(notice);
+						signalledText = signal.text;
+						return;
+					}
 					const usage = parseUsage(part);
 					if (usage) {
 						request.sink.usage(usage);
@@ -110,10 +148,10 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 				}
 			},
 		};
-		await request.backend.provideLanguageModelChatResponse(request.model, toLanguageModelMessages([...request.history, assistant]), {
+		await request.backend.provideLanguageModelChatResponse(request.model, toLanguageModelMessages([...request.history, assistant], { system: request.system }), {
 			toolMode: vscode.LanguageModelChatToolMode.Auto,
 			tools: request.tools.tools,
-			modelOptions: { ...request.modelOptions, _conversationId: request.conversationId, _copilotTurnIndex: request.turn },
+			modelOptions: { ...request.modelOptions, _conversationId: request.conversationId, _copilotTurnIndex: request.turn, [LIMIT_SIGNAL_OPTION]: true },
 		}, progress, request.token);
 		if (calls.length === 0) {
 			return { rounds: round, stopReason: "done" };

@@ -4,23 +4,9 @@ import { postMessage } from "./api";
 import { ApprovalCard } from "./approval-card";
 import { ChangesPanel } from "./changes-panel";
 import { Composer } from "./composer";
+import { formatTokens } from "./format";
 import { MessageList } from "./message-list";
 import type { ChatStore } from "./store";
-
-function formatTokens(value: number): string {
-	if (value >= 1_000_000) {
-		return `${formatScaled(value / 1_000_000)}M`;
-	}
-	if (value >= 1_000) {
-		return `${formatScaled(value / 1_000)}k`;
-	}
-	return `${Math.round(value)}`;
-}
-
-function formatScaled(value: number): string {
-	const text = value >= 100 ? `${Math.round(value)}` : value.toFixed(1);
-	return text.endsWith(".0") ? text.slice(0, -2) : text;
-}
 
 function contextIndicator(latestUsage: ChatUsage | undefined, models: ChatModelGroup[], selectedModelId: string | undefined): string | undefined {
 	const promptTokens = latestUsage?.promptTokens;

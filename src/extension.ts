@@ -675,13 +675,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const codexRegistrations: ChatProviderRegistration[] = allCodexProviders().map(([accountId, provider]) => ({
 		id: codexAccountStatusKey(accountId),
 		provider,
+		abandonConversation: (id: string) => provider.abandonConversation(id),
 		...(accountId ? {} : { source: BUILTIN_PROVIDER_SOURCES.find(source => source.id === "codex") }),
 		ownsModel: (modelId: string) => decodeCodexAccountModelId(modelId, accountId) !== undefined,
 	}));
 	const subscriptionProviders = [
 		...codexRegistrations,
-		{ id: "claude", provider: claudeProvider, onForeignRequest: () => claudeProvider.refreshSubscriptionUsage() },
-		{ id: "coco", provider: cocoProvider, onForeignRequest: (id?: unknown) => cocoProvider.onForeignRequest(id) },
+		{ id: "claude", provider: claudeProvider, onForeignRequest: () => claudeProvider.refreshSubscriptionUsage(),
+			abandonConversation: (id: string) => claudeProvider.abandonConversation(id) },
+		{ id: "coco", provider: cocoProvider, onForeignRequest: (id?: unknown) => cocoProvider.onForeignRequest(id),
+			abandonConversation: (id: string) => cocoProvider.onForeignRequest(id) },
 	];
 	const conversationHistory = new ConversationHistory(
 		path.join(context.storageUri?.fsPath ?? context.globalStorageUri.fsPath, "chat-history"),
@@ -703,7 +706,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const compositeProvider = new CompositeChatModelProvider({ providers: [
 		{ id: "http", provider: llamaProvider, ownsModel: ownsHttpModel,
 			usesConversationHistory: model => llamaProvider.usesConversationHistory(model),
-			onForeignRequest: async id => llamaProvider.cancelCursorConversation(id) },
+			onForeignRequest: async id => llamaProvider.cancelCursorConversation(id),
+			abandonConversation: id => llamaProvider.cancelCursorConversation(id) },
 		...subscriptionProviders.map(registration => {
 			const explicit = "ownsModel" in registration ? registration.ownsModel : undefined;
 			const source = "source" in registration ? registration.source : undefined;
@@ -715,7 +719,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	], history: conversationHistory });
 	context.subscriptions.push(compositeProvider);
 	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, compositeProvider));
-	registerChatWindow(context, { composite: compositeProvider, log: (event, data) => logService.log(event, data) });
+	registerChatWindow(context, { composite: compositeProvider, log: (event, data) => logService.log(event, data), userAgent: ua });
 
 	let lastThroughput: string | undefined;
 	let lastPromptCache: string | undefined;

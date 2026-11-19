@@ -5,6 +5,9 @@ import {
 	type ChatMessage,
 	type ChatModelGroup,
 	type ChatPart,
+	type ChatSessionMeta,
+	type ChatSubagentRun,
+	type ChatSubagentStep,
 	type ChatToolGroup,
 	type HostMessage,
 	type WebviewMessage,
@@ -103,7 +106,23 @@ const TOOL_GROUPS: ChatToolGroup[] = [
 const requestedCount = Number.parseInt(new URLSearchParams(window.location.search).get("count") ?? "", 10);
 const initialCount = Number.isFinite(requestedCount) && requestedCount >= 0 ? requestedCount : 5000;
 
+const FINISHED_SUBAGENT_CALL_ID = "call-subagent-finished";
+const LIVE_SUBAGENT_CALL_ID = "call-subagent-live";
+const LIVE_SUBAGENT_STARTED_AT = Date.now() - 12_000;
+const LIVE_SUBAGENT_STEPS: ChatSubagentStep[] = [
+	{ kind: "text", text: "Reading the store and the message list." },
+	{ kind: "tool", name: "read_file", summary: "{\"path\":\"src/chat/webview/store.ts\"}" },
+	{ kind: "tool", name: "grep_search", summary: "{\"query\":\"subagent\"}" },
+	{ kind: "tool", name: "get_errors", summary: "{\"filePaths\":[\"src/chat/webview/message.tsx\"]}" },
+];
+let liveSubagentMessageId: string | undefined;
+let liveSubagentStarted = false;
+let liveSubagentTimer: number | undefined;
+
 const messages = createMessages(initialCount);
+const SESSION_ID = "harness-session";
+const SESSION_CREATED_AT = Date.now() - messages.length * 1000;
+let sessionTitle = `Harness session — ${messages.length} messages`;
 let selectedModelId = "gpt-5.5-codex";
 let nextId = 0;
 let turn = Math.ceil(messages.length / 2);
@@ -198,14 +217,7 @@ function handleWebviewMessage(message: WebviewMessage): void {
 function emitInit(): void {
 	emit({
 		type: "init",
-		session: {
-			id: "harness-session",
-			title: `Harness session — ${messages.length} messages`,
-			createdAt: Date.now() - messages.length * 1000,
-			updatedAt: Date.now(),
-			modelId: selectedModelId,
-			messageCount: messages.length,
-		},
+		session: sessionMeta(),
 		messages,
 		models: MODEL_GROUPS,
 		selectedModelId,
@@ -214,6 +226,48 @@ function emitInit(): void {
 		approvals: [],
 		changes: currentChanges,
 	});
+	startLiveSubagent();
+}
+
+function startLiveSubagent(): void {
+	if (liveSubagentStarted || liveSubagentMessageId === undefined) {
+		return;
+	}
+	liveSubagentStarted = true;
+	const messageId = liveSubagentMessageId;
+	const publish = (index: number): void => {
+		const run: ChatSubagentRun = {
+			callId: LIVE_SUBAGENT_CALL_ID,
+			description: "Map the subagent flow",
+			modelId: "deepseek-flash",
+			modelName: "DeepSeek Flash",
+			status: "running",
+			steps: LIVE_SUBAGENT_STEPS.slice(0, index),
+			startedAt: LIVE_SUBAGENT_STARTED_AT,
+		};
+		emit({ type: "subagent", messageId, run });
+	};
+	let shown = 1;
+	publish(shown);
+	liveSubagentTimer = window.setInterval(() => {
+		shown += 1;
+		publish(Math.min(shown, LIVE_SUBAGENT_STEPS.length));
+		if (shown >= LIVE_SUBAGENT_STEPS.length && liveSubagentTimer !== undefined) {
+			window.clearInterval(liveSubagentTimer);
+			liveSubagentTimer = undefined;
+		}
+	}, 1_200);
+}
+
+function sessionMeta(): ChatSessionMeta {
+	return {
+		id: SESSION_ID,
+		title: sessionTitle,
+		createdAt: SESSION_CREATED_AT,
+		updatedAt: Date.now(),
+		modelId: selectedModelId,
+		messageCount: messages.length,
+	};
 }
 
 function handleSend(text: string): void {
@@ -301,6 +355,7 @@ function handleApprove(id: string, allow: boolean): void {
 function handleEdit(messageId: string, text: string, undoChanges: boolean | undefined): void {
 	const index = messages.findIndex(candidate => candidate.id === messageId);
 	const target = index >= 0 ? messages[index] : undefined;
+	const editsFirstUser = target?.role === "user" && messages.find(candidate => candidate.role === "user")?.id === messageId;
 	stopStream();
 	pendingApproval = undefined;
 	emit({ type: "truncated", messageId });
@@ -315,6 +370,10 @@ function handleEdit(messageId: string, text: string, undoChanges: boolean | unde
 		}
 	}
 	handleSend(text);
+	if (editsFirstUser) {
+		sessionTitle = titleFromText(text);
+		emit({ type: "session", session: sessionMeta() });
+	}
 }
 
 function handleKeepChanges(ids?: string[]): void {
@@ -362,6 +421,11 @@ function filesChangedSince(targetTurn: number): number {
 
 function pluralFiles(count: number): string {
 	return count === 1 ? "1 file" : `${count} files`;
+}
+
+function titleFromText(text: string): string {
+	const singleLine = text.replace(/\s+/g, " ").trim();
+	return singleLine.length > 60 ? `${singleLine.slice(0, 59)}…` : singleLine;
 }
 
 function applyToolsEnabled(names: string[], enabled: boolean): void {
@@ -420,7 +484,115 @@ function createMessages(count: number): ChatMessage[] {
 			usage: { promptTokens: 12_000 + (index % 40) * 250, completionTokens: 400 + (index % 17) * 30, totalTokens: 16_000 + index },
 		});
 	}
+	const compacted = result[3];
+	const kept = result[6];
+	if (compacted?.role === "assistant" && kept) {
+		compacted.parts.unshift(createCompactionPart(kept.id));
+	}
+	const limited = result[1];
+	if (limited?.role === "assistant") {
+		limited.parts.push(createLimitPart());
+	}
+	const finished = result[9];
+	if (finished?.role === "assistant") {
+		addFinishedSubagent(finished);
+	}
+	const live = result[13];
+	if (live?.role === "assistant") {
+		liveSubagentMessageId = live.id;
+		live.parts.push({
+			kind: "toolCall",
+			callId: LIVE_SUBAGENT_CALL_ID,
+			name: "subagent",
+			input: { description: "Map the subagent flow", prompt: "Trace every place that mentions subagent and report the call chain.", model: "DeepSeek Flash" },
+		});
+	}
 	return result;
+}
+
+/** A finished run: the subagent part sits right before the tool result, as the host sends them. */
+function addFinishedSubagent(message: ChatMessage): void {
+	message.parts.push(
+		{
+			kind: "toolCall",
+			callId: FINISHED_SUBAGENT_CALL_ID,
+			name: "subagent",
+			input: { description: "Audit the subagent UI", prompt: "Check how the store keeps live runs and whether the card shows steps and the report.", model: "DeepSeek Flash" },
+		},
+		{
+			kind: "subagent",
+			callId: FINISHED_SUBAGENT_CALL_ID,
+			description: "Audit the subagent UI",
+			modelId: "deepseek-flash",
+			modelName: "DeepSeek Flash",
+			status: "done",
+			steps: [
+				{ kind: "text", text: "Checking how the store keeps live runs." },
+				{ kind: "tool", name: "read_file", summary: "{\"path\":\"src/chat/webview/store.ts\"}" },
+				{ kind: "tool", name: "grep_search", summary: "{\"query\":\"subagent\"}" },
+				{ kind: "tool", name: "run_in_terminal", summary: "{\"command\":\"npm run compile\"}", isError: true },
+				{ kind: "text", text: "The store drops a live run when its `subagent` part arrives." },
+				{ kind: "notice", level: "info", text: "Finished in 5 s." },
+			],
+			startedAt: Date.now() - 5_200,
+			durationMs: 5_200,
+			usage: { promptTokens: 9_800, completionTokens: 640, totalTokens: 10_440 },
+		},
+		{
+			kind: "toolResult",
+			callId: FINISHED_SUBAGENT_CALL_ID,
+			text: [
+				"**Report**",
+				"",
+				"- `store.ts` keeps live runs in a map and drops each one when its finished part arrives.",
+				"- The tool call renders as a `Subagent` card with the model, the description and its steps.",
+				"- The report reuses the tool result preview and full-load behaviour.",
+				"",
+				"Nothing else changed.",
+			].join("\n"),
+		},
+	);
+}
+
+function createLimitPart(): ChatPart {
+	return {
+		kind: "notice",
+		level: "warning",
+		text: "You hit your 5-hour limit. Wait for the reset, then send the message again. No retry was made.",
+		limit: {
+			kind: "limit",
+			provider: "Codex",
+			window: "5-hour",
+			resetAt: Date.now() + 2 * 3_600_000 + 5 * 60_000,
+		},
+	};
+}
+
+/** The host sends a compaction part as the first part of an assistant message. */
+function createCompactionPart(keepFromMessageId: string): ChatPart {
+	return {
+		kind: "compaction",
+		summary: [
+			"## Objective",
+			"",
+			"Keep the chat list responsive with thousands of messages and finish the compaction UI.",
+			"",
+			"## Completed",
+			"",
+			"- Virtual layout with a measured height per message.",
+			"- One `ResizeObserver` for the scroller and every visible message.",
+			"- Markdown rendering without raw HTML injection.",
+			"",
+			"## Open",
+			"",
+			"- Show the summary card and the divider above the kept messages.",
+		].join("\n"),
+		keepFromMessageId,
+		summarizedMessages: 5,
+		tokensBefore: 312_000,
+		tokensAfter: 104_000,
+		method: "deepseek",
+	};
 }
 
 function userText(index: number, random: () => number): string {

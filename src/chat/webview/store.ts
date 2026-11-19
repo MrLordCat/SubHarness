@@ -6,6 +6,7 @@ import {
 	type ChatModelGroup,
 	type ChatRunState,
 	type ChatSessionMeta,
+	type ChatSubagentRun,
 	type ChatToolGroup,
 	type ChatUsage,
 	type HostMessage,
@@ -15,6 +16,7 @@ const HOST_MESSAGE_TYPES = new Set([
 	"init",
 	"changes",
 	"models",
+	"session",
 	"tools",
 	"messageAdded",
 	"partAdded",
@@ -25,6 +27,7 @@ const HOST_MESSAGE_TYPES = new Set([
 	"approval",
 	"approvalResolved",
 	"toolResultFull",
+	"subagent",
 ]);
 
 /** Webview-side chat state shared by the Preact tree; every host update bumps one message version. */
@@ -42,6 +45,7 @@ export class ChatStore {
 	private readonly versions = new Map<string, number>();
 	private readonly messageById = new Map<string, ChatMessage>();
 	private readonly indexById = new Map<string, number>();
+	private readonly liveSubagentRuns = new Map<string, ChatSubagentRun>();
 	private readonly listeners = new Set<() => void>();
 	private versionSeq = 0;
 
@@ -53,6 +57,9 @@ export class ChatStore {
 	};
 
 	versionOf = (messageId: string): number => this.versions.get(messageId) ?? 0;
+
+	/** Live state of a running subagent, until its finished part arrives. */
+	subagentRun = (callId: string): ChatSubagentRun | undefined => this.liveSubagentRuns.get(callId);
 
 	indexOf = (messageId: string): number | undefined => this.indexById.get(messageId);
 
@@ -119,6 +126,7 @@ export class ChatStore {
 				this.changes = update.changes;
 				this.selectedModelId = update.selectedModelId;
 				this.run = update.run;
+				this.liveSubagentRuns.clear();
 				this.rebuildIndexes();
 				return;
 			case "changes":
@@ -129,6 +137,9 @@ export class ChatStore {
 				if (update.selectedModelId !== undefined) {
 					this.selectedModelId = update.selectedModelId;
 				}
+				return;
+			case "session":
+				this.session = update.session;
 				return;
 			case "tools":
 				this.tools = update.tools;
@@ -143,6 +154,7 @@ export class ChatStore {
 				return;
 			case "truncated":
 				applyHostUpdate(this.messages, update);
+				this.liveSubagentRuns.clear();
 				this.rebuildIndexes();
 				return;
 			case "run":
@@ -158,6 +170,17 @@ export class ChatStore {
 				}
 				return;
 			}
+			case "partAdded":
+				applyHostUpdate(this.messages, update);
+				if (update.part.kind === "subagent") {
+					this.liveSubagentRuns.delete(update.part.callId);
+				}
+				this.bump(update.messageId);
+				return;
+			case "subagent":
+				this.liveSubagentRuns.set(update.run.callId, update.run);
+				this.bump(update.messageId);
+				return;
 			default:
 				applyHostUpdate(this.messages, update);
 				if (update.type === "messageAdded") {

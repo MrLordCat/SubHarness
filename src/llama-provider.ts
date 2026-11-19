@@ -2,7 +2,8 @@
 import * as vscode from "vscode";
 import { ApiSourceRouter } from "./providers/api-source-router";
 import { CursorSourceAdapter } from "./providers/api-source-router";
-import { detectBalanceError, detectBalanceFailure, formatBalanceNotice, ProviderBalanceError } from "./providers/balance-errors";
+import { detectBalanceError, detectBalanceFailure, ProviderBalanceError } from "./providers/balance-errors";
+import { reportBalanceNotice } from "./providers/limit-signal";
 import { CursorSdkTransport, type CursorSdkDependencies } from "./cursor/sdk-transport";
 import { CursorProfileTransport } from "./cursor/profile-transport";
 import type { CursorRecordedUsage, CursorLiveTurn } from "./cursor/turn-metrics";
@@ -81,7 +82,7 @@ import {
     type ProviderHealthReport,
     type ProviderHealthSourceReport,
 } from "./diagnostics/provider-health";
-import { BoundedMap, convertMessages, convertTools, stableJsonStringify, stripTerminalControlNoise, validateRequest, type ToolCallingMode, type ToolResultMode } from "./utils";
+import { BoundedMap, convertMessages, convertTools, sanitizeFunctionName, stableJsonStringify, stripTerminalControlNoise, validateRequest, type ToolCallingMode, type ToolResultMode } from "./utils";
 import { prepareHttpToolHistory } from "./providers/http-tool-history";
 import { ensureBuiltInTools } from "./tools/wait-terminal";
 import { LlamaLogSink } from "./logger";
@@ -1224,7 +1225,24 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 .filter(name => name.startsWith("llamacpp_"))
                 .sort()
                 .join("\0");
-        if (countUnchanged && !builtInChanged && !recentActivation && !configChanged) {
+        const isDynamicTool = (name: string): boolean =>
+            name.startsWith("mcp_") || name.startsWith("github-");
+        // Only dynamic tools may linger for the cache; any other retained tool that is gone would still be offered and checked.
+        const offeredNames = new Set((options.tools ?? []).map(tool => sanitizeFunctionName(tool.name)));
+        const removedTools = (previous?.tools ?? [])
+            .map(tool => tool.function.name)
+            .filter(name => !isDynamicTool(name) && !offeredNames.has(name))
+            .sort();
+        // A retained definition with an outdated schema makes the model send arguments the tool no longer accepts.
+        const currentSchemas = new Map(sortedTools.map(tool => [tool.function?.name ?? "", stableJsonStringify(tool.function?.parameters ?? {})]));
+        const schemaChanged = (previous?.tools ?? [])
+            .filter(tool => {
+                const current = currentSchemas.get(tool.function.name);
+                return current !== undefined && current !== stableJsonStringify(tool.function.parameters ?? {});
+            })
+            .map(tool => tool.function.name)
+            .sort();
+        if (countUnchanged && !builtInChanged && removedTools.length === 0 && schemaChanged.length === 0 && !recentActivation && !configChanged) {
             this.stableToolCatalogs.delete(scope);
             this.stableToolCatalogs.set(scope, previous);
             this.dirtyToolCatalogScopes.add(scope);
@@ -1253,9 +1271,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         // drop tools that are no longer available and append the new dynamic
         // ones at the end. The stable prefix stays byte-identical, only the
         // tail rewrites.
-        const isDynamicTool = (name: string): boolean =>
-            name.startsWith("mcp_") || name.startsWith("github-");
-        if (previous && !recentActivation && !configChanged && Array.isArray(config.tools)) {
+        if (previous && !recentActivation && !configChanged && schemaChanged.length === 0 && Array.isArray(config.tools)) {
             const previousNames = new Set(previous.tools.map(tool => tool.function.name));
             const currentNames = new Set(sortedTools.map(tool => tool.function.name));
             const previousStable = [...previousNames].filter(name => !isDynamicTool(name)).sort();
@@ -1321,7 +1337,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             this.log("chat.tools.catalog_refreshed", {
                 requestId,
                 modelId,
-                reason: recentActivation ? "activation" : "tool-unavailable",
+                reason: recentActivation ? "activation" : schemaChanged.length > 0 ? "schema-changed" : "tool-unavailable",
+                schemaChangedTools: schemaChanged,
+                retainedRemovedTools: removedTools,
                 previousToolCount: previous.tools.length,
                 currentToolCount: sortedTools.length,
                 removedTools: [...previousNames].filter(name => !currentNames.has(name)).sort(),
@@ -6178,7 +6196,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     status: balance.status,
                     modelId: model.id,
                 });
-                progress.report(new vscode.LanguageModelTextPart(formatBalanceNotice(balance)));
+                reportBalanceNotice(progress, balance);
                 return;
             } else {
                 this.logError("chat.turn.failed", err, { requestId });

@@ -188,4 +188,113 @@ suite("Chat session store", () => {
 		await store.appendMessage(session.id, textMessage("m1", "user", "still works"));
 		assert.deepStrictEqual((await store.load(session.id)).map(message => message.id), ["m1"]);
 	});
+
+	test("replays host context and appended compaction parts from a new store", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create("model-a");
+		const user = chatMessage("u1", "user", [{ kind: "text", text: "Hello" }], { hostContext: "<context>\nnow\n</context>" });
+		const assistant = chatMessage("a1", "assistant", [{ kind: "text", text: "Answer" }], { modelId: "model-a" });
+		const compaction: ChatPart = {
+			kind: "compaction",
+			summary: "Earlier turns",
+			keepFromMessageId: "u1",
+			summarizedMessages: 2,
+			tokensBefore: 400,
+			tokensAfter: 120,
+			method: "extractive",
+		};
+		await store.appendMessage(session.id, user);
+		await store.appendMessage(session.id, assistant);
+		await store.appendPart(session.id, "a1", compaction);
+		await store.flush();
+
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual(await reopened.load(session.id), [
+			user,
+			{ ...assistant, parts: [...assistant.parts, compaction] },
+		]);
+	});
+
+	test("replays a notice with its limit info", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create("model-a");
+		const notice: ChatPart = {
+			kind: "notice",
+			level: "warning",
+			text: "Codex 5-hour limit reached.",
+			limit: { kind: "limit", provider: "Codex", window: "5-hour", resetAt: 1_700_000_000_000 },
+		};
+		await store.appendMessage(session.id, chatMessage("a1", "assistant", [notice]));
+		await store.flush();
+
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual((await reopened.load(session.id))[0].parts, [notice]);
+	});
+
+	test("skips a log line whose notice limit is malformed", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		await store.appendMessage(session.id, textMessage("m1", "user", "kept"));
+		await store.flush();
+		const line = JSON.stringify({
+			t: "part",
+			messageId: "m1",
+			part: { kind: "notice", level: "warning", text: "bad limit", limit: { kind: "limit", provider: 5 } },
+		});
+		await fs.appendFile(path.join(root, `${session.id}.jsonl`), `${line}\n`, "utf8");
+
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual((await reopened.load(session.id))[0].parts, [{ kind: "text", text: "kept" }]);
+	});
+
+	test("replays a subagent part from a new store", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create("model-a");
+		const subagent: ChatPart = {
+			kind: "subagent",
+			callId: "call-sub",
+			description: "Check",
+			modelId: "claude::smart",
+			modelName: "Smart (Claude)",
+			status: "done",
+			steps: [
+				{ kind: "text", text: "Looking." },
+				{ kind: "tool", name: "read", summary: "{\"path\":\"a.txt\"}", isError: true },
+				{ kind: "notice", level: "info", text: "note" },
+			],
+			startedAt: 1_700_000_000_000,
+			durationMs: 1_200,
+			usage: { promptTokens: 3, completionTokens: 4, totalTokens: 7 },
+		};
+		await store.appendMessage(session.id, chatMessage("a1", "assistant", [subagent]));
+		await store.flush();
+
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual((await reopened.load(session.id))[0].parts, [subagent]);
+	});
+
+	test("skips a log line whose subagent step is malformed", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		await store.appendMessage(session.id, textMessage("m1", "user", "kept"));
+		await store.flush();
+		const line = JSON.stringify({
+			t: "part",
+			messageId: "m1",
+			part: {
+				kind: "subagent",
+				callId: "call-sub",
+				description: "Check",
+				modelId: "claude::smart",
+				modelName: "Smart (Claude)",
+				status: "done",
+				startedAt: 1_700_000_000_000,
+				steps: [{ kind: "tool", name: "read" }],
+			},
+		});
+		await fs.appendFile(path.join(root, `${session.id}.jsonl`), `${line}\n`, "utf8");
+
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual((await reopened.load(session.id))[0].parts, [{ kind: "text", text: "kept" }]);
+	});
 });

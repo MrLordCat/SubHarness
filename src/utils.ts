@@ -73,7 +73,7 @@ function isIntegerLikePropertyName(propertyName: string | undefined): boolean {
  * @param name - The original function name.
  * @returns The sanitized function name.
  */
-function sanitizeFunctionName(name: unknown): string {
+export function sanitizeFunctionName(name: unknown): string {
     if (typeof name !== "string" || !name){
 		return "tool";
 	}

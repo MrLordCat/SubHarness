@@ -16,6 +16,20 @@ interface MessageListProps {
 	onLoadToolResult: (messageId: string, callId: string) => void;
 }
 
+/** The newest compaction decides where the "summarized" divider goes. */
+function compactionBoundaryId(messages: ChatMessage[]): string | undefined {
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const parts = messages[index].parts;
+		for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
+			const part = parts[partIndex];
+			if (part.kind === "compaction") {
+				return part.keepFromMessageId;
+			}
+		}
+	}
+	return undefined;
+}
+
 export function MessageList({ store, running, onEditMessage, onLoadToolResult }: MessageListProps) {
 	const scrollerRef = useRef<HTMLDivElement>(null);
 	const observerRef = useRef<ResizeObserver | null>(null);
@@ -144,6 +158,7 @@ export function MessageList({ store, running, onEditMessage, onLoadToolResult }:
 
 	const viewport = viewportHeight || scrollerRef.current?.clientHeight || 600;
 	const { start, end } = layout.range(scrollTop, viewport, OVERSCAN);
+	const boundaryId = compactionBoundaryId(store.messages);
 	const items: ComponentChildren[] = [];
 	for (let index = start; index < end; index += 1) {
 		const message = store.messages[index];
@@ -162,11 +177,13 @@ export function MessageList({ store, running, onEditMessage, onLoadToolResult }:
 					version={store.versionOf(message.id)}
 					running={running}
 					editing={message.id === editingId}
+					compactionBoundary={message.id === boundaryId}
 					changedFilesSinceTurn={message.id === editingId ? store.filesChangedSince(message.turn) : 0}
 					onEdit={onEdit}
 					onCancelEdit={onCancelEdit}
 					onEditMessage={submitEdit}
 					onLoadToolResult={onLoadToolResult}
+					liveSubagentRun={store.subagentRun}
 				/>
 			</div>,
 		);

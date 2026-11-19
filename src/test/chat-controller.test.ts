@@ -4,11 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { ChatChangeTrackerLike, TurnSnapshot } from "../chat/changes/change-tracker";
-import { ChatController } from "../chat/chat-controller";
+import { ChatController, type ChatControllerDeps } from "../chat/chat-controller";
+import type { ChatCompactionPlan } from "../chat/compaction";
+import { compactionSummaryText } from "../chat/lm-messages";
 import { ChatSessionStore } from "../chat/session-store";
 import { groupModels } from "../chat/shared/model-groups";
 import { applyHostUpdate, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatChangeSet, type ChatMessage, type ChatToolGroup, type HostMessage } from "../chat/shared/protocol";
 import { createChatToolSource, DENIED_TOOL_RESULT, type ChatToolSource } from "../chat/tool-executor";
+import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
 import type { ChatTool } from "../chat/tools/types";
 
 const MODELS: vscode.LanguageModelChatInformation[] = [
@@ -195,7 +198,13 @@ function loggingTools(calls: string[]): ChatToolSource {
 	};
 }
 
-function createHarness(root: string, backend: FakeBackend, tools?: ChatToolSource, changes?: ChatChangeTrackerLike): Harness {
+function createHarness(
+	root: string,
+	backend: FakeBackend,
+	tools?: ChatToolSource,
+	changes?: ChatChangeTrackerLike,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation">,
+): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
 	const controller = new ChatController({
@@ -205,6 +214,7 @@ function createHarness(root: string, backend: FakeBackend, tools?: ChatToolSourc
 		tools: tools ?? fakeTools(() => ({ text: "", isError: false })).executor,
 		state,
 		changes,
+		...extra,
 	});
 	const webview = new FakeWebview();
 	controller.attach(webview.asWebview());
@@ -219,6 +229,13 @@ async function waitFor(condition: () => boolean, what: string): Promise<void> {
 		}
 		await new Promise<void>(resolve => setTimeout(resolve, 10));
 	}
+}
+
+function messageText(message: vscode.LanguageModelChatRequestMessage): string {
+	return message.content
+		.filter((part): part is vscode.LanguageModelTextPart => part instanceof vscode.LanguageModelTextPart)
+		.map(part => part.value)
+		.join("");
 }
 
 suite("chat controller", () => {
@@ -418,6 +435,34 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(second.messages, []);
 		assert.deepStrictEqual(second.run, { running: false });
 		assert.strictEqual((await current.store.list()).length, 2);
+	});
+
+	test("newChat abandons the previous session", async () => {
+		const abandoned: string[] = [];
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, {
+			abandonConversation: async conversationId => { abandoned.push(conversationId); },
+		});
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const previous = current.webview.ofType("init")[0].session.id;
+
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		assert.deepStrictEqual(abandoned, [previous]);
+	});
+
+	test("a failing abandonConversation does not break newChat", async () => {
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, {
+			abandonConversation: async () => { throw new Error("cannot abandon"); },
+		});
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		assert.strictEqual(current.webview.ofType("init").length, 2);
 	});
 
 	test("broadcasts updates to every attached webview", async () => {
@@ -645,5 +690,243 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "editMessage", messageId: second()!.id, text: "second, again" });
 		await waitFor(() => finished() === 4, "edited again");
 		assert.deepStrictEqual(calls, ["keep:f1", "undo:all", "undoSince:2", "forget:2"]);
+	});
+
+	test("sends the system prompt and keeps each user message's host context", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart("first reply")),
+			progress => progress.report(new vscode.LanguageModelTextPart("second reply")),
+		]);
+		let turn = 0;
+		const current = createHarness(root, backend, undefined, undefined, {
+			prompt: {
+				systemPrompt: async () => "SYSTEM",
+				turnContext: () => `<context>\nturn ${++turn}\n</context>`,
+			},
+		});
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "Hello" });
+		await waitFor(() => finished() === 1, "first turn");
+		current.webview.receive({ type: "send", text: "Again" });
+		await waitFor(() => finished() === 2, "second turn");
+
+		const first = backend.requests[0].messages;
+		assert.strictEqual(first[0].role as number, 3);
+		assert.strictEqual(messageText(first[0]), "SYSTEM");
+		assert.strictEqual(first[1].role as number, vscode.LanguageModelChatMessageRole.User);
+		assert.strictEqual(messageText(first[1]), "<context>\nturn 1\n</context>\n<userRequest>\nHello\n</userRequest>");
+
+		const second = backend.requests[1].messages;
+		assert.strictEqual(second[0].role as number, 3);
+		assert.strictEqual(messageText(second[1]), messageText(first[1]));
+		assert.strictEqual(second[3].role as number, vscode.LanguageModelChatMessageRole.User);
+		assert.strictEqual(messageText(second[3]), "<context>\nturn 2\n</context>\n<userRequest>\nAgain\n</userRequest>");
+
+		const hostContexts = current.webview.ofType("messageAdded")
+			.filter(message => message.message.role === "user")
+			.map(message => message.message.hostContext);
+		assert.deepStrictEqual(hostContexts, ["<context>\nturn 1\n</context>", "<context>\nturn 2\n</context>"]);
+
+		await current.store.flush();
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		const persisted = await new ChatSessionStore(root).load(sessionId);
+		assert.deepStrictEqual(persisted.filter(message => message.role === "user").map(message => message.hostContext), hostContexts);
+	});
+
+	test("broadcasts the session title after the first message", async () => {
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("ok"))]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Name this chat" });
+		await waitFor(() => current.webview.ofType("session").length > 0, "session update");
+
+		const session = current.webview.ofType("session").at(-1);
+		assert.ok(session?.session.title.startsWith("Name this chat"));
+	});
+
+	test("compacts a long chat before another model takes over", async () => {
+		const longReply = "x".repeat(2_000);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart(longReply)),
+			progress => progress.report(new vscode.LanguageModelTextPart("second reply")),
+		]);
+		const plans: ChatCompactionPlan[] = [];
+		const current = createHarness(root, backend, undefined, undefined, {
+			compaction: {
+				summarize: async plan => {
+					plans.push(plan);
+					return { summary: "SUMMARY", method: "deepseek" };
+				},
+				limits: () => ({ triggerTokens: 50, targetTokens: 100 }),
+			},
+		});
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "First question" });
+		await waitFor(() => finished() === 1, "first turn");
+		current.webview.receive({ type: "selectModel", modelId: "claude::smart" });
+		await waitFor(() => current.webview.ofType("models").some(message => message.selectedModelId === "claude::smart"), "model selection");
+		current.webview.receive({ type: "send", text: "Second question" });
+		await waitFor(() => finished() === 2, "second turn");
+
+		const added = current.webview.ofType("messageAdded").map(message => message.message);
+		const user1 = added.find(message => message.role === "user" && message.turn === 1);
+		const assistant1 = added.find(message => message.role === "assistant" && message.turn === 1);
+		const user2 = added.find(message => message.role === "user" && message.turn === 2);
+		const assistant2 = added.find(message => message.role === "assistant" && message.turn === 2);
+		assert.ok(user1 && assistant1 && user2 && assistant2);
+
+		assert.strictEqual(plans.length, 1);
+		assert.deepStrictEqual(plans[0].dropped.map(message => message.id), [user1.id, assistant1.id]);
+		assert.ok(current.webview.ofType("run").some(message => message.run.detail === "Compacting context…"));
+
+		const parts = current.webview.ofType("partAdded").filter(message => message.messageId === assistant2.id).map(message => message.part);
+		assert.strictEqual(parts[0]?.kind, "compaction");
+		const compaction = parts[0];
+		if (compaction.kind !== "compaction") {
+			throw new Error("expected a compaction part");
+		}
+		assert.strictEqual(compaction.summary, "SUMMARY");
+		assert.strictEqual(compaction.keepFromMessageId, user2.id);
+
+		const secondRequest = backend.requests[1].messages;
+		assert.strictEqual(secondRequest.length, 2);
+		assert.strictEqual(secondRequest[0].role as number, vscode.LanguageModelChatMessageRole.User);
+		assert.strictEqual(messageText(secondRequest[0]), compactionSummaryText(compaction));
+		assert.strictEqual(secondRequest[1].role as number, vscode.LanguageModelChatMessageRole.User);
+		assert.strictEqual(messageText(secondRequest[1]), "Second question");
+		assert.ok(!secondRequest.some(message => messageText(message).includes(longReply)));
+
+		await current.store.flush();
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		const persisted = await new ChatSessionStore(root).load(sessionId);
+		const savedAssistant = persisted.find(message => message.id === assistant2.id);
+		assert.ok(savedAssistant);
+		assert.strictEqual(savedAssistant.parts[0].kind, "compaction");
+	});
+
+	test("does not compact when the same model continues", async () => {
+		const longReply = "x".repeat(2_000);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart(longReply)),
+			progress => progress.report(new vscode.LanguageModelTextPart("second reply")),
+		]);
+		const plans: ChatCompactionPlan[] = [];
+		const current = createHarness(root, backend, undefined, undefined, {
+			compaction: {
+				summarize: async plan => {
+					plans.push(plan);
+					return { summary: "SUMMARY", method: "deepseek" };
+				},
+				limits: () => ({ triggerTokens: 50, targetTokens: 100 }),
+			},
+		});
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "First question" });
+		await waitFor(() => finished() === 1, "first turn");
+		current.webview.receive({ type: "send", text: "Second question" });
+		await waitFor(() => finished() === 2, "second turn");
+
+		assert.deepStrictEqual(plans, []);
+		assert.deepStrictEqual(backend.requests[1].messages.map(messageText), ["First question", longReply, "Second question"]);
+	});
+
+	test("runs a subagent and gives the parent only its report", async () => {
+		const probe: ChatTool = {
+			name: "probe",
+			description: "Read a file.",
+			inputSchema: { type: "object", properties: {} },
+			group: "files",
+			readOnly: true,
+			invoke: async () => "probe body",
+		};
+		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
+		const source = createChatToolSource({
+			enabledTools: () => [subagent, probe],
+			groups: () => [{
+				id: "agents",
+				label: "Subagents",
+				tools: [
+					{ name: subagent.name, description: subagent.description, enabled: true },
+					{ name: probe.name, description: probe.description, enabled: true },
+				],
+			}],
+			setEnabled: async () => undefined,
+		});
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-sub", SUBAGENT_TOOL_NAME, { description: "Check", prompt: "Inspect a.txt", model: "Smart (Claude)" })),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-probe", "probe", { path: "a.txt" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("REPORT")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Please inspect" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+
+		assert.strictEqual(backend.requests.length, 4);
+		const subagentRequest = backend.requests[1];
+		assert.ok(!(subagentRequest.options.tools ?? []).some(tool => tool.name === SUBAGENT_TOOL_NAME));
+		assert.ok(subagentRequest.messages.some(message => messageText(message).includes("Inspect a.txt")));
+		assert.ok(!subagentRequest.messages.some(message => messageText(message).includes("Please inspect")));
+
+		const parts = current.webview.ofType("partAdded").map(message => message.part);
+		const subagentPartIndex = parts.findIndex(part => part.kind === "subagent");
+		assert.ok(subagentPartIndex >= 0);
+		const subagentPart = parts[subagentPartIndex];
+		if (subagentPart.kind !== "subagent") {
+			throw new Error("expected a subagent part");
+		}
+		assert.strictEqual(subagentPart.callId, "call-sub");
+		assert.strictEqual(subagentPart.status, "done");
+		assert.strictEqual(subagentPart.modelId, "claude::smart");
+		assert.ok(subagentPart.steps.some(step => step.kind === "tool" && step.name === "probe"));
+
+		const reportIndex = parts.findIndex(part => part.kind === "toolResult" && part.callId === "call-sub");
+		assert.ok(reportIndex > subagentPartIndex, "the subagent part is added before the subagent tool result");
+		const report = parts[reportIndex];
+		if (report.kind !== "toolResult") {
+			throw new Error("expected the subagent tool result");
+		}
+		assert.strictEqual(report.text, "REPORT");
+		assert.strictEqual(report.isError, false);
+
+		await current.store.flush();
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		const persisted = await new ChatSessionStore(root).load(sessionId);
+		const assistant = persisted.find(message => message.role === "assistant");
+		assert.ok(assistant?.parts.some(part => part.kind === "subagent" && part.callId === "call-sub" && part.status === "done"));
+	});
+
+	test("an unknown subagent model gives an error result and the turn continues", async () => {
+		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
+		const source = createChatToolSource({
+			enabledTools: () => [subagent],
+			groups: () => [],
+			setEnabled: async () => undefined,
+		});
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-sub", SUBAGENT_TOOL_NAME, { description: "Check", prompt: "x", model: "Missing Model" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+
+		assert.strictEqual(backend.requests.length, 2);
+		const result = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "toolResult");
+		if (result?.kind !== "toolResult") {
+			throw new Error("expected a tool result");
+		}
+		assert.strictEqual(result.callId, "call-sub");
+		assert.strictEqual(result.isError, true);
+		assert.ok(result.text.includes('Unknown subagent model "Missing Model"'));
+		assert.strictEqual(current.webview.ofType("textDelta").map(delta => delta.text).join(""), "Done");
 	});
 });

@@ -4,6 +4,7 @@ import { MAX_TOOL_RESULT_CHARS, runAgentTurn, type AgentTurnSink, type ChatToolE
 import { toLanguageModelMessages } from "../chat/lm-messages";
 import { groupModels } from "../chat/shared/model-groups";
 import type { ChatMessage, ChatPart, ChatStructuredPart, ChatUsage } from "../chat/shared/protocol";
+import { limitSignalPart } from "../providers/limit-signal";
 
 const none: vscode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) };
 const model: vscode.LanguageModelChatInformation = {
@@ -223,6 +224,38 @@ suite("chat agent loop", () => {
 		const body = resultPart.content[0];
 		assert.ok(body instanceof vscode.LanguageModelTextPart);
 		assert.strictEqual(body.value, "file body");
+	});
+
+	test("turns a limit signal into one notice and swallows the repeated text", async () => {
+		const resetAt = 1_700_000_000_000;
+		const fake = fakeBackend([progress => {
+			progress.report(limitSignalPart({ kind: "limit", provider: "Codex", text: "Codex limit reached.", window: "5-hour", resetAt }));
+			progress.report(new vscode.LanguageModelTextPart("Codex limit "));
+			progress.report(new vscode.LanguageModelTextPart("reached."));
+			progress.report(new vscode.LanguageModelTextPart("Extra."));
+		}]);
+		const { sink, events, parts } = recorder();
+		const result = await runAgentTurn({
+			backend: fake.provider,
+			model,
+			history: [chatMessage("user", [{ kind: "text", text: "Go" }])],
+			conversationId: "chat-limit",
+			turn: 1,
+			tools: tools(async () => ({ text: "", isError: false })),
+			sink,
+			token: none,
+		});
+		assert.deepStrictEqual(result, { rounds: 1, stopReason: "done" });
+		assert.deepStrictEqual(events, ["part:notice", "text:text:Extra."]);
+		const notices = parts.filter(part => part.kind === "notice");
+		assert.strictEqual(notices.length, 1);
+		const notice = notices[0];
+		if (notice.kind !== "notice") {
+			throw new Error("expected a notice");
+		}
+		assert.strictEqual(notice.text, "Codex limit reached.");
+		assert.deepStrictEqual(notice.limit, { kind: "limit", provider: "Codex", window: "5-hour", resetAt });
+		assert.strictEqual(fake.requests[0].options.modelOptions?._aabLimitSignals, true);
 	});
 
 	test("turns a thrown tool error into an error result and continues", async () => {

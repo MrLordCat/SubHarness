@@ -1,5 +1,89 @@
 # Changelog
 
+## 1.21.13 (development patch) - 2026-11-19
+
+- Fixed: after a tool was renamed or removed, DeepSeek and other API models
+  could keep seeing the old tool in a chat that had already used it, as long
+  as the number of tools stayed the same. In the bridge chat the model kept
+  calling `run_subagent` with its old schema after the tool became
+  `subagent`. The stored tool list is now rebuilt when a tool in it no longer
+  exists. Only tools of MCP servers, which often swap tools between restarts,
+  may still linger to keep the prompt cache.
+
+## 1.21.12 (development patch) - 2026-11-19
+
+- Fixed: subagent calls from the bridge chat still failed with "$.model is
+  not one of the allowed values" after 1.21.11. Two causes:
+  - To keep the prompt cache warm, DeepSeek and other API models kept sending
+    a stored copy of the tool list while the number of tools stayed the same.
+    That copy still had the old `run_subagent` schema with its fixed model
+    list, and tool calls were checked against it. A tool whose schema changed
+    now replaces the stored copy once; a changed description alone still
+    keeps the cache.
+  - The bridge treated a tool named `run_subagent` as Copilot's `runSubagent`.
+    It attached Copilot's model rules to it and, for Codex, Claude, Coco and
+    Cursor, a fixed list of `… (llamacpp)` names. The chat tool is now called
+    `subagent`.
+- When a provider rejects a tool call and the turn stops, the chat says which
+  tool call was rejected instead of showing only the validator message.
+
+## 1.21.11 (development patch) - 2026-11-19
+
+- Fixed: a `run_subagent` call could end the whole chat turn with
+  "$.model is not one of the allowed values". DeepSeek and other API models
+  have their tool calls checked against the tool's schema, and a model name
+  that differed slightly from the listed one failed that check. When another
+  tool call had already been sent in the same reply, the request could not be
+  retried. The tool now accepts a name without the provider suffix or with
+  different spelling, such as `deepseek-flash` or `DeepSeek Flash`. An
+  unknown name returns the list of valid models, so the model can correct
+  the call and continue.
+
+## 1.21.10 (development patch) - 2026-11-19
+
+- The bridge chat has subagents. The model can hand a bounded subtask to
+  another model with the new `run_subagent` tool: the subagent works with the
+  same tools but without the conversation, and the chat model receives only
+  its final report. The model list comes from the bridge's subagent catalog,
+  cheapest first; Codex Sol and subscriptions at their limit are left out.
+- A subagent appears as a card with its model, task and live status
+  ("Working… 4 steps · 16 s"). The card lists the tool calls it made and
+  shows the report. Its file changes join the same Keep/Undo panel, and its
+  dangerous commands wait for approval like any other.
+- Subagents can be turned off in the tool picker under **Subagents**.
+
+## 1.21.9 (development patch) - 2026-11-18
+
+- When Codex or Claude hits a usage limit, or a DeepSeek or other API balance
+  is empty, the bridge chat shows a card with the provider, the reason and,
+  when known, the reset time ("Resets at 22:52 (in 2 h 5 min)"). **Choose
+  another model** opens the model picker. Providers now report limits in a
+  machine-readable form next to the usual notice; Copilot Chat still gets
+  only the notice text.
+- **New chat** in the bridge chat now releases a Codex or Claude turn that was
+  stopped while it waited for a tool result. Before, a stopped Claude turn kept
+  its session open, and a Codex turn waited up to 30 minutes. Codex keeps the
+  thread, so going back to that chat later continues it.
+
+## 1.21.8 (development patch) - 2026-11-18
+
+- The bridge chat now sends a system prompt like Copilot Chat does: how to
+  use the tools, the operating system and shell, the workspace folders, and
+  the project's `AGENTS.md`, `CLAUDE.md` and `.github/copilot-instructions.md`.
+  Each message also carries the date and the open file with its selection.
+  That context is stored with the message, so every later request repeats it
+  unchanged and the provider caches stay valid.
+- When another model takes over a chat that is larger than
+  `llamacpp.providerSwitchContextTokens` (250k by default), the chat first
+  summarizes the older turns down to about 110k tokens. DeepSeek writes the
+  summary when a DeepSeek key is set; otherwise a summary is extracted from
+  the messages. The status line shows "Compacting context…" meanwhile.
+- The summary appears as a card in the chat with the number of summarized
+  messages and the size before and after; the full history stays visible and
+  a divider marks where the model's view starts. Editing a message from before
+  the summary removes it again.
+- The chat title updates as soon as the first message is sent.
+
 ## 1.21.7 (development patch) - 2026-11-18
 
 - The bridge chat collects the files the agent changes. A panel above the

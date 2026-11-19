@@ -461,6 +461,7 @@ function isChatMessage(value: unknown): value is ChatMessage {
 		&& Array.isArray(value.parts)
 		&& value.parts.every(isChatPart)
 		&& (value.modelId === undefined || typeof value.modelId === "string")
+		&& (value.hostContext === undefined || typeof value.hostContext === "string")
 		&& (value.usage === undefined || isChatUsage(value.usage));
 }
 
@@ -477,10 +478,49 @@ function isChatPart(value: unknown): value is ChatPart {
 		case "toolResult":
 			return typeof value.callId === "string" && typeof value.text === "string";
 		case "notice":
-			return (value.level === "info" || value.level === "warning" || value.level === "error") && typeof value.text === "string";
+			return (value.level === "info" || value.level === "warning" || value.level === "error")
+				&& typeof value.text === "string"
+				&& (value.limit === undefined || isChatLimitInfo(value.limit));
+		case "compaction":
+			return typeof value.summary === "string"
+				&& typeof value.keepFromMessageId === "string"
+				&& typeof value.summarizedMessages === "number"
+				&& typeof value.tokensBefore === "number"
+				&& typeof value.tokensAfter === "number"
+				&& (value.method === "deepseek" || value.method === "extractive");
+		case "subagent":
+			return typeof value.callId === "string"
+				&& typeof value.description === "string"
+				&& typeof value.modelId === "string"
+				&& typeof value.modelName === "string"
+				&& (value.status === "running" || value.status === "done" || value.status === "failed" || value.status === "stopped")
+				&& typeof value.startedAt === "number"
+				&& Array.isArray(value.steps)
+				&& value.steps.every(isSubagentStep)
+				&& (value.usage === undefined || isChatUsage(value.usage));
 		default:
 			return false;
 	}
+}
+
+function isSubagentStep(value: unknown): boolean {
+	if (!isRecord(value)) {
+		return false;
+	}
+	switch (value.kind) {
+		case "tool": return typeof value.name === "string" && typeof value.summary === "string";
+		case "text": return typeof value.text === "string";
+		case "notice": return typeof value.level === "string" && typeof value.text === "string";
+		default: return false;
+	}
+}
+
+function isChatLimitInfo(value: unknown): boolean {
+	return isRecord(value)
+		&& (value.kind === "limit" || value.kind === "balance")
+		&& typeof value.provider === "string"
+		&& (value.window === undefined || typeof value.window === "string")
+		&& (value.resetAt === undefined || typeof value.resetAt === "number");
 }
 
 function isChatUsage(value: unknown): value is ChatUsage {

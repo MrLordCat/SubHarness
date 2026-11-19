@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
+import { ToolCallValidationError } from "../tools/tool-call-reliability";
 import { runAgentTurn, type AgentTurnSink, type ChatToolExecutor } from "./agent-loop";
 import type { ChatWebviewBridge } from "./chat-view";
+import { compactChatHistory, estimateTextTokens, planChatCompaction, previousModelId, type ChatCompactionLimits, type ChatSummarizer } from "./compaction";
 import type { ChatSessionStore } from "./session-store";
+import { runChatSubagent } from "./subagent-runner";
+import { SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
 import { groupModels } from "./shared/model-groups";
 import { appendChatText, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS } from "./shared/protocol";
 import type {
@@ -21,7 +25,7 @@ import type {
 } from "./shared/protocol";
 import type { ChatChangeTrackerLike, TurnSnapshot } from "./changes/change-tracker";
 import type { ChatToolSource } from "./tool-executor";
-import type { ChatToolConfirmation } from "./tools/types";
+import type { ChatToolConfirmation, SubagentRequest } from "./tools/types";
 
 export interface ChatControllerDeps {
 	backend: Pick<vscode.LanguageModelChatProvider, "provideLanguageModelChatResponse" | "provideLanguageModelChatInformation">;
@@ -33,12 +37,29 @@ export interface ChatControllerDeps {
 	/** Records the files each turn changed; without it the chat has no Keep/Undo. */
 	changes?: ChatChangeTrackerLike;
 	openChange?: (sessionId: string, id: string) => Promise<void>;
+	/** System prompt and per-turn host context; without it requests carry only the history. */
+	prompt?: ChatPromptProvider;
+	/** Summarizes older turns before another model takes over a long chat. */
+	compaction?: ChatCompactionDeps;
+	/** Tells the providers a chat was left, so a turn stopped during a tool call stops waiting for results. */
+	abandonConversation?: (conversationId: string) => Promise<void>;
+}
+
+export interface ChatPromptProvider {
+	systemPrompt(): Promise<string>;
+	turnContext(): string;
+}
+
+export interface ChatCompactionDeps {
+	summarize: ChatSummarizer;
+	limits(): Omit<ChatCompactionLimits, "fixedTokens">;
 }
 
 const ACTIVE_SESSION_KEY = "llamacpp.chat.activeSession";
 const LAST_MODEL_KEY = "llamacpp.chat.lastModel";
 const DELTA_FLUSH_MS = 50;
 const NO_MODEL_NOTICE = "No model is available. Configure a provider first.";
+const COMPACTING_DETAIL = "Compacting context…";
 
 interface DeltaBuffer {
 	kind: ChatTextKind;
@@ -97,6 +118,14 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function turnErrorText(error: unknown): string {
+	if (error instanceof ToolCallValidationError) {
+		const tool = error.toolName ? ` to ${error.toolName}` : "";
+		return `The provider rejected the model's call${tool} before it ran (${error.message}), so the turn stopped. Send the message again or rephrase it.`;
+	}
+	return errorMessage(error);
 }
 
 function emptyChangeSet(): ChatChangeSet {
@@ -179,10 +208,22 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	async newChat(): Promise<void> {
 		this._stop();
 		await this._turnCompletion;
+		const previous = this._session?.id;
 		await this._ensureModels();
 		const session = await this._deps.store.create(this._selectedModelId);
 		await this._activateSession(session);
 		this._broadcast(this._initMessage());
+		if (previous && previous !== session.id) {
+			await this._abandon(previous);
+		}
+	}
+
+	private async _abandon(sessionId: string): Promise<void> {
+		try {
+			await this._deps.abandonConversation?.(sessionId);
+		} catch (error) {
+			this._log("chat.abandon_failed", { message: errorMessage(error) });
+		}
 	}
 
 	dispose(): void {
@@ -364,8 +405,17 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			return;
 		}
 		const turn = maxTurn(messages) + 1;
-		const user: ChatMessage = { id: randomUUID(), role: "user", turn, createdAt: Date.now(), parts: [{ kind: "text", text }] };
+		const hostContext = this._turnContext();
+		const user: ChatMessage = {
+			id: randomUUID(),
+			role: "user",
+			turn,
+			createdAt: Date.now(),
+			parts: [{ kind: "text", text }],
+			...(hostContext ? { hostContext } : {}),
+		};
 		await this._appendMessage(messages, session.id, user);
+		await this._refreshSessionMeta(session.id);
 		const history = messages.slice();
 		const assistant: ChatMessage = { id: randomUUID(), role: "assistant", turn, createdAt: Date.now(), modelId: model.id, parts: [] };
 		await this._appendMessage(messages, session.id, assistant);
@@ -395,12 +445,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				appendChatText(running.message.parts, kind, text);
 				this._queueDelta(running, kind, text);
 			},
-			part: part => {
-				this._flushDelta(running);
-				running.message.parts.push(part);
-				this._persistFinishedParts(running);
-				this._broadcast({ type: "partAdded", messageId: running.message.id, part: viewPart(part) });
-			},
+			part: part => this._addPart(running, part),
 			usage: usage => {
 				running.message.usage = usage;
 				void this._persistUsage(running, usage);
@@ -410,24 +455,35 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		const source = this._deps.tools;
 		const tracker = this._deps.changes;
 		let begin: Promise<TurnSnapshot | undefined> | undefined;
+		const invoke = async (name: string, input: unknown, token: vscode.CancellationToken, callId: string | undefined, nested: boolean) => {
+			// The snapshot must exist before the first tool that may write; read-only rounds cost nothing.
+			if (tracker && !begin && !source.isReadOnly?.(name)) {
+				begin = tracker.beginTurn().catch(error => {
+					this._log("chat.changes.begin_failed", { message: errorMessage(error) });
+					return undefined;
+				});
+			}
+			await begin;
+			return source.invoke(name, input, token, {
+				callId,
+				approve: confirmation => this._requestApproval(running, name, callId, confirmation, token),
+				...(nested ? {} : {
+					runSubagent: (request: SubagentRequest, subagentToken: vscode.CancellationToken) =>
+						this._runSubagent(running, callId ?? randomUUID(), request, subagentTools, subagentToken),
+				}),
+			});
+		};
+		const subagentTools: ChatToolExecutor = {
+			get tools() { return source.tools.filter(tool => tool.name !== SUBAGENT_TOOL_NAME); },
+			invoke: (name, input, token, callId) => invoke(name, input, token, callId, true),
+		};
 		const tools: ChatToolExecutor = {
 			get tools() { return source.tools; },
-			invoke: async (name, input, token, callId) => {
-				// The snapshot must exist before the first tool that may write; read-only rounds cost nothing.
-				if (tracker && !begin && !source.isReadOnly?.(name)) {
-					begin = tracker.beginTurn().catch(error => {
-						this._log("chat.changes.begin_failed", { message: errorMessage(error) });
-						return undefined;
-					});
-				}
-				await begin;
-				return source.invoke(name, input, token, {
-					callId,
-					approve: confirmation => this._requestApproval(running, name, callId, confirmation, token),
-				});
-			},
+			invoke: (name, input, token, callId) => invoke(name, input, token, callId, false),
 		};
 		try {
+			const system = await this._systemPrompt();
+			const initialParts = await this._compactForModel(running, model, history, system);
 			await runAgentTurn({
 				backend: this._deps.backend,
 				model,
@@ -437,12 +493,14 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				tools,
 				sink,
 				token: running.cts.token,
+				system,
+				initialParts,
 			});
 		} catch (error) {
 			this._flushDelta(running);
 			const notice: ChatStructuredPart = error instanceof vscode.CancellationError
 				? { kind: "notice", level: "info", text: "Stopped." }
-				: { kind: "notice", level: "error", text: errorMessage(error) };
+				: { kind: "notice", level: "error", text: turnErrorText(error) };
 			running.message.parts.push(notice);
 			this._broadcast({ type: "partAdded", messageId: running.message.id, part: viewPart(notice) });
 		} finally {
@@ -462,6 +520,123 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			}
 			running.cts.dispose();
 			this._broadcast({ type: "run", run: { running: false } });
+		}
+	}
+
+	private async _runSubagent(
+		running: RunningTurn,
+		callId: string,
+		request: SubagentRequest,
+		tools: ChatToolExecutor,
+		token: vscode.CancellationToken,
+	): Promise<string> {
+		const model = this._models.find(candidate => candidate.id === request.model.id);
+		if (!model) {
+			throw new Error(`${request.model.label} is not available right now; choose another subagent model.`);
+		}
+		return runChatSubagent({
+			backend: this._deps.backend,
+			model,
+			request,
+			callId,
+			conversationId: running.sessionId,
+			tools,
+			token,
+			system: await this._systemPrompt(),
+			hostContext: this._turnContext(),
+			onUpdate: run => this._broadcast({ type: "subagent", messageId: running.message.id, run }),
+			onFinish: run => {
+				this._log("chat.subagent.finished", { model: model.id, status: run.status, steps: run.steps.length, durationMs: run.durationMs });
+				this._addPart(running, { kind: "subagent", ...run });
+			},
+		});
+	}
+
+	/** The first user message names the chat; an edit may rename it. */
+	private async _refreshSessionMeta(sessionId: string): Promise<void> {
+		const updated = await this._deps.store.get(sessionId).catch(() => undefined);
+		if (!updated || this._session?.id !== sessionId) {
+			return;
+		}
+		this._session = updated;
+		this._broadcast({ type: "session", session: updated });
+	}
+
+	private _addPart(running: RunningTurn, part: ChatStructuredPart): void {
+		this._flushDelta(running);
+		running.message.parts.push(part);
+		this._persistFinishedParts(running);
+		this._broadcast({ type: "partAdded", messageId: running.message.id, part: viewPart(part) });
+	}
+
+	private _turnContext(): string | undefined {
+		try {
+			return this._deps.prompt?.turnContext();
+		} catch (error) {
+			this._log("chat.prompt.context_failed", { message: errorMessage(error) });
+			return undefined;
+		}
+	}
+
+	private async _systemPrompt(): Promise<string | undefined> {
+		try {
+			return await this._deps.prompt?.systemPrompt();
+		} catch (error) {
+			this._log("chat.prompt.system_failed", { message: errorMessage(error) });
+			return undefined;
+		}
+	}
+
+	/**
+	 * When another model takes over a chat that is over the switch limit, older turns are summarized first,
+	 * so the new model starts from a compact history instead of a cut one.
+	 */
+	private async _compactForModel(
+		running: RunningTurn,
+		model: vscode.LanguageModelChatInformation,
+		history: readonly ChatMessage[],
+		system: string | undefined,
+	): Promise<ChatPart[]> {
+		const compaction = this._deps.compaction;
+		const previous = previousModelId(history);
+		if (!compaction || !previous || previous === model.id) {
+			return [];
+		}
+		const limits: ChatCompactionLimits = { ...compaction.limits(), fixedTokens: system ? estimateTextTokens(system) : 0 };
+		const plan = planChatCompaction(history, limits);
+		if (!plan) {
+			return [];
+		}
+		const token = running.cts.token;
+		this._broadcast({ type: "run", run: { running: true, detail: COMPACTING_DETAIL } });
+		const startedAt = Date.now();
+		try {
+			const part = await compactChatHistory(history, { limits, summarize: compaction.summarize, token, plan });
+			if (!part) {
+				return [];
+			}
+			this._log("chat.compaction.done", {
+				from: previous,
+				to: model.id,
+				method: part.method,
+				summarizedMessages: part.summarizedMessages,
+				tokensBefore: part.tokensBefore,
+				tokensAfter: part.tokensAfter,
+				durationMs: Date.now() - startedAt,
+			});
+			this._addPart(running, part);
+			return [part];
+		} catch (error) {
+			if (error instanceof vscode.CancellationError || token.isCancellationRequested) {
+				throw error instanceof vscode.CancellationError ? error : new vscode.CancellationError();
+			}
+			this._log("chat.compaction.failed", { message: errorMessage(error) });
+			this._addPart(running, { kind: "notice", level: "warning", text: `Context compaction failed: ${errorMessage(error)}. The model receives the history without a summary.` });
+			return [];
+		} finally {
+			if (!token.isCancellationRequested) {
+				this._broadcast({ type: "run", run: { running: true } });
+			}
 		}
 	}
 

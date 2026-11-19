@@ -1,9 +1,8 @@
 import type * as vscode from "vscode";
 import type { ChatToolGroup } from "./shared/protocol";
-import type { ChatTool, ChatToolConfirmation } from "./tools/types";
+import type { ChatTool, ChatToolConfirmation, ChatToolInvokeContext } from "./tools/types";
 
-export interface ChatToolCallContext {
-	callId?: string;
+export interface ChatToolCallContext extends ChatToolInvokeContext {
 	/** Resolves true when the user allows the call; a cancelled turn resolves false. */
 	approve(confirmation: ChatToolConfirmation): Promise<boolean>;
 }
@@ -50,7 +49,7 @@ export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSour
 			if (confirmation && !(context && await context.approve(confirmation))) {
 				return { text: DENIED_TOOL_RESULT, isError: true };
 			}
-			return { text: await tool.invoke(input, token), isError: false };
+			return { text: await tool.invoke(input, token, { callId: context?.callId, runSubagent: context?.runSubagent }), isError: false };
 		},
 		groups: () => catalog.groups(),
 		setEnabled: (names, enabled) => catalog.setEnabled(names, enabled),

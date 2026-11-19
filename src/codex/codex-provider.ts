@@ -9,7 +9,8 @@ import { isProviderSwitch } from "../providers/provider-switch";
 import { buildCacheDiagnostics } from "../context/cache-diagnostics";
 import { calculatePromptCacheUsage } from "../context/usage";
 import type { SubscriptionObservation } from "../diagnostics/subscription-usage";
-import { detectLimitError, formatLimitNotice, LimitGate, type LimitMatch } from "../providers/limit-errors";
+import { detectLimitError, LimitGate, type LimitMatch } from "../providers/limit-errors";
+import { reportLimitNotice } from "../providers/limit-signal";
 import type { LlamaLogSink } from "../logger";
 import type { ProviderRuntimeMetrics } from "../provider-metrics";
 import { PROVIDER_CONTINUATION_TTL_MS, PROVIDER_DURABLE_SESSION_TTL_MS, PROVIDER_PENDING_ROLLOVER_TTL_MS } from "../session-retention";
@@ -1134,7 +1135,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				// A limit is not a request failure: answer with one short line so the host does not
 				// retry the request and no provider thread is started.
 				this.logSink?.log("codex.chat.limit_short_circuit", { model: model.id, notice: unresolved });
-				progress.report(new vscode.LanguageModelTextPart(unresolved));
+				reportLimitNotice(progress, "codex", this.limitGate.get("codex"), unresolved);
 				return;
 			}
 		}
@@ -1832,7 +1833,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 							window: limit.window,
 							resetsAt: limit.resetAt?.toISOString(),
 						}, "warn");
-						progress.report(new vscode.LanguageModelTextPart(formatLimitNotice("codex", limit)));
+						reportLimitNotice(progress, "codex", limit);
 						return;
 					}
 					throw normalized;
@@ -1900,7 +1901,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 						window: limit.window,
 						resetsAt: limit.resetAt?.toISOString(),
 					}, "warn");
-					progress.report(new vscode.LanguageModelTextPart(formatLimitNotice("codex", limit)));
+					reportLimitNotice(progress, "codex", limit);
 					return;
 				}
 				throw error;
@@ -2177,6 +2178,16 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			this.pruneInterruptedToolThreads();
 		}
 		return recoverable;
+	}
+
+	/** The chat left this conversation; its suspended tool turns will never get their results. */
+	abandonConversation(conversationId: string): void {
+		const turns = [...new Set(this.activeToolTurns.values())].filter(active => active.copilotConversationId === conversationId);
+		for (const active of turns) {
+			this.logSink?.log("codex.chat.conversation_abandoned", { threadId: active.bridge.threadId, turnId: active.bridge.turnId });
+			// The thread stays resumable in case the user returns to that chat.
+			this.abandonActiveToolTurn(active, "abandoned", active.processGeneration === this.client.generation);
+		}
 	}
 
 	private abandonActiveToolTurn(

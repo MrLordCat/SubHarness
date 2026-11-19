@@ -15,6 +15,7 @@ const BUILTIN_GROUP_LABELS: Record<string, string> = {
 	[CHAT_TOOL_GROUPS.search]: "Search",
 	[CHAT_TOOL_GROUPS.terminal]: "Terminal",
 	[CHAT_TOOL_GROUPS.diagnostics]: "Diagnostics",
+	[CHAT_TOOL_GROUPS.agents]: "Subagents",
 	[CHAT_TOOL_GROUPS.bridge]: "AI Agent Bridge",
 };
 const GROUP_ORDER: readonly string[] = Object.keys(BUILTIN_GROUP_LABELS);
@@ -150,7 +151,7 @@ export class ChatToolCatalog {
 	}
 
 	private _entries(): CatalogEntry[] {
-		const entries: CatalogEntry[] = this._builtins.map(tool => ({
+		const entries: CatalogEntry[] = this._builtins.filter(tool => tool.available?.() !== false).map(tool => ({
 			tool,
 			groupLabel: BUILTIN_GROUP_LABELS[tool.group] ?? tool.group,
 			defaultEnabled: true,

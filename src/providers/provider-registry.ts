@@ -36,6 +36,8 @@ export interface ChatProviderRegistration {
 	usesConversationHistory?: (model: vscode.LanguageModelChatInformation) => Promise<boolean>;
 	/** Optional background observation of requests to another adapter. */
 	onForeignRequest?: (conversationId?: unknown) => Promise<unknown>;
+	/** The caller will not continue this conversation; release turns that wait for its tool results. */
+	abandonConversation?: (conversationId: string) => void | Promise<void>;
 }
 
 /**
@@ -146,6 +148,10 @@ export class ProviderRegistry implements vscode.Disposable {
 		for (const registration of this.registrations) {
 			if (registration !== selected) { void registration.onForeignRequest?.(conversationId).catch(() => undefined); }
 		}
+	}
+
+	async abandonConversation(conversationId: string): Promise<void> {
+		await Promise.allSettled(this.registrations.map(async registration => registration.abandonConversation?.(conversationId)));
 	}
 
 	dispose(): void { for (const subscription of this.subscriptions) { subscription.dispose(); } this.owners.clear(); this.catalogs.clear(); this.changed.dispose(); }

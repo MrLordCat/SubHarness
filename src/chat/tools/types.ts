@@ -9,6 +9,26 @@ export interface ChatToolConfirmation {
 	reason: string;
 }
 
+export interface SubagentModelOption {
+	id: string;
+	/** Name as shown in the model picker; the tool's model enum uses it. */
+	label: string;
+	useWhen: string;
+}
+
+export interface SubagentRequest {
+	description: string;
+	prompt: string;
+	model: SubagentModelOption;
+}
+
+/** Host services for one call; only the chat controller can provide them. */
+export interface ChatToolInvokeContext {
+	callId?: string;
+	/** Runs a nested agent turn and resolves with its final report; absent inside a subagent. */
+	runSubagent?(request: SubagentRequest, token: vscode.CancellationToken): Promise<string>;
+}
+
 /** A tool the chat can call; invoke throws on failure and the message becomes an error result. */
 export interface ChatTool {
 	readonly name: string;
@@ -20,7 +40,9 @@ export interface ChatTool {
 	readonly readOnly?: boolean;
 	/** Returns a confirmation when this exact call must be approved by the user; undefined runs it at once. */
 	needsConfirmation?(input: unknown): ChatToolConfirmation | undefined;
-	invoke(input: unknown, token: vscode.CancellationToken): Promise<string>;
+	/** False hides the tool from the model and the picker, e.g. when no model can serve it. */
+	available?(): boolean;
+	invoke(input: unknown, token: vscode.CancellationToken, context?: ChatToolInvokeContext): Promise<string>;
 }
 
 export const CHAT_TOOL_GROUPS = {
@@ -28,5 +50,6 @@ export const CHAT_TOOL_GROUPS = {
 	search: "search",
 	terminal: "terminal",
 	diagnostics: "diagnostics",
+	agents: "agents",
 	bridge: "bridge",
 } as const;

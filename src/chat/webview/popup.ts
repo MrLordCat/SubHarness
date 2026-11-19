@@ -1,20 +1,33 @@
 import { useEffect } from "preact/hooks";
 
-/** Closes the popup when a pointer goes down outside of `target`. */
+/** Closes the popup when a pointer goes down outside of `target` or keyboard focus leaves it. */
 export function useDismiss(target: { current: HTMLElement | null }, open: boolean, onClose: () => void): void {
 	useEffect(() => {
 		if (!open) {
 			return;
 		}
+		const wrapper = target.current;
 		const onPointerDown = (event: PointerEvent) => {
 			const node = event.target;
-			if (node instanceof Node && target.current?.contains(node)) {
+			if (node instanceof Node && wrapper?.contains(node)) {
+				return;
+			}
+			onClose();
+		};
+		const onFocusOut = (event: FocusEvent) => {
+			const next = event.relatedTarget;
+			// A null relatedTarget means the window itself lost focus; an outside element means the popup is done.
+			if (next === null || (next instanceof Node && wrapper?.contains(next))) {
 				return;
 			}
 			onClose();
 		};
 		document.addEventListener("pointerdown", onPointerDown, true);
-		return () => document.removeEventListener("pointerdown", onPointerDown, true);
+		wrapper?.addEventListener("focusout", onFocusOut);
+		return () => {
+			document.removeEventListener("pointerdown", onPointerDown, true);
+			wrapper?.removeEventListener("focusout", onFocusOut);
+		};
 	}, [open, onClose, target]);
 }
 
