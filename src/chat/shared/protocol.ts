@@ -22,8 +22,8 @@ export type ChatPart =
 	| { kind: "text"; text: string; preview?: boolean }
 	| { kind: "thinking"; text: string; preview?: boolean }
 	| { kind: "toolCall"; callId: string; name: string; input: unknown }
-	/** truncated: the model received a cut result; preview: the webview holds only the first WEBVIEW_TOOL_RESULT_PREVIEW_CHARS. */
-	| { kind: "toolResult"; callId: string; text: string; isError?: boolean; truncated?: boolean; preview?: boolean }
+	/** truncated: the model received a cut result; preview: the webview holds only the first WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, fullLength its full length. */
+	| { kind: "toolResult"; callId: string; text: string; isError?: boolean; truncated?: boolean; preview?: boolean; fullLength?: number }
 	/** Shows Retry when the notice is in the last answer. */
 	| { kind: "notice"; level: "info" | "warning" | "error"; text: string; limit?: ChatLimitInfo; retryable?: boolean }
 	/** Messages before keepFromMessageId reach the model only as this summary. */
@@ -35,7 +35,8 @@ export type ChatPart =
 	| ({ kind: "subagent" } & ChatSubagentRun);
 
 export type ChatSubagentStep =
-	| { kind: "tool"; name: string; summary: string; isError?: boolean }
+	/** input and output are display copies (at most 4,000 and 2,000 characters); summary stays for old sessions. */
+	| { kind: "tool"; name: string; summary: string; input?: string; output?: string; outputChars?: number; isError?: boolean }
 	| { kind: "text"; text: string }
 	| { kind: "notice"; level: "info" | "warning" | "error"; text: string };
 

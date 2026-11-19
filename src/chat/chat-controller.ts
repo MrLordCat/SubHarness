@@ -299,21 +299,21 @@ function maxTurn(messages: readonly ChatMessage[]): number {
 	return max;
 }
 
-/** Copies a part for the webview and cuts long tool results and thinking down to a preview. */
-function viewPart(part: ChatStructuredPart, keepThinking?: boolean): ChatStructuredPart;
-function viewPart(part: ChatPart, keepThinking?: boolean): ChatPart;
-function viewPart(part: ChatPart, keepThinking?: boolean): ChatPart {
-	if (part.kind === "toolResult" && part.text.length > WEBVIEW_TOOL_RESULT_PREVIEW_CHARS) {
-		return { ...part, text: part.text.slice(0, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS), preview: true };
+/** Copies a part for the webview and cuts long tool results and thinking down to a preview; keepFull keeps both. */
+function viewPart(part: ChatStructuredPart, keepFull?: boolean): ChatStructuredPart;
+function viewPart(part: ChatPart, keepFull?: boolean): ChatPart;
+function viewPart(part: ChatPart, keepFull?: boolean): ChatPart {
+	if (!keepFull && part.kind === "toolResult" && part.text.length > WEBVIEW_TOOL_RESULT_PREVIEW_CHARS) {
+		return { ...part, text: part.text.slice(0, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS), preview: true, fullLength: part.text.length };
 	}
-	if (!keepThinking && part.kind === "thinking" && part.text.length > WEBVIEW_THINKING_PREVIEW_CHARS) {
+	if (!keepFull && part.kind === "thinking" && part.text.length > WEBVIEW_THINKING_PREVIEW_CHARS) {
 		return { ...part, text: part.text.slice(-WEBVIEW_THINKING_PREVIEW_CHARS), preview: true };
 	}
 	return { ...part };
 }
 
-function viewMessage(message: ChatMessage, keepThinking = false): ChatMessage {
-	const view: ChatMessage = { ...message, parts: message.parts.map(part => viewPart(part, keepThinking)) };
+function viewMessage(message: ChatMessage, keepFull = false): ChatMessage {
+	const view: ChatMessage = { ...message, parts: message.parts.map(part => viewPart(part, keepFull)) };
 	delete view.attachmentContext;
 	return view;
 }
@@ -995,7 +995,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		this._flushDelta(running);
 		running.message.parts.push(part);
 		this._persistFinishedParts(running);
-		this._emit(running.runtime, { type: "partAdded", messageId: running.message.id, part: viewPart(part) });
+		this._emit(running.runtime, { type: "partAdded", messageId: running.message.id, part: viewPart(part, true) });
 	}
 
 	private _turnContext(): string | undefined {

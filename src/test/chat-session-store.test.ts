@@ -322,7 +322,7 @@ suite("Chat session store", () => {
 			status: "done",
 			steps: [
 				{ kind: "text", text: "Looking." },
-				{ kind: "tool", name: "read", summary: "{\"path\":\"a.txt\"}", isError: true },
+				{ kind: "tool", name: "read", summary: "{\"path\":\"a.txt\"}", input: "{\n  \"path\": \"a.txt\"\n}", output: "ok", outputChars: 2, isError: true },
 				{ kind: "notice", level: "info", text: "note" },
 			],
 			startedAt: 1_700_000_000_000,
@@ -359,6 +359,55 @@ suite("Chat session store", () => {
 
 		const reopened = new ChatSessionStore(root);
 		assert.deepStrictEqual((await reopened.load(session.id))[0].parts, [{ kind: "text", text: "kept" }]);
+	});
+
+	test("skips a subagent step whose new fields have the wrong type", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		await store.appendMessage(session.id, textMessage("m1", "user", "kept"));
+		await store.flush();
+		const steps = [
+			{ kind: "tool", name: "read", summary: "{}", input: 7 },
+			{ kind: "tool", name: "read", summary: "{}", output: 7 },
+			{ kind: "tool", name: "read", summary: "{}", outputChars: "7" },
+		];
+		for (const [index, step] of steps.entries()) {
+			const line = JSON.stringify({
+				t: "part",
+				messageId: "m1",
+				part: {
+					kind: "subagent",
+					callId: `call-${index}`,
+					description: "Check",
+					modelId: "claude::smart",
+					modelName: "Smart (Claude)",
+					status: "done",
+					startedAt: 1_700_000_000_000,
+					steps: [step],
+				},
+			});
+			await fs.appendFile(path.join(root, `${session.id}.jsonl`), `${line}\n`, "utf8");
+		}
+
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual((await reopened.load(session.id))[0].parts, [{ kind: "text", text: "kept" }]);
+	});
+
+	test("keeps a tool result's fullLength and drops a wrong-typed one", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		const valid: ChatPart = { kind: "toolResult", callId: "c1", text: "short", preview: true, fullLength: 25_431 };
+		await store.appendMessage(session.id, chatMessage("a1", "assistant", [valid]));
+		await store.flush();
+		const line = JSON.stringify({
+			t: "part",
+			messageId: "a1",
+			part: { kind: "toolResult", callId: "c2", text: "short", fullLength: "long" },
+		});
+		await fs.appendFile(path.join(root, `${session.id}.jsonl`), `${line}\n`, "utf8");
+
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual((await reopened.load(session.id))[0].parts, [valid]);
 	});
 
 	test("endMessage marks an answer complete", async () => {

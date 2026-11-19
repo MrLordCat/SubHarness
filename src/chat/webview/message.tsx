@@ -432,6 +432,17 @@ function ToolResultCard({ part, messageId, store }: ToolResultProps) {
 	);
 }
 
+function toolResultLabel(part: ToolResultPart, markdown: boolean): string {
+	const label = part.isError ? "Error output" : markdown ? "Report" : "Output";
+	if (!part.preview) {
+		return label;
+	}
+	const shown = part.text.length.toLocaleString("en-US");
+	return part.fullLength === undefined
+		? `${label} (preview, ${shown} characters)`
+		: `${label} (preview, ${shown} of ${part.fullLength.toLocaleString("en-US")} characters)`;
+}
+
 function ToolResultDetails({ part, messageId, store, report, openByDefault }: ToolResultProps & { report?: boolean; openByDefault?: boolean }) {
 	const markdown = report === true && !part.isError;
 	const [open, setOpen] = useState(markdown || openByDefault === true);
@@ -450,7 +461,7 @@ function ToolResultDetails({ part, messageId, store, report, openByDefault }: To
 			open={open}
 			onToggle={event => setOpen((event.currentTarget as HTMLDetailsElement).open)}
 		>
-			<summary>{part.isError ? "Error output" : markdown ? "Report" : "Output"}{part.preview ? " (preview)" : ""}</summary>
+			<summary>{toolResultLabel(part, markdown)}</summary>
 			{markdown ? <div class="tool-report"><Markdown text={part.text} /></div> : <pre class="tool-output">{part.text}</pre>}
 			{loading && part.preview ? <div class="part-loading">Loading full output…</div> : null}
 		</details>
@@ -509,7 +520,7 @@ function parseJsonObject(text: string): unknown {
 }
 
 function stepToolText(step: Extract<ChatSubagentStep, { kind: "tool" }>): string {
-	const input = parseJsonObject(step.summary);
+	const input = parseJsonObject(step.input ?? step.summary);
 	if (input !== undefined) {
 		const described = describeToolCall(step.name, input);
 		return described.detail ? `${described.title} · ${described.detail}` : described.title;
@@ -551,18 +562,52 @@ function subagentProgress(run: ChatSubagentRun | undefined, result: ToolResultPa
 	return "Stopped";
 }
 
+function SubagentToolStep({ step }: { step: Extract<ChatSubagentStep, { kind: "tool" }> }) {
+	const [open, setOpen] = useState(false);
+	const input = parseJsonObject(step.input ?? step.summary);
+	const described = input === undefined ? undefined : describeToolCall(step.name, input);
+	const title = described?.title ?? step.name;
+	const detail = described ? described.detail ?? "" : step.summary;
+	const expandable = step.input !== undefined || step.output !== undefined;
+	return (
+		<div class={`subagent-step subagent-step-tool${step.isError ? " tool-error" : ""}${expandable ? " subagent-step-expandable" : ""}`} title={step.summary}>
+			{expandable ? (
+				<button type="button" class="subagent-step-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+					<span class="subagent-step-name">{title}</span>
+					<span class="subagent-step-summary">{detail}</span>
+					<span class="subagent-step-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
+				</button>
+			) : (
+				<>
+					<span class="subagent-step-name">{title}</span>
+					<span class="subagent-step-summary">{detail}</span>
+				</>
+			)}
+			{expandable && open ? (
+				<div class="subagent-step-body">
+					<div class="tool-row-label">Input</div>
+					<pre class="tool-input">{step.input ?? step.summary}</pre>
+					{step.output !== undefined ? (
+						<>
+							<div class="tool-row-label">Output</div>
+							<pre class="tool-output">{step.output}</pre>
+							{step.outputChars !== undefined && step.outputChars > step.output.length ? (
+								<div class="subagent-step-note">
+									First {step.output.length.toLocaleString("en-US")} of {step.outputChars.toLocaleString("en-US")} characters.
+								</div>
+							) : null}
+						</>
+					) : null}
+				</div>
+			) : null}
+		</div>
+	);
+}
+
 function SubagentStepView({ step }: { step: ChatSubagentStep }) {
 	switch (step.kind) {
-		case "tool": {
-			const input = parseJsonObject(step.summary);
-			const described = input === undefined ? undefined : describeToolCall(step.name, input);
-			return (
-				<div class={`subagent-step subagent-step-tool${step.isError ? " tool-error" : ""}`} title={step.summary}>
-					<span class="subagent-step-name">{described?.title ?? step.name}</span>
-					<span class="subagent-step-summary">{described ? described.detail ?? "" : step.summary}</span>
-				</div>
-			);
-		}
+		case "tool":
+			return <SubagentToolStep step={step} />;
 		case "text":
 			return (
 				<div class="subagent-step subagent-step-text">

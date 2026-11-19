@@ -7,6 +7,7 @@ import { ChatToolCatalog, TOOL_OVERRIDES_KEY, type ToolRegistry } from "../chat/
 import { compileDangerousCommandRules, DEFAULT_DANGEROUS_COMMANDS, findDangerousCommand } from "../chat/tools/danger";
 import { createChatTerminalTools } from "../chat/tools/terminal-tools";
 import type { ChatTool } from "../chat/tools/types";
+import type { CocoTerminalRunInput, CocoTerminalSnapshot } from "../coco/terminal-manager";
 
 const RULES = compileDangerousCommandRules(DEFAULT_DANGEROUS_COMMANDS);
 
@@ -88,6 +89,21 @@ const SAFE = [
 
 function chatTool(name: string, extra: Partial<ChatTool> = {}): ChatTool {
 	return { name, description: `${name} tool`, inputSchema: { type: "object", properties: {} }, group: "files", invoke: async () => `${name} ran`, ...extra };
+}
+
+type TerminalCall = [string, ...unknown[]];
+
+function terminalTools(snapshot: CocoTerminalSnapshot, calls: TerminalCall[]): ChatTool[] {
+	return createChatTerminalTools({
+		manager: {
+			run: async (input: CocoTerminalRunInput) => { calls.push(["run", input.maxChars]); return snapshot; },
+			read: async (terminalId: string, waitMs?: number, maxChars?: number) => { calls.push(["read", terminalId, waitMs, maxChars]); return snapshot; },
+			send: (terminalId: string, text: string, addNewLine?: boolean) => { calls.push(["send", terminalId, text, addNewLine]); return snapshot; },
+			kill: (terminalId: string) => { calls.push(["kill", terminalId]); return snapshot; },
+		},
+		rules: () => RULES,
+		isTrusted: () => true,
+	});
 }
 
 class FakeMemento implements vscode.Memento {
@@ -179,6 +195,59 @@ suite("chat tool policy", () => {
 			isTrusted: () => false,
 		});
 		await assert.rejects(run.invoke({ command: "npm test" }, token()), /Trust this workspace/);
+	});
+
+	test("terminal tools return plain text with the state, exit code and output", async () => {
+		const calls: TerminalCall[] = [];
+		const snapshot: CocoTerminalSnapshot = {
+			terminalId: "term-1", terminalName: "Chat 1", state: "completed", exitCode: 7, output: "first line\nsecond line", truncated: false,
+		};
+		const tools = new Map(terminalTools(snapshot, calls).map(tool => [tool.name, tool]));
+		const run = tools.get("run_in_terminal"), read = tools.get("read_terminal");
+		assert.ok(run); assert.ok(read);
+		const expected = "Terminal: Chat 1 (terminalId: term-1)\nState: completed, exit code 7\nOutput:\nfirst line\nsecond line";
+		assert.strictEqual(await run.invoke({ command: "npm test" }, token()), expected);
+		assert.deepStrictEqual(calls[0], ["run", 30_000]);
+		assert.strictEqual(await read.invoke({ terminalId: "term-1" }, token()), expected);
+		assert.deepStrictEqual(calls[1], ["read", "term-1", undefined, 30_000]);
+	});
+
+	test("terminal results mark truncated and empty output and name the limit used", async () => {
+		const calls: TerminalCall[] = [];
+		const truncated: CocoTerminalSnapshot = {
+			terminalId: "term-2", terminalName: "Chat 2", state: "running", output: "tail", truncated: true,
+		};
+		const tools = new Map(terminalTools(truncated, calls).map(tool => [tool.name, tool]));
+		const run = tools.get("run_in_terminal"), read = tools.get("read_terminal");
+		assert.ok(run); assert.ok(read);
+		assert.strictEqual(await run.invoke({ command: "noisy", maxChars: 500 }, token()),
+			"Terminal: Chat 2 (terminalId: term-2)\nState: running\nOutput (the last 500 characters; earlier output was cut, so redirect long output to a file and read it with read_file):\ntail");
+		assert.deepStrictEqual(calls[0], ["run", 500]);
+		assert.match(await read.invoke({ terminalId: "term-2", maxChars: 500 }, token()), /the last 500 characters/);
+		assert.deepStrictEqual(calls[1], ["read", "term-2", undefined, 500]);
+
+		const empty: CocoTerminalSnapshot = {
+			terminalId: "term-3", terminalName: "Chat 3", state: "ready", output: "", truncated: false,
+			outputError: "VS Code stopped providing terminal output.",
+		};
+		const emptyRead = new Map(terminalTools(empty, []).map(tool => [tool.name, tool])).get("read_terminal");
+		assert.ok(emptyRead);
+		assert.strictEqual(await emptyRead.invoke({ terminalId: "term-3" }, token()),
+			"Terminal: Chat 3 (terminalId: term-3)\nState: ready\nNote: VS Code stopped providing terminal output.\nOutput: (none)");
+	});
+
+	test("send and kill describe the manager's default output limit", async () => {
+		const calls: TerminalCall[] = [];
+		const snapshot: CocoTerminalSnapshot = {
+			terminalId: "term-4", terminalName: "Chat 4", state: "running", output: "tail", truncated: true,
+		};
+		const tools = new Map(terminalTools(snapshot, calls).map(tool => [tool.name, tool]));
+		const send = tools.get("send_to_terminal"), kill = tools.get("kill_terminal");
+		assert.ok(send); assert.ok(kill);
+		assert.match(await send.invoke({ terminalId: "term-4", text: "y" }, token()), /the last 12,000 characters/);
+		assert.deepStrictEqual(calls[0], ["send", "term-4", "y", true]);
+		assert.match(await kill.invoke({ terminalId: "term-4" }, token()), /the last 12,000 characters/);
+		assert.deepStrictEqual(calls[1], ["kill", "term-4"]);
 	});
 
 	test("the catalog groups builtins, bridge tools and external tools with the right defaults", () => {

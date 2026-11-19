@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { CocoTerminalManager, type CocoTerminalRunInput } from "../../coco/terminal-manager";
+import { CocoTerminalManager, type CocoTerminalRunInput, type CocoTerminalSnapshot } from "../../coco/terminal-manager";
 import { findDangerousCommand, type DangerousCommandRule } from "./danger";
 import { CHAT_TOOL_GROUPS, type ChatTool, type ChatToolConfirmation } from "./types";
 
@@ -24,6 +24,33 @@ function requireString(input: Record<string, unknown>, key: string): string {
 
 const optionalNumber = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) ? value : undefined;
 const optionalString = (value: unknown): string | undefined => typeof value === "string" && value ? value : undefined;
+
+const OUTPUT_LIMIT = 128_000;
+const RUN_DEFAULT_MAX_CHARS = 30_000;
+/** send and kill return a snapshot with the manager's own default limit. */
+const MANAGER_DEFAULT_MAX_CHARS = 12_000;
+
+/** The same clamp the manager applies, so the truncation note names the limit actually used. */
+function terminalMaxChars(value: number | undefined, fallback: number): number {
+	return Math.min(OUTPUT_LIMIT, Math.max(1, Math.round(value ?? fallback)));
+}
+
+/** Plain text keeps newlines readable instead of routing every line through JSON escapes. */
+export function formatTerminalSnapshot(snapshot: CocoTerminalSnapshot, limit: number): string {
+	const state = snapshot.exitCode === undefined ? snapshot.state : `${snapshot.state}, exit code ${snapshot.exitCode}`;
+	const lines = [`Terminal: ${snapshot.terminalName} (terminalId: ${snapshot.terminalId})`, `State: ${state}`];
+	if (snapshot.outputError) { lines.push(`Note: ${snapshot.outputError}`); }
+	if (!snapshot.output) {
+		lines.push("Output: (none)");
+	} else if (snapshot.truncated) {
+		lines.push(`Output (the last ${limit.toLocaleString("en-US")} characters; earlier output was cut, so redirect long output to a file and read it with read_file):`);
+		lines.push(snapshot.output);
+	} else {
+		lines.push("Output:");
+		lines.push(snapshot.output);
+	}
+	return lines.join("\n");
+}
 
 function dangerous(text: unknown, cwd: unknown, rules: readonly DangerousCommandRule[], title: string): ChatToolConfirmation | undefined {
 	if (typeof text !== "string") {
@@ -55,6 +82,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 					timeoutMs: { type: "number", minimum: 0, maximum: 3_600_000, description: "Sync wait limit; a timeout leaves the command running." },
 					terminalId: { type: "string", description: "Use this idle chat terminal. Omit to reuse the last idle one." },
 					newTerminal: { type: "boolean", default: false, description: "Open a separate terminal even if one is idle." },
+					maxChars: { type: "number", minimum: 1, maximum: 128_000, description: "Most recent output characters to return (default 30000)." },
 				},
 				required: ["command"],
 				additionalProperties: false,
@@ -65,6 +93,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 					throw new Error("Trust this workspace before running terminal commands.");
 				}
 				const value = record(input);
+				const maxChars = terminalMaxChars(optionalNumber(value.maxChars), RUN_DEFAULT_MAX_CHARS);
 				const run: CocoTerminalRunInput = {
 					command: requireString(value, "command"),
 					cwd: optionalString(value.cwd),
@@ -72,8 +101,9 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 					timeoutMs: optionalNumber(value.timeoutMs),
 					terminalId: optionalString(value.terminalId),
 					newTerminal: value.newTerminal === true,
+					maxChars,
 				};
-				return JSON.stringify(await manager.run(run, token));
+				return formatTerminalSnapshot(await manager.run(run, token), maxChars);
 			},
 		},
 		{
@@ -86,14 +116,16 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 				properties: {
 					terminalId: { type: "string" },
 					waitMs: { type: "number", minimum: 0, maximum: 60_000 },
-					maxChars: { type: "number", minimum: 1, maximum: 128_000, description: "Most recent output characters to return (default 12000)." },
+					maxChars: { type: "number", minimum: 1, maximum: 128_000, description: "Most recent output characters to return (default 30000)." },
 				},
 				required: ["terminalId"],
 				additionalProperties: false,
 			},
 			invoke: async (input, token) => {
 				const value = record(input);
-				return JSON.stringify(await manager.read(requireString(value, "terminalId"), optionalNumber(value.waitMs), optionalNumber(value.maxChars), token));
+				const maxChars = terminalMaxChars(optionalNumber(value.maxChars), RUN_DEFAULT_MAX_CHARS);
+				const snapshot = await manager.read(requireString(value, "terminalId"), optionalNumber(value.waitMs), maxChars, token);
+				return formatTerminalSnapshot(snapshot, maxChars);
 			},
 		},
 		{
@@ -119,7 +151,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 				if (typeof value.text !== "string") {
 					throw new Error("text must be a string.");
 				}
-				return JSON.stringify(manager.send(requireString(value, "terminalId"), value.text, value.addNewLine !== false));
+				return formatTerminalSnapshot(manager.send(requireString(value, "terminalId"), value.text, value.addNewLine !== false), MANAGER_DEFAULT_MAX_CHARS);
 			},
 		},
 		{
@@ -136,7 +168,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 				if (token.isCancellationRequested) {
 					throw new vscode.CancellationError();
 				}
-				return JSON.stringify(manager.kill(requireString(record(input), "terminalId")));
+				return formatTerminalSnapshot(manager.kill(requireString(record(input), "terminalId")), MANAGER_DEFAULT_MAX_CHARS);
 			},
 		},
 	];

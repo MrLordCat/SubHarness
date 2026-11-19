@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.21.22 (development patch) - 2026-11-19
+
+- Fixed: grep_search in the bridge chat found nothing when includePattern
+  named a subfolder, such as src/chat/**/*.ts. It also accepts ./ prefixes,
+  backslashes and an absolute folder inside the workspace.
+- Changed: create_file writes the line endings of neighbouring files of the
+  same type (CRLF in this repository), falling back to files.eol.
+- Added: delete_file in the bridge chat. Deleting a folder or anything outside
+  the workspace asks first; deletions inside the workspace can be undone.
+- Changed: chat terminals no longer open a pager for git, and terminal tools
+  return plain text with the last 30,000 characters instead of escaped JSON,
+  saying when earlier output was cut.
+- Changed: tool output of the running answer is shown in full; older answers
+  show a preview that says how much is left and loads on expand. Subagent
+  steps can be expanded to show their input and the start of their output.
+
 ## 1.21.21 (development patch) - 2026-11-19
 
 - Fixed: the bridge chat could hang when it opened a chat with a very long

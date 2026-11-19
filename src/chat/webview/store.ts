@@ -313,6 +313,7 @@ export class ChatStore {
 				if (part && part.kind === "toolResult") {
 					part.text = update.text;
 					part.preview = false;
+					delete part.fullLength;
 					this.pendingToolResults.delete(update.callId);
 					this.bump(update.messageId);
 				}

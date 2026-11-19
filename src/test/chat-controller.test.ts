@@ -533,34 +533,49 @@ suite("chat controller", () => {
 		assert.strictEqual(current.webview.ofType("run").at(-1)?.run.running, false);
 	});
 
-	test("init sends short tool result previews and loads the full text on request", async () => {
+	test("a running turn keeps tool results full and the finished message gets a preview", async () => {
 		const full = "x".repeat(WEBVIEW_TOOL_RESULT_PREVIEW_CHARS + 500);
+		const gate = deferred();
 		const backend = new FakeBackend([
 			progress => progress.report(new vscode.LanguageModelToolCallPart("call-big", "llamacpp_read", {})),
-			progress => progress.report(new vscode.LanguageModelTextPart("Done.")),
+			async progress => {
+				progress.report(new vscode.LanguageModelTextPart("Done."));
+				await gate.promise;
+			},
 		]);
 		const current = createHarness(root, backend, fakeTools(() => ({ text: full, isError: false })).executor);
 		harness = current;
 		current.webview.receive({ type: "send", text: "Read everything" });
-		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		await waitFor(() => current.webview.ofType("partAdded").some(message => message.part.kind === "toolResult"), "tool result broadcast");
 
 		const broadcast = current.webview.ofType("partAdded").find(message => message.part.kind === "toolResult");
 		if (!broadcast || broadcast.part.kind !== "toolResult") {
 			throw new Error("expected a tool result");
 		}
-		assert.strictEqual(broadcast.part.preview, true);
-		assert.strictEqual(broadcast.part.text.length, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS);
-		assert.ok(full.startsWith(broadcast.part.text));
+		assert.strictEqual(broadcast.part.preview, undefined);
+		assert.strictEqual(broadcast.part.text, full);
 
 		current.webview.receive({ type: "ready" });
-		await waitFor(() => current.webview.ofType("init").length === 1, "init");
-		const initResult = current.webview.ofType("init")[0].messages.flatMap(message => message.parts).find(part => part.kind === "toolResult");
+		await waitFor(() => current.webview.ofType("init").length === 1, "running init");
+		const runningResult = current.webview.ofType("init")[0].messages.flatMap(message => message.parts).find(part => part.kind === "toolResult");
+		if (runningResult?.kind !== "toolResult") {
+			throw new Error("expected a tool result in the running init");
+		}
+		assert.strictEqual(runningResult.preview, undefined);
+		assert.strictEqual(runningResult.text, full);
+
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "finished init");
+		const initResult = current.webview.ofType("init")[1].messages.flatMap(message => message.parts).find(part => part.kind === "toolResult");
 		if (initResult?.kind !== "toolResult") {
 			throw new Error("expected a tool result in init");
 		}
 		assert.strictEqual(initResult.preview, true);
 		assert.strictEqual(initResult.text.length, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS);
 		assert.ok(full.startsWith(initResult.text));
+		assert.strictEqual(initResult.fullLength, full.length);
 
 		current.webview.receive({ type: "loadToolResult", messageId: broadcast.messageId, callId: "call-big" });
 		await waitFor(() => current.webview.ofType("toolResultFull").length === 1, "full tool result");
@@ -696,7 +711,7 @@ suite("chat controller", () => {
 		assert.ok(size < 3 * 1024 * 1024, `init was ${size} chars`);
 		const results = init.messages.flatMap(message => message.parts).filter((part): part is Extract<ChatMessage["parts"][number], { kind: "toolResult" }> => part.kind === "toolResult");
 		assert.strictEqual(results.length, 3_000);
-		assert.ok(results.every(part => part.preview === true && part.text.length === WEBVIEW_TOOL_RESULT_PREVIEW_CHARS));
+		assert.ok(results.every(part => part.preview === true && part.text.length === WEBVIEW_TOOL_RESULT_PREVIEW_CHARS && part.fullLength === full.length));
 	});
 
 	test("persists a selected model on the session and the workspace state", async () => {

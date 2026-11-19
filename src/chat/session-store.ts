@@ -552,7 +552,9 @@ function isChatPart(value: unknown): value is ChatPart {
 		case "toolCall":
 			return typeof value.callId === "string" && typeof value.name === "string";
 		case "toolResult":
-			return typeof value.callId === "string" && typeof value.text === "string";
+			return typeof value.callId === "string"
+				&& typeof value.text === "string"
+				&& (value.fullLength === undefined || typeof value.fullLength === "number");
 		case "notice":
 			return (value.level === "info" || value.level === "warning" || value.level === "error")
 				&& typeof value.text === "string"
@@ -585,7 +587,11 @@ function isSubagentStep(value: unknown): boolean {
 		return false;
 	}
 	switch (value.kind) {
-		case "tool": return typeof value.name === "string" && typeof value.summary === "string";
+		case "tool": return typeof value.name === "string"
+			&& typeof value.summary === "string"
+			&& (value.input === undefined || typeof value.input === "string")
+			&& (value.output === undefined || typeof value.output === "string")
+			&& (value.outputChars === undefined || typeof value.outputChars === "number");
 		case "text": return typeof value.text === "string";
 		case "notice": return typeof value.level === "string" && typeof value.text === "string";
 		default: return false;

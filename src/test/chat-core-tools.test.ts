@@ -99,13 +99,36 @@ suite("Chat core tools", () => {
 	});
 
 	test("create_file creates parent directories and refuses an existing file", async () => {
+		await fsp.mkdir(path.join(tmpDir, "nested"));
+		await fsp.writeFile(path.join(tmpDir, "nested", "seed.txt"), "x\ny\n", "utf8");
 		const result = await invoke("create_file", { filePath: "nested/deep/note.txt", content: "a\nb\n" });
-		assert.strictEqual(result, "Created nested/deep/note.txt (2 lines).");
+		assert.strictEqual(result, "Created nested/deep/note.txt (2 lines, LF).");
 		assert.strictEqual(await fsp.readFile(path.join(tmpDir, "nested", "deep", "note.txt"), "utf8"), "a\nb\n");
 		await assert.rejects(
 			invoke("create_file", { filePath: "nested/deep/note.txt", content: "changed" }),
 			/already exists/
 		);
+	});
+
+	test("create_file uses CRLF when nearby files of the same extension use CRLF", async () => {
+		await fsp.writeFile(path.join(tmpDir, "style.ts"), "const a = 1;\r\nconst b = 2;\r\n", "utf8");
+		const result = await invoke("create_file", { filePath: "nested/fresh.ts", content: "one\ntwo\n" });
+		assert.strictEqual(result, "Created nested/fresh.ts (2 lines, CRLF).");
+		assert.strictEqual(await fsp.readFile(path.join(tmpDir, "nested", "fresh.ts"), "utf8"), "one\r\ntwo\r\n");
+	});
+
+	test("create_file uses LF when nearby files of the same extension use LF", async () => {
+		await fsp.writeFile(path.join(tmpDir, "style.txt"), "one\ntwo\n", "utf8");
+		const result = await invoke("create_file", { filePath: "fresh.txt", content: "one\r\ntwo\n" });
+		assert.strictEqual(result, "Created fresh.txt (2 lines, LF).");
+		assert.strictEqual(await fsp.readFile(path.join(tmpDir, "fresh.txt"), "utf8"), "one\ntwo\n");
+	});
+
+	test("create_file writes single-line content as it is", async () => {
+		await fsp.writeFile(path.join(tmpDir, "seed.txt"), "a\nb\n", "utf8");
+		const result = await invoke("create_file", { filePath: "single.txt", content: "just one line" });
+		assert.strictEqual(result, "Created single.txt (1 lines, LF).");
+		assert.strictEqual(await fsp.readFile(path.join(tmpDir, "single.txt"), "utf8"), "just one line");
 	});
 
 	test("create_file and replace_string_in_file report the paths they may write", () => {
@@ -184,6 +207,45 @@ suite("Chat core tools", () => {
 		assert.strictEqual(await fsp.readFile(file, "utf8"), "one\nthree\n");
 	});
 
+	test("delete_file deletes a file and reports missing files", async () => {
+		await fsp.writeFile(path.join(tmpDir, "gone.txt"), "bye\n", "utf8");
+		assert.strictEqual(await invoke("delete_file", { filePath: "gone.txt" }), "Deleted gone.txt.");
+		await assert.rejects(fsp.stat(path.join(tmpDir, "gone.txt")), /ENOENT/);
+		await assert.rejects(invoke("delete_file", { filePath: "gone.txt" }), /File not found: gone\.txt/);
+	});
+
+	test("delete_file refuses a non-empty folder unless recursive is true", async () => {
+		await fsp.mkdir(path.join(tmpDir, "folder"));
+		await fsp.writeFile(path.join(tmpDir, "folder", "inner.txt"), "x\n", "utf8");
+		await assert.rejects(invoke("delete_file", { filePath: "folder" }), /not empty; pass recursive: true/);
+		assert.ok(await fsp.stat(path.join(tmpDir, "folder")));
+		assert.strictEqual(await invoke("delete_file", { filePath: "folder", recursive: true }), "Deleted folder folder.");
+		await assert.rejects(fsp.stat(path.join(tmpDir, "folder")), /ENOENT/);
+	});
+
+	test("delete_file refuses to delete the workspace folder", async () => {
+		await assert.rejects(invoke("delete_file", { filePath: tmpDir, recursive: true }), /workspace folder/);
+		assert.ok(await fsp.stat(tmpDir));
+	});
+
+	test("delete_file needs confirmation for recursive folders and outside paths", async () => {
+		const remove = tool("delete_file");
+		await fsp.mkdir(path.join(tmpDir, "folder"));
+		await fsp.writeFile(path.join(tmpDir, "plain.txt"), "x\n", "utf8");
+		assert.strictEqual(remove.needsConfirmation?.({ filePath: "plain.txt", recursive: true }), undefined);
+		assert.strictEqual(remove.needsConfirmation?.({ filePath: "folder" }), undefined);
+		assert.strictEqual(remove.needsConfirmation?.({ filePath: "missing", recursive: true }), undefined);
+		const folder = remove.needsConfirmation?.({ filePath: "folder", recursive: true });
+		assert.strictEqual(folder?.title, "Delete a folder");
+		assert.strictEqual(folder?.detail, path.resolve(tmpDir, "folder"));
+		assert.strictEqual(folder?.reason, "Deletes the folder and everything in it.");
+		const outside = path.join(tmpDir, "..", "outside-delete.txt");
+		const confirmation = remove.needsConfirmation?.({ filePath: outside });
+		assert.strictEqual(confirmation?.title, "Delete outside the workspace");
+		assert.strictEqual(confirmation?.detail, path.resolve(outside));
+		assert.strictEqual(confirmation?.reason, "The path is outside the open workspace folders.");
+	});
+
 	test("grep_search matches a literal string with the bundled ripgrep", async function () {
 		if (!findBundledRipgrep()) {
 			this.skip();
@@ -224,6 +286,53 @@ suite("Chat core tools", () => {
 			await invoke("grep_search", { query: "definitely-absent", includePattern: "*.ts" }),
 			"No matches."
 		);
+	});
+
+	test("grep_search applies a slash includePattern relative to the workspace root", async function () {
+		if (!findBundledRipgrep()) {
+			this.skip();
+			return;
+		}
+		await fsp.mkdir(path.join(tmpDir, "sub", "dir"), { recursive: true });
+		await fsp.mkdir(path.join(tmpDir, "other"), { recursive: true });
+		await fsp.writeFile(path.join(tmpDir, "sub", "dir", "a.ts"), "const globMarker = 1;\n", "utf8");
+		await fsp.writeFile(path.join(tmpDir, "other", "a.ts"), "const globMarker = 2;\n", "utf8");
+		const result = await invoke("grep_search", { query: "globMarker", includePattern: "sub/dir/*.ts" });
+		assert.match(result, /sub\/dir\/a\.ts:1: const globMarker = 1;/);
+		assert.doesNotMatch(result, /other\/a\.ts/);
+	});
+
+	test("grep_search turns an absolute includePattern folder into a root-relative glob", async function () {
+		if (!findBundledRipgrep()) {
+			this.skip();
+			return;
+		}
+		await fsp.mkdir(path.join(tmpDir, "abs", "nested"), { recursive: true });
+		await fsp.writeFile(path.join(tmpDir, "abs", "nested", "one.ts"), "const absoluteMarker = 1;\n", "utf8");
+		await fsp.writeFile(path.join(tmpDir, "absolute.ts"), "const absoluteMarker = 2;\n", "utf8");
+		const result = await invoke("grep_search", { query: "absoluteMarker", includePattern: path.join(tmpDir, "abs") });
+		assert.match(result, /abs\/nested\/one\.ts:1: const absoluteMarker = 1;/);
+		assert.doesNotMatch(result, /absolute\.ts/);
+		await assert.rejects(
+			invoke("grep_search", { query: "absoluteMarker", includePattern: path.join(tmpDir, "..") }),
+			/must be inside the workspace/
+		);
+	});
+
+	test("grep_search strips a leading ./ from includePattern", async function () {
+		if (!findBundledRipgrep()) {
+			this.skip();
+			return;
+		}
+		await fsp.mkdir(path.join(tmpDir, "sub", "deep"), { recursive: true });
+		await fsp.mkdir(path.join(tmpDir, "other"), { recursive: true });
+		await fsp.writeFile(path.join(tmpDir, "sub", "a.ts"), "const dotMarker = 1;\n", "utf8");
+		await fsp.writeFile(path.join(tmpDir, "sub", "deep", "b.ts"), "const dotMarker = 2;\n", "utf8");
+		await fsp.writeFile(path.join(tmpDir, "other", "a.ts"), "const dotMarker = 3;\n", "utf8");
+		const result = await invoke("grep_search", { query: "dotMarker", includePattern: "./sub/**" });
+		assert.match(result, /sub\/a\.ts:1: const dotMarker = 1;/);
+		assert.match(result, /sub\/deep\/b\.ts:1: const dotMarker = 2;/);
+		assert.doesNotMatch(result, /other\/a\.ts/);
 	});
 
 	test("get_errors returns a string without throwing", async () => {

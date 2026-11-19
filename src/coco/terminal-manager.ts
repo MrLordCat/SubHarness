@@ -44,6 +44,7 @@ export interface CocoTerminalRunInput {
 	cwd?: string;
 	mode?: "sync" | "async";
 	timeoutMs?: number;
+	maxChars?: number;
 }
 
 export interface CocoTerminalSnapshot {
@@ -217,7 +218,7 @@ export class CocoTerminalManager implements vscode.Disposable {
 		const waitMs = input.mode === "async" ? 1_000 : bounded(input.timeoutMs, 120_000, 3_600_000);
 		await this.waitFor(command.done, waitMs);
 		if (token.isCancellationRequested) { throw new vscode.CancellationError(); }
-		return this.snapshot(session);
+		return this.snapshot(session, bounded(input.maxChars, 12_000, OUTPUT_LIMIT));
 	}
 
 	/** Runs `cd` in the reused terminal; false when the shell could not enter the directory. */
@@ -296,6 +297,8 @@ export class CocoTerminalManager implements vscode.Disposable {
 			terminal: this.host.createTerminal({
 				name: `${this.terminalName} ${++this.sequence}`, cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri,
 				location: vscode.TerminalLocation.Panel,
+				// Git otherwise opens a pager in the panel and waits for "q".
+				env: { GIT_PAGER: "cat", PAGER: "cat" },
 			}),
 		};
 		this.sessions.set(session.id, session);

@@ -20,11 +20,15 @@ const MAX_SCAN_BYTES = 1_000_000;
 const MAX_DIAGNOSTICS = 200;
 const BINARY_SAMPLE_BYTES = 8192;
 const MAX_MATCH_COLUMN = 300;
+const EOL_SAMPLE_FILES = 5;
+const EOL_SAMPLE_BYTES = 64 * 1024;
 
 interface GrepRequest {
 	query: string;
 	isRegexp: boolean;
 	includePattern?: string;
+	/** Root of an absolute includePattern, for the workspace scan fallback. */
+	patternRoot?: string;
 	caseSensitive: boolean;
 	maxResults: number;
 	roots: readonly string[];
@@ -150,6 +154,117 @@ function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function containingRoot(file: string, roots: readonly string[]): string | undefined {
+	const absolute = path.resolve(file);
+	for (const root of roots) {
+		const resolved = path.resolve(root);
+		const relative = path.relative(resolved, absolute);
+		if (relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))) {
+			return resolved;
+		}
+	}
+	return undefined;
+}
+
+function eolDirectories(file: string, roots: readonly string[]): string[] {
+	const first = path.dirname(file);
+	const root = containingRoot(file, roots);
+	if (root === undefined) {
+		return [first];
+	}
+	const directories: string[] = [];
+	let current = first;
+	while (directories.length < 64) {
+		directories.push(current);
+		const parent = path.dirname(current);
+		if (sameFile(current, root) || parent === current) {
+			break;
+		}
+		current = parent;
+	}
+	return directories;
+}
+
+async function readEolSample(file: string): Promise<string | undefined> {
+	let handle: fsp.FileHandle | undefined;
+	try {
+		handle = await fsp.open(file, "r");
+		const buffer = Buffer.alloc(EOL_SAMPLE_BYTES);
+		const { bytesRead } = await handle.read(buffer, 0, EOL_SAMPLE_BYTES, 0);
+		const sample = buffer.subarray(0, bytesRead);
+		return sample.subarray(0, BINARY_SAMPLE_BYTES).includes(0) ? undefined : sample.toString("utf8");
+	} catch {
+		return undefined;
+	} finally {
+		await handle?.close();
+	}
+}
+
+interface EolSample {
+	files: number;
+	eol?: "\r\n" | "\n";
+}
+
+async function sampleEols(directories: readonly string[], extension: string | undefined): Promise<EolSample> {
+	let files = 0;
+	let crlf = 0;
+	let lf = 0;
+	for (const directory of directories) {
+		let entries: fs.Dirent[];
+		try {
+			entries = await fsp.readdir(directory, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		entries.sort((left, right) => left.name.localeCompare(right.name));
+		for (const entry of entries) {
+			if (files >= EOL_SAMPLE_FILES) {
+				break;
+			}
+			if (!entry.isFile() || (extension !== undefined && path.extname(entry.name).toLowerCase() !== extension)) {
+				continue;
+			}
+			const text = await readEolSample(path.join(directory, entry.name));
+			if (text === undefined) {
+				continue;
+			}
+			files++;
+			const crlfCount = countOccurrences(text, "\r\n");
+			crlf += crlfCount;
+			lf += countOccurrences(text, "\n") - crlfCount;
+		}
+		if (files >= EOL_SAMPLE_FILES) {
+			break;
+		}
+	}
+	if (files === 0 || crlf === lf) {
+		return { files };
+	}
+	return { files, eol: crlf > lf ? "\r\n" : "\n" };
+}
+
+async function eolForFile(file: string, roots: readonly string[]): Promise<"\r\n" | "\n"> {
+	const sameExtension = await sampleEols(eolDirectories(file, roots), path.extname(file).toLowerCase());
+	if (sameExtension.eol !== undefined) {
+		return sameExtension.eol;
+	}
+	if (sameExtension.files === 0) {
+		const anyExtension = await sampleEols([path.dirname(file)], undefined);
+		if (anyExtension.eol !== undefined) {
+			return anyExtension.eol;
+		}
+	}
+	const configured = vscode.workspace.getConfiguration("files", vscode.Uri.file(file)).get<string>("eol");
+	if (configured === "\r\n" || configured === "\n") {
+		return configured;
+	}
+	return process.platform === "win32" ? "\r\n" : "\n";
+}
+
+function eolName(eol: string): string {
+	return eol === "\r\n" ? "CRLF" : "LF";
+}
+
 function formatDiagnostic(shown: string, diagnostic: vscode.Diagnostic): string {
 	const severity = diagnostic.severity === vscode.DiagnosticSeverity.Error ? "error" : "warning";
 	const message = diagnostic.message.replace(/\r?\n/g, " ");
@@ -171,6 +286,47 @@ function formatMatches(matches: readonly string[], maxResults: number, stopped: 
 	return stopped ? `${matches.join("\n")}\n… stopped at ${maxResults} matches` : matches.join("\n");
 }
 
+interface NormalizedGrepPattern {
+	includePattern?: string;
+	patternRoot?: string;
+	roots: readonly string[];
+}
+
+function normalizeGrepPattern(pattern: string | undefined, roots: readonly string[]): NormalizedGrepPattern {
+	if (pattern === undefined) {
+		return { roots };
+	}
+	if (!path.isAbsolute(pattern)) {
+		// Models on Windows often write src\dir\*.ts; ripgrep globs need forward slashes.
+		const slashed = pattern.replace(/\\/g, "/");
+		const relative = slashed.startsWith("./") ? slashed.slice(2) : slashed;
+		return relative.length > 0 ? { includePattern: relative, roots } : { roots };
+	}
+	const target = path.resolve(pattern);
+	for (const root of roots) {
+		const resolved = path.resolve(root);
+		const relative = path.relative(resolved, target);
+		if (relative !== "" && (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`))) {
+			continue;
+		}
+		if (relative === "") {
+			return { includePattern: "**", patternRoot: resolved, roots: [resolved] };
+		}
+		let glob = relative.split(path.sep).join("/");
+		let directory = false;
+		try {
+			directory = fs.statSync(target).isDirectory();
+		} catch {
+			// Missing or unreadable paths stay file globs.
+		}
+		if (directory) {
+			glob = `${glob}/**`;
+		}
+		return { includePattern: glob, patternRoot: resolved, roots: [resolved] };
+	}
+	throw new Error("includePattern must be inside the workspace.");
+}
+
 function ripgrepArgs(request: GrepRequest): string[] {
 	const args = ["--line-number", "--no-heading", "--color", "never", "--max-columns", "300", "--max-columns-preview"];
 	if (!request.isRegexp) {
@@ -182,13 +338,12 @@ function ripgrepArgs(request: GrepRequest): string[] {
 	if (request.includePattern) {
 		args.push("--glob", request.includePattern);
 	}
-	args.push("-e", request.query, "--", ...request.roots);
+	args.push("-e", request.query, "--", ".");
 	return args;
 }
 
-function grepWithRipgrep(executable: string, request: GrepRequest): Promise<string> {
-	return new Promise<string>((resolve, reject) => {
-		const matches: string[] = [];
+function grepInRoot(executable: string, request: GrepRequest, root: string, matches: string[]): Promise<boolean> {
+	return new Promise<boolean>((resolve, reject) => {
 		let remainder = "";
 		let stderr = "";
 		let stopped = false;
@@ -202,7 +357,7 @@ function grepWithRipgrep(executable: string, request: GrepRequest): Promise<stri
 			state.subscription?.dispose();
 			action();
 		};
-		const child = spawn(executable, ripgrepArgs(request), { windowsHide: true });
+		const child = spawn(executable, ripgrepArgs(request), { cwd: root, windowsHide: true });
 		const handleLine = (raw: string): void => {
 			if (stopped || matches.length >= request.maxResults) {
 				stopped = true;
@@ -213,7 +368,8 @@ function grepWithRipgrep(executable: string, request: GrepRequest): Promise<stri
 			if (!match) {
 				return;
 			}
-			matches.push(`${displayPath(match[1], request.roots)}:${match[2]}: ${match[3].trim().slice(0, MAX_MATCH_COLUMN)}`);
+			const file = path.resolve(root, match[1]);
+			matches.push(`${displayPath(file, request.roots)}:${match[2]}: ${match[3].trim().slice(0, MAX_MATCH_COLUMN)}`);
 			if (matches.length >= request.maxResults) {
 				stopped = true;
 				child.kill();
@@ -247,19 +403,15 @@ function grepWithRipgrep(executable: string, request: GrepRequest): Promise<stri
 					handleLine(remainder);
 				}
 				if (stopped) {
-					resolve(formatMatches(matches, request.maxResults, true));
+					resolve(true);
 					return;
 				}
-				if (matches.length === 0 && code === 1) {
-					resolve("No matches.");
-					return;
-				}
-				if (matches.length === 0 && code !== 0) {
+				if (matches.length === 0 && code !== 0 && code !== 1) {
 					const detail = stderr.trim().slice(0, 500);
 					reject(new Error(detail.length > 0 ? `ripgrep failed: ${detail}` : `ripgrep exited with code ${code ?? "unknown"}.`));
 					return;
 				}
-				resolve(formatMatches(matches, request.maxResults, false));
+				resolve(false);
 			});
 		});
 		state.subscription = request.token.onCancellationRequested(() => {
@@ -267,6 +419,20 @@ function grepWithRipgrep(executable: string, request: GrepRequest): Promise<stri
 			settle(() => reject(new vscode.CancellationError()));
 		});
 	});
+}
+
+async function grepWithRipgrep(executable: string, request: GrepRequest): Promise<string> {
+	const matches: string[] = [];
+	let stopped = false;
+	for (const root of request.roots) {
+		checkCancellation(request.token);
+		stopped = await grepInRoot(executable, request, root, matches);
+		if (stopped || matches.length >= request.maxResults) {
+			stopped = true;
+			break;
+		}
+	}
+	return formatMatches(matches, request.maxResults, stopped);
 }
 
 async function grepWithScan(request: GrepRequest): Promise<string> {
@@ -281,7 +447,9 @@ async function grepWithScan(request: GrepRequest): Promise<string> {
 		throw new Error(`Invalid regular expression: ${message}`, { cause: error });
 	}
 	const uris = await vscode.workspace.findFiles(
-		request.includePattern ?? "**/*",
+		request.patternRoot === undefined
+			? request.includePattern ?? "**/*"
+			: new vscode.RelativePattern(vscode.Uri.file(request.patternRoot), request.includePattern ?? "**/*"),
 		undefined,
 		MAX_SCAN_FILES,
 		request.token
@@ -547,7 +715,7 @@ export function createCoreTools(options: {
 			properties: {
 				query: { type: "string", description: "Text or regular expression to search for." },
 				isRegexp: { type: "boolean", description: "Treat the query as a regular expression (default false)." },
-				includePattern: { type: "string", description: "Glob limiting which files are searched, for example src/**/*.ts." },
+				includePattern: { type: "string", description: "Glob relative to the workspace folder that limits which files are searched, for example src/**/*.ts." },
 				caseSensitive: { type: "boolean", description: "Match case exactly (default false)." },
 				maxResults: { type: "integer", minimum: 1, maximum: 1000, description: "Maximum number of matching lines (default 100)." },
 			},
@@ -560,13 +728,16 @@ export function createCoreTools(options: {
 			if (currentRoots.length === 0) {
 				throw new Error("Open a workspace folder to search text.");
 			}
+			const query = stringField(record, "query");
+			const normalized = normalizeGrepPattern(optionalStringField(record, "includePattern"), currentRoots);
 			const request: GrepRequest = {
-				query: stringField(record, "query"),
+				query,
 				isRegexp: booleanField(record, "isRegexp", false),
-				includePattern: optionalStringField(record, "includePattern"),
+				includePattern: normalized.includePattern,
+				patternRoot: normalized.patternRoot,
 				caseSensitive: booleanField(record, "caseSensitive", false),
 				maxResults: integerField(record, "maxResults", 100, 1, 1000),
-				roots: currentRoots,
+				roots: normalized.roots,
 				token,
 			};
 			const executable = options.ripgrepPath?.() ?? findBundledRipgrep();
@@ -608,10 +779,12 @@ export function createCoreTools(options: {
 			if (exists) {
 				throw new Error(`${shown} already exists; use replace_string_in_file to change it.`);
 			}
+			const eol = await eolForFile(file, roots());
+			const body = content.includes("\n") ? content.replace(/\r\n|\n/g, eol) : content;
 			await fsp.mkdir(path.dirname(file), { recursive: true });
 			checkCancellation(token);
-			await fsp.writeFile(file, content, "utf8");
-			return `Created ${shown} (${countLines(content)} lines).`;
+			await fsp.writeFile(file, body, "utf8");
+			return `Created ${shown} (${countLines(body)} lines, ${eolName(eol)}).`;
 		},
 	};
 
@@ -679,6 +852,67 @@ export function createCoreTools(options: {
 		},
 	};
 
+	const deleteFile: ChatTool = {
+		name: "delete_file",
+		group: CHAT_TOOL_GROUPS.files,
+		description: "Deletes a file, or a folder when recursive is true. Changes inside the workspace can be undone from the chat's changes panel.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				filePath: { type: "string", description: "Absolute path or a path relative to the workspace folder." },
+				recursive: { type: "boolean", description: "Delete a folder and everything in it (default false)." },
+			},
+			required: ["filePath"],
+		},
+		needsConfirmation(input: unknown): ChatToolConfirmation | undefined {
+			const outside = outsideWorkspace(input, "Delete outside the workspace");
+			if (outside !== undefined) {
+				return outside;
+			}
+			try {
+				const record = inputRecord(input);
+				if (record.recursive !== true) {
+					return undefined;
+				}
+				const target = resolveToolPath(record.filePath, roots());
+				return fs.statSync(target).isDirectory()
+					? {
+						title: "Delete a folder",
+						detail: target,
+						reason: "Deletes the folder and everything in it.",
+					}
+					: undefined;
+			} catch {
+				return undefined;
+			}
+		},
+		writes: writtenPath,
+		async invoke(input: unknown, token: vscode.CancellationToken): Promise<string> {
+			checkCancellation(token);
+			const record = inputRecord(input);
+			const file = resolveToolPath(record.filePath, roots());
+			const recursive = booleanField(record, "recursive", false);
+			const shown = displayPath(file, roots());
+			const stats = await fsp.stat(file).catch((error: unknown) => {
+				throw readFailure(error, shown);
+			});
+			if (stats.isDirectory()) {
+				if (roots().some(root => sameFile(root, file))) {
+					throw new Error(`Cannot delete the workspace folder ${shown}.`);
+				}
+				if (!recursive && (await fsp.readdir(file)).length > 0) {
+					throw new Error(`${shown} is not empty; pass recursive: true to delete the folder and everything in it.`);
+				}
+				checkCancellation(token);
+				await fsp.rm(file, { recursive: true, force: false });
+				return `Deleted folder ${shown}.`;
+			}
+			checkCancellation(token);
+			await fsp.rm(file, { force: false });
+			return `Deleted ${shown}.`;
+		},
+	};
+
 	const getErrors: ChatTool = {
 		name: "get_errors",
 		group: CHAT_TOOL_GROUPS.diagnostics,
@@ -742,5 +976,5 @@ export function createCoreTools(options: {
 		},
 	};
 
-	return [readFile, listDir, fileSearch, grepSearch, createFile, replaceString, getErrors];
+	return [readFile, listDir, fileSearch, grepSearch, createFile, replaceString, deleteFile, getErrors];
 }

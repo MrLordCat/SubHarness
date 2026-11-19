@@ -1,7 +1,7 @@
 import * as assert from "node:assert";
 import * as vscode from "vscode";
 import type { ChatToolExecutor } from "../chat/agent-loop";
-import type { ChatSubagentRun } from "../chat/shared/protocol";
+import type { ChatSubagentRun, ChatSubagentStep } from "../chat/shared/protocol";
 import { runChatSubagent, SUBAGENT_INSTRUCTIONS } from "../chat/subagent-runner";
 import { createChatToolSource } from "../chat/tool-executor";
 import { ChatToolCatalog, type ToolRegistry } from "../chat/tools/catalog";
@@ -281,6 +281,31 @@ suite("chat subagent", () => {
 			'tool:read:{"path":"a.txt"}:error',
 			"text:REPORT",
 		]);
+	});
+
+	test("tool steps keep the formatted input and the start of the output", async () => {
+		const longPath = "p".repeat(5_000);
+		const output = "y".repeat(2_500);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-one", "read", { path: "a.txt" })),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-two", "read", { path: longPath })),
+			progress => progress.report(new vscode.LanguageModelTextPart("REPORT")),
+		]);
+		const finishes: ChatSubagentRun[] = [];
+		await subagentRun(backend, {
+			tools: { tools: [READ_TOOL], invoke: async () => ({ text: output, isError: false }) },
+			onFinish: run => finishes.push(run),
+		});
+
+		const steps = finishes[0].steps.filter((step): step is Extract<ChatSubagentStep, { kind: "tool" }> => step.kind === "tool");
+		assert.strictEqual(steps.length, 2);
+		assert.strictEqual(steps[0].input, JSON.stringify({ path: "a.txt" }, null, 2));
+		assert.strictEqual(steps[0].output, output.slice(0, 2_000));
+		assert.strictEqual(steps[0].outputChars, output.length);
+		assert.strictEqual(steps[0].isError, undefined);
+		assert.strictEqual(steps[1].input?.length, 4_000);
+		assert.ok(steps[1].input?.startsWith("{"));
+		assert.ok(steps[1].input?.endsWith("…"));
 	});
 
 	test("reports a backend failure and adds an error notice step", async () => {

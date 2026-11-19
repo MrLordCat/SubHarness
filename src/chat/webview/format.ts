@@ -172,6 +172,10 @@ export function describeToolCall(name: string, input: unknown): ToolCallDescript
 				const file = textField(record, "filePath");
 				return file === undefined ? fallbackDescription(name, input) : { title: `Edited ${baseName(file)}` };
 			}
+			case "delete_file": {
+				const file = textField(record, "filePath");
+				return file === undefined ? fallbackDescription(name, input) : { title: `Deleted ${baseName(file)}` };
+			}
 			case "get_errors": {
 				const files = record.filePaths;
 				if (!Array.isArray(files) || files.length === 0) {

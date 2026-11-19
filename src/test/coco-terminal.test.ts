@@ -92,6 +92,7 @@ suite("Coco interactive terminals", () => {
 		const pending = manager.run({ command: "first" }, source.token);
 		await new Promise<void>(resolve => setImmediate(resolve));
 		assert.strictEqual(host.terminals[0].options.location, vscode.TerminalLocation.Panel);
+		assert.deepStrictEqual(host.terminals[0].options.env, { GIT_PAGER: "cat", PAGER: "cat" });
 		assert.strictEqual(host.terminals[0].shown, true);
 		host.commands[0].push("\u001b[32mhello\u001b[0m\r\n"); host.complete(0, 7);
 		const first = await pending;
@@ -268,6 +269,16 @@ suite("Coco interactive terminals", () => {
 		const automatic = await manager.run({ command: "use idle terminal", timeoutMs: 0 }, source.token);
 		assert.strictEqual(automatic.terminalId, second.terminalId);
 		assert.strictEqual(host.terminals.length, 2, "the user's active shell must be skipped without creating an unnecessary third shell");
+	});
+
+	test("returns only the requested number of output characters for a run", async () => {
+		const pending = manager.run({ command: "long output", maxChars: 100 }, source.token);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		host.commands[0].push("head" + "x".repeat(500) + "tail"); host.complete(0);
+		const snapshot = await pending;
+		assert.strictEqual(snapshot.output.length, 100);
+		assert.ok(snapshot.output.endsWith("tail"));
+		assert.strictEqual(snapshot.truncated, true);
 	});
 
 	test("bounds noisy output and rejects invalid terminal identifiers", async () => {

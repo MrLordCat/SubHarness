@@ -929,6 +929,46 @@ body {
 	min-width: 0;
 }
 
+.subagent-step-expandable {
+	display: block;
+}
+
+.subagent-step-toggle {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	width: 100%;
+	min-width: 0;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.subagent-step-toggle:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.subagent-step-chevron {
+	flex: 0 0 auto;
+	color: var(--vscode-descriptionForeground);
+	font-size: 10px;
+}
+
+.subagent-step-body {
+	min-width: 0;
+}
+
+.subagent-step-note {
+	margin-top: 2px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 10px;
+}
+
 .subagent-step-name {
 	flex: 0 0 auto;
 	font-weight: 600;

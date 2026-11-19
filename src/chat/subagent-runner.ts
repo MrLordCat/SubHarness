@@ -12,6 +12,8 @@ You are a subagent that another AI agent started for one subtask. That agent see
 const MAX_STEPS = 200;
 const MAX_TEXT_STEP_CHARS = 4_000;
 const MAX_SUMMARY_CHARS = 160;
+const MAX_INPUT_CHARS = 4_000;
+const MAX_OUTPUT_CHARS = 2_000;
 const UPDATE_INTERVAL_MS = 150;
 
 export interface SubagentRunOptions {
@@ -41,6 +43,16 @@ function summarizeInput(input: unknown): string {
 	}
 	const line = text.replace(/\s+/g, " ").trim();
 	return line.length > MAX_SUMMARY_CHARS ? `${line.slice(0, MAX_SUMMARY_CHARS - 1)}…` : line;
+}
+
+function formatInput(input: unknown): string {
+	let text: string;
+	try {
+		text = JSON.stringify(input, null, 2) ?? "";
+	} catch {
+		text = String(input);
+	}
+	return text.length > MAX_INPUT_CHARS ? `${text.slice(0, MAX_INPUT_CHARS - 1)}…` : text;
 }
 
 function snapshot(run: ChatSubagentRun): ChatSubagentRun {
@@ -93,13 +105,22 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<stri
 		part: part => {
 			if (part.kind === "toolCall") {
 				report = "";
-				const step: Extract<ChatSubagentStep, { kind: "tool" }> = { kind: "tool", name: part.name, summary: summarizeInput(part.input) };
+				const step: Extract<ChatSubagentStep, { kind: "tool" }> = {
+					kind: "tool",
+					name: part.name,
+					summary: summarizeInput(part.input),
+					input: formatInput(part.input),
+				};
 				toolSteps.set(part.callId, step);
 				addStep(step);
 			} else if (part.kind === "toolResult") {
 				const step = toolSteps.get(part.callId);
-				if (step && part.isError) {
-					step.isError = true;
+				if (step) {
+					step.output = part.text.slice(0, MAX_OUTPUT_CHARS);
+					step.outputChars = part.text.length;
+					if (part.isError) {
+						step.isError = true;
+					}
 				}
 			} else if (part.kind === "notice") {
 				notices.push(part.text);
