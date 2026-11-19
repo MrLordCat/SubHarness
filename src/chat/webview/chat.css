@@ -156,6 +156,26 @@ body {
 	overflow-wrap: anywhere;
 }
 
+.user-body {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	max-width: 85%;
+	min-width: 0;
+}
+
+.user-body .user-bubble {
+	max-width: 100%;
+}
+
+.message-attachments {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 4px;
+	margin-top: 4px;
+}
+
 .msg-assistant {
 	max-width: 100%;
 }
@@ -718,6 +738,81 @@ body {
 	flex-wrap: wrap;
 	align-items: center;
 	gap: 4px 6px;
+}
+
+.composer-dragover {
+	outline: 1px dashed var(--vscode-focusBorder);
+	outline-offset: -2px;
+	background: var(--vscode-list-dropBackground, transparent);
+}
+
+.attach-button {
+	flex: 0 0 auto;
+	min-width: 24px;
+	padding: 2px 4px;
+	border: 1px solid var(--vscode-input-border, var(--vscode-focusBorder));
+	border-radius: 2px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	font-family: inherit;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.attach-button:hover {
+	border-color: var(--vscode-focusBorder);
+}
+
+.attachment-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin-bottom: 4px;
+}
+
+.attachment-chip {
+	display: inline-flex;
+	align-items: center;
+	max-width: 240px;
+	border: 1px solid var(--vscode-input-border, var(--vscode-widget-border));
+	border-radius: 3px;
+	background: var(--vscode-editorWidget-background);
+	font-size: 11px;
+}
+
+.attachment-chip-open {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	padding: 1px 4px;
+	border: none;
+	background: transparent;
+	color: inherit;
+	font-family: inherit;
+	font-size: inherit;
+	cursor: pointer;
+}
+
+.attachment-chip-label {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.attachment-chip-remove {
+	padding: 0 4px;
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-family: inherit;
+	font-size: inherit;
+	cursor: pointer;
+}
+
+.attachment-chip-remove:hover {
+	color: var(--vscode-errorForeground);
 }
 
 .picker {
@@ -1688,6 +1783,9 @@ body {
 .tool-full:focus-visible,
 .send-button:focus-visible,
 .picker-trigger:focus-visible,
+.attach-button:focus-visible,
+.attachment-chip-open:focus-visible,
+.attachment-chip-remove:focus-visible,
 .approval-allow:focus-visible,
 .approval-deny:focus-visible,
 .changes-toggle:focus-visible,

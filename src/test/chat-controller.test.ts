@@ -3,13 +3,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { renderAttachments, type AttachmentContent } from "../chat/attachments";
 import type { ChatChangeTrackerLike, TurnSnapshot } from "../chat/changes/change-tracker";
-import { ChatController, type ChatControllerDeps, type ChatQuotaSource } from "../chat/chat-controller";
+import { ChatController, type ChatAttachmentsDeps, type ChatControllerDeps, type ChatQuotaSource } from "../chat/chat-controller";
 import type { ChatCompactionPlan } from "../chat/compaction";
 import { compactionSummaryText } from "../chat/lm-messages";
 import { ChatSessionStore } from "../chat/session-store";
 import { groupModels } from "../chat/shared/model-groups";
-import { applyHostUpdate, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatChangeSet, type ChatMessage, type ChatProviderQuota, type ChatToolGroup, type HostMessage } from "../chat/shared/protocol";
+import { applyHostUpdate, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatAttachment, type ChatChangeSet, type ChatMessage, type ChatProviderQuota, type ChatToolGroup, type HostMessage } from "../chat/shared/protocol";
 import { createChatToolSource, DENIED_TOOL_RESULT, type ChatToolSource } from "../chat/tool-executor";
 import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
 import type { ChatTool } from "../chat/tools/types";
@@ -142,6 +143,54 @@ function fakeQuota(initial: ChatProviderQuota[]): FakeQuota {
 	};
 	return fake;
 }
+
+class FakeAttachments implements ChatAttachmentsDeps {
+	readonly reads: ChatAttachment[][] = [];
+	readonly opened: ChatAttachment[] = [];
+	readonly fromUriCalls: string[][] = [];
+	picked: ChatAttachment[] = [];
+	contents: AttachmentContent[] = [];
+	from: ChatAttachment[] = [];
+
+	async pick(): Promise<ChatAttachment[]> {
+		return this.picked;
+	}
+
+	async fromUris(uris: readonly string[]): Promise<ChatAttachment[]> {
+		this.fromUriCalls.push([...uris]);
+		return this.from;
+	}
+
+	async read(attachments: readonly ChatAttachment[]): Promise<AttachmentContent[]> {
+		this.reads.push([...attachments]);
+		return this.contents;
+	}
+
+	async open(attachment: ChatAttachment): Promise<void> {
+		this.opened.push(attachment);
+	}
+}
+
+const ATTACHMENT: ChatAttachment = {
+	id: "att-1",
+	kind: "selection",
+	path: "src/a.ts",
+	uri: "file:///src/a.ts",
+	startLine: 1,
+	endLine: 2,
+	text: "const a = 1;",
+	languageId: "typescript",
+};
+
+const STORED_ATTACHMENT: ChatAttachment = {
+	id: "att-1",
+	kind: "selection",
+	path: "src/a.ts",
+	uri: "file:///src/a.ts",
+	startLine: 1,
+	endLine: 2,
+	languageId: "typescript",
+};
 
 class FakeWebview {
 	readonly messages: HostMessage[] = [];
@@ -277,7 +326,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "confirm" | "notify">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "confirm" | "notify" | "attachments">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -1589,5 +1638,92 @@ suite("chat controller", () => {
 		assert.strictEqual(result.isError, true);
 		assert.ok(result.text.includes('Unknown subagent model "Missing Model"'));
 		assert.strictEqual(current.webview.ofType("textDelta").map(delta => delta.text).join(""), "Done");
+	});
+
+	test("sends attachments as a rendered block and keeps only display info", async () => {
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("Done."))]);
+		const fake = new FakeAttachments();
+		fake.contents = [{ attachment: ATTACHMENT, text: "const a = 1;" }];
+		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		harness = current;
+		current.webview.receive({ type: "send", text: "Explain", attachments: [ATTACHMENT] });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+
+		const block = renderAttachments([{ attachment: ATTACHMENT, text: "const a = 1;" }]);
+		assert.strictEqual(messageText(backend.requests[0].messages.at(-1)!), `${block}\n<userRequest>\nExplain\n</userRequest>`);
+		assert.deepStrictEqual(fake.reads, [[ATTACHMENT]]);
+
+		const added = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
+		assert.deepStrictEqual(added?.attachments, [STORED_ATTACHMENT]);
+		assert.strictEqual(added?.attachmentContext, undefined);
+
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const initUser = current.webview.ofType("init")[0].messages.find(message => message.role === "user");
+		assert.deepStrictEqual(initUser?.attachments, [STORED_ATTACHMENT]);
+		assert.strictEqual(initUser?.attachmentContext, undefined);
+
+		await current.store.flush();
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		const persisted = (await new ChatSessionStore(root).load(sessionId)).find(message => message.role === "user");
+		assert.deepStrictEqual(persisted?.attachments, [STORED_ATTACHMENT]);
+		assert.strictEqual(persisted?.attachmentContext, block);
+	});
+
+	test("posts picked and dropped attachments back to the requesting webview", async () => {
+		const fake = new FakeAttachments();
+		const file: ChatAttachment = { id: "att-2", kind: "file", path: "src/b.ts", uri: "file:///src/b.ts" };
+		fake.picked = [ATTACHMENT];
+		fake.from = [file];
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, { attachments: fake });
+		harness = current;
+		current.webview.receive({ type: "pickAttachments" });
+		await waitFor(() => current.webview.ofType("attachmentsAdded").length === 1, "picked attachments");
+		assert.deepStrictEqual(current.webview.ofType("attachmentsAdded")[0].attachments, [ATTACHMENT]);
+
+		current.webview.receive({ type: "addAttachments", uris: ["file:///src/b.ts", "file:///src/c.ts"] });
+		await waitFor(() => current.webview.ofType("attachmentsAdded").length === 2, "dropped attachments");
+		assert.deepStrictEqual(fake.fromUriCalls, [["file:///src/b.ts", "file:///src/c.ts"]]);
+		assert.deepStrictEqual(current.webview.ofType("attachmentsAdded")[1].attachments, [file]);
+	});
+
+	test("editing a message reuses its attachment context without reading the files again", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart("First.")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Second.")),
+		]);
+		const fake = new FakeAttachments();
+		fake.contents = [{ attachment: ATTACHMENT, text: "const a = 1;" }];
+		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "First", attachments: [ATTACHMENT] });
+		await waitFor(() => finished() === 1, "first turn");
+		assert.strictEqual(fake.reads.length, 1);
+		const user = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
+		assert.ok(user);
+
+		current.webview.receive({ type: "editMessage", messageId: user.id, text: "Second" });
+		await waitFor(() => finished() === 2 && backend.requests.length === 2, "edited turn");
+		assert.strictEqual(fake.reads.length, 1, "the edit must not read the files again");
+		const block = renderAttachments([{ attachment: ATTACHMENT, text: "const a = 1;" }]);
+		assert.strictEqual(messageText(backend.requests[1].messages.at(-1)!), `${block}\n<userRequest>\nSecond\n</userRequest>`);
+		const resent = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user").at(-1);
+		assert.deepStrictEqual(resent?.attachments, [STORED_ATTACHMENT]);
+	});
+
+	test("drops invalid attachments but still sends the text", async () => {
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("Done."))]);
+		const fake = new FakeAttachments();
+		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		harness = current;
+		current.webview.receive({ type: "send", text: "Hello", attachments: [{ id: "x", kind: "file", path: "p" } as unknown as ChatAttachment] });
+		await waitFor(() => backend.requests.length === 1, "request");
+		assert.strictEqual(messageText(backend.requests[0].messages.at(-1)!), "Hello");
+		assert.strictEqual(fake.reads.length, 0);
+		const added = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
+		assert.strictEqual(added?.attachments, undefined);
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
 	});
 });

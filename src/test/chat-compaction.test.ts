@@ -90,6 +90,17 @@ suite("chat compaction", () => {
 		assert.strictEqual(messageText(toLanguageModelMessages([withContext])[0]), userRequestText(withContext));
 	});
 
+	test("puts attachments between the host context and the request", () => {
+		const attachmentContext = '<attachments>\n<attachment path="a.ts">\n```ts\nx\n```\n</attachment>\n</attachments>';
+		const withoutHost = textMessage("user", "Look", { attachmentContext });
+		assert.strictEqual(userRequestText(withoutHost), `${attachmentContext}\n<userRequest>\nLook\n</userRequest>`);
+		assert.strictEqual(messageText(toLanguageModelMessages([withoutHost])[0]), userRequestText(withoutHost));
+
+		const hostContext = "<context>\nturn 1\n</context>";
+		const withBoth = textMessage("user", "Look", { hostContext, attachmentContext });
+		assert.strictEqual(userRequestText(withBoth), `${hostContext}\n${attachmentContext}\n<userRequest>\nLook\n</userRequest>`);
+	});
+
 	test("renders the compaction window instead of the summarized messages", () => {
 		const u1 = textMessage("user", "one");
 		const a1 = textMessage("assistant", "answer one");

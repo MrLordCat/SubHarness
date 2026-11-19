@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
 import { ToolCallValidationError } from "../tools/tool-call-reliability";
 import { runAgentTurn, type AgentTurnSink, type ChatToolExecutor } from "./agent-loop";
+import { renderAttachments, type AttachmentContent } from "./attachments";
 import type { ChatWebviewBridge } from "./chat-view";
 import { compactChatHistory, estimateTextTokens, planChatCompaction, previousModelId, type ChatCompactionLimits, type ChatSummarizer } from "./compaction";
 import type { ChatSessionStore } from "./session-store";
@@ -11,6 +12,7 @@ import { groupModels, thinkingOptions } from "./shared/model-groups";
 import { appendChatText, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS } from "./shared/protocol";
 import type {
 	ChatApprovalRequest,
+	ChatAttachment,
 	ChatChangeSet,
 	ChatMessage,
 	ChatPart,
@@ -52,6 +54,15 @@ export interface ChatControllerDeps {
 	notify?: (message: string, action: string) => Promise<boolean>;
 	/** Subscription limits and balances shown next to the model picker. */
 	quota?: ChatQuotaSource;
+	/** Editor selections and files the user attaches to a message. */
+	attachments?: ChatAttachmentsDeps;
+}
+
+export interface ChatAttachmentsDeps {
+	pick(): Promise<ChatAttachment[]>;
+	fromUris(uris: readonly string[]): Promise<ChatAttachment[]>;
+	read(attachments: readonly ChatAttachment[]): Promise<AttachmentContent[]>;
+	open(attachment: ChatAttachment): Promise<void>;
 }
 
 export interface ChatQuotaSource {
@@ -82,6 +93,8 @@ const QUOTA_COALESCE_MS = 2_000;
 const QUOTA_REFRESH_INTERVAL_MS = 30_000;
 const NO_MODEL_NOTICE = "No model is available. Configure a provider first.";
 const COMPACTING_DETAIL = "Compacting context…";
+const SEND_ATTACHMENT_LIMIT = 20;
+const ADD_ATTACHMENT_LIMIT = 50;
 
 interface DeltaBuffer {
 	kind: ChatTextKind;
@@ -116,13 +129,84 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
+function asAttachment(value: unknown, allowText: boolean): ChatAttachment | undefined {
+	if (!isRecord(value) || typeof value.id !== "string" || typeof value.path !== "string" || typeof value.uri !== "string"
+		|| (value.kind !== "file" && value.kind !== "selection")) {
+		return undefined;
+	}
+	const attachment: ChatAttachment = { id: value.id, kind: value.kind, path: value.path, uri: value.uri };
+	if (value.startLine !== undefined) {
+		if (typeof value.startLine !== "number") { return undefined; }
+		attachment.startLine = value.startLine;
+	}
+	if (value.endLine !== undefined) {
+		if (typeof value.endLine !== "number") { return undefined; }
+		attachment.endLine = value.endLine;
+	}
+	if (value.languageId !== undefined) {
+		if (typeof value.languageId !== "string") { return undefined; }
+		attachment.languageId = value.languageId;
+	}
+	if (allowText && value.text !== undefined) {
+		if (typeof value.text !== "string") { return undefined; }
+		attachment.text = value.text;
+	}
+	return attachment;
+}
+
+function asAttachmentList(value: unknown, limit: number, allowText: boolean): ChatAttachment[] | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!Array.isArray(value) || value.length > limit) {
+		return undefined;
+	}
+	const attachments: ChatAttachment[] = [];
+	for (const item of value) {
+		const attachment = asAttachment(item, allowText);
+		if (!attachment) {
+			return undefined;
+		}
+		attachments.push(attachment);
+	}
+	return attachments;
+}
+
+/** Display info only; the text is sent once as part of the rendered block. */
+function storedAttachment(attachment: ChatAttachment): ChatAttachment {
+	return {
+		id: attachment.id,
+		kind: attachment.kind,
+		path: attachment.path,
+		uri: attachment.uri,
+		...(attachment.startLine !== undefined ? { startLine: attachment.startLine } : {}),
+		...(attachment.endLine !== undefined ? { endLine: attachment.endLine } : {}),
+		...(attachment.languageId !== undefined ? { languageId: attachment.languageId } : {}),
+	};
+}
+
 function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 	if (!isRecord(value) || typeof value.type !== "string") {
 		return undefined;
 	}
 	switch (value.type) {
 		case "ready": return { type: "ready" };
-		case "send": return typeof value.text === "string" ? { type: "send", text: value.text } : undefined;
+		case "send": {
+			if (typeof value.text !== "string") {
+				return undefined;
+			}
+			const attachments = asAttachmentList(value.attachments, SEND_ATTACHMENT_LIMIT, true);
+			return attachments ? { type: "send", text: value.text, attachments } : { type: "send", text: value.text };
+		}
+		case "pickAttachments": return { type: "pickAttachments" };
+		case "addAttachments":
+			return Array.isArray(value.uris) && value.uris.length <= ADD_ATTACHMENT_LIMIT && value.uris.every(uri => typeof uri === "string")
+				? { type: "addAttachments", uris: value.uris as string[] }
+				: undefined;
+		case "openAttachment": {
+			const attachment = asAttachment(value.attachment, true);
+			return attachment ? { type: "openAttachment", attachment } : undefined;
+		}
 		case "editMessage":
 			return typeof value.messageId === "string" && typeof value.text === "string"
 				? { type: "editMessage", messageId: value.messageId, text: value.text, undoChanges: value.undoChanges === true }
@@ -197,7 +281,9 @@ function viewPart(part: ChatPart): ChatPart {
 }
 
 function viewMessage(message: ChatMessage): ChatMessage {
-	return { ...message, parts: message.parts.map(part => viewPart(part)) };
+	const view: ChatMessage = { ...message, parts: message.parts.map(part => viewPart(part)) };
+	delete view.attachmentContext;
+	return view;
 }
 
 function defaultModelId(models: readonly vscode.LanguageModelChatInformation[]): string | undefined {
@@ -270,6 +356,14 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 
 	showSessions(): void {
 		this._broadcast({ type: "showSessions" });
+	}
+
+	/** Adds attachments from an editor or explorer command; they go with the next message. */
+	addAttachments(attachments: ChatAttachment[]): void {
+		if (attachments.length === 0) {
+			return;
+		}
+		this._broadcast({ type: "attachmentsAdded", attachments });
 	}
 
 	openSession(sessionId: string): Promise<void> {
@@ -425,7 +519,24 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				this._post(webview, this._initMessage());
 				return;
 			case "send":
-				await this._send(message.text);
+				await this._send(message.text, message.attachments);
+				return;
+			case "pickAttachments": {
+				const picked = await this._deps.attachments?.pick() ?? [];
+				if (picked.length) {
+					this._post(webview, { type: "attachmentsAdded", attachments: picked });
+				}
+				return;
+			}
+			case "addAttachments": {
+				const added = await this._deps.attachments?.fromUris(message.uris) ?? [];
+				if (added.length) {
+					this._post(webview, { type: "attachmentsAdded", attachments: added });
+				}
+				return;
+			}
+			case "openAttachment":
+				await this._deps.attachments?.open(message.attachment);
 				return;
 			case "editMessage":
 				await this._edit(message.messageId, message.text, message.undoChanges === true);
@@ -486,7 +597,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
-	private async _send(text: string): Promise<void> {
+	private async _send(text: string, attachments?: ChatAttachment[]): Promise<void> {
 		if (!text.trim()) {
 			return;
 		}
@@ -497,7 +608,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 		runtime.busy = true;
 		try {
-			await this._sendTurn(runtime, text);
+			await this._sendTurn(runtime, text, attachments);
 		} finally {
 			runtime.busy = false;
 		}
@@ -563,6 +674,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			if (index < 0) {
 				return;
 			}
+			const edited = runtime.messages[index];
 			const tracker = this._deps.changes;
 			if (tracker) {
 				const turn = runtime.messages[index].turn;
@@ -585,13 +697,18 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				runtime.meta = updated;
 			}
 			this._emit(runtime, { type: "truncated", messageId });
-			await this._sendTurn(runtime, text);
+			await this._sendTurn(runtime, text, undefined, { attachments: edited.attachments, attachmentContext: edited.attachmentContext });
 		} finally {
 			runtime.busy = false;
 		}
 	}
 
-	private async _sendTurn(runtime: SessionRuntime, text: string): Promise<void> {
+	private async _sendTurn(
+		runtime: SessionRuntime,
+		text: string,
+		attachments?: ChatAttachment[],
+		preserved?: { attachments?: ChatAttachment[]; attachmentContext?: string },
+	): Promise<void> {
 		await this._ensureModels();
 		const messages = runtime.messages;
 		const modelId = this._selectedModelId;
@@ -604,6 +721,19 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 		const turn = maxTurn(messages) + 1;
 		const hostContext = this._turnContext();
+		let display: ChatAttachment[] | undefined;
+		let attachmentContext = "";
+		if (preserved) {
+			display = preserved.attachments;
+			attachmentContext = preserved.attachmentContext ?? "";
+		} else if (attachments && attachments.length > 0 && this._deps.attachments) {
+			display = attachments;
+			try {
+				attachmentContext = renderAttachments(await this._deps.attachments.read(attachments));
+			} catch (error) {
+				this._log("chat.attachments.read_failed", { message: errorMessage(error) });
+			}
+		}
 		const user: ChatMessage = {
 			id: randomUUID(),
 			role: "user",
@@ -611,6 +741,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			createdAt: Date.now(),
 			parts: [{ kind: "text", text }],
 			...(hostContext ? { hostContext } : {}),
+			...(attachmentContext ? { attachmentContext } : {}),
+			...(display && display.length > 0 ? { attachments: display.map(storedAttachment) } : {}),
 		};
 		await this._appendMessage(runtime, user);
 		await this._refreshSessionMeta(runtime);

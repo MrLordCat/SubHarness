@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/ai-agent-bridge.git"
 	},
-	"version": "1.21.16",
+	"version": "1.21.17",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -1319,6 +1319,14 @@
 				"icon": "$(link-external)"
 			},
 			{
+				"command": "llamacpp.chat.addSelection",
+				"title": "AI Agent Bridge: Add Selection to Chat"
+			},
+			{
+				"command": "llamacpp.chat.addFile",
+				"title": "AI Agent Bridge: Add File to Chat"
+			},
+			{
 				"command": "llamacpp.openSidebar",
 				"title": "AI Agent Bridge: Open Sidebar"
 			},
@@ -1643,6 +1651,20 @@
 					"command": "llamacpp.openSettings",
 					"when": "view == llamacpp-quick-actions",
 					"group": "navigation@3"
+				}
+			],
+			"editor/context": [
+				{
+					"command": "llamacpp.chat.addSelection",
+					"when": "editorHasSelection",
+					"group": "9_aiAgentBridge@1"
+				}
+			],
+			"explorer/context": [
+				{
+					"command": "llamacpp.chat.addFile",
+					"when": "!explorerResourceIsFolder",
+					"group": "9_aiAgentBridge@1"
 				}
 			]
 		}

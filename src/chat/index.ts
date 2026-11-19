@@ -2,6 +2,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { CocoTerminalManager } from "../coco/terminal-manager";
 import { resolveProviderSwitchContextTokens } from "../context/provider-handoff";
+import { ChatAttachmentSource } from "./attachment-source";
 import { ChatChangeTracker } from "./changes/change-tracker";
 import { findGitExecutable } from "./changes/shadow-git";
 import { ChatController, type ChatQuotaSource } from "./chat-controller";
@@ -95,6 +96,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		],
 		state: context.globalState,
 	});
+	const attachments = new ChatAttachmentSource({ log: deps.log });
 	const controller = new ChatController({
 		backend: deps.composite,
 		onDidChangeModels: deps.composite.onDidChangeLanguageModelChatInformation ?? NEVER_FIRES,
@@ -105,6 +107,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		changes,
 		openChange: registerChangeDiff(context, changes),
 		prompt: new ChatPromptSource({ folders }),
+		attachments,
 		abandonConversation: async id => { await deps.composite.abandonConversation?.(id); },
 		confirm: async (message, action) => (await vscode.window.showWarningMessage(message, { modal: true }, action)) === action,
 		notify: async (message, action) => {
@@ -130,11 +133,33 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		},
 	});
 	const host = registerChatView(context, controller);
+	const focusChat = async (): Promise<void> => {
+		await Promise.resolve(vscode.commands.executeCommand("llamacpp.chat.focus")).catch(() => undefined);
+	};
 	context.subscriptions.push(
 		terminals,
 		controller,
 		vscode.commands.registerCommand("llamacpp.chat.new", () => controller.newChat()),
 		vscode.commands.registerCommand("llamacpp.chat.history", () => controller.showSessions()),
 		vscode.commands.registerCommand("llamacpp.chat.openInEditor", () => host.openInEditor()),
+		vscode.commands.registerCommand("llamacpp.chat.addSelection", async () => {
+			const selection = attachments.selection();
+			if (!selection) {
+				await vscode.window.showInformationMessage("Select some text first.");
+				return;
+			}
+			controller.addAttachments([selection]);
+			await focusChat();
+		}),
+		vscode.commands.registerCommand("llamacpp.chat.addFile", async (uri?: vscode.Uri, uris?: vscode.Uri[]) => {
+			const editorUri = vscode.window.activeTextEditor?.document.uri;
+			const targets = uris && uris.length > 0 ? uris : uri ? [uri] : editorUri ? [editorUri] : [];
+			const files = await attachments.fromUris(targets.map(target => target.toString()));
+			if (files.length === 0) {
+				return;
+			}
+			controller.addAttachments(files);
+			await focusChat();
+		}),
 	);
 }

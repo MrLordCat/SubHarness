@@ -1,7 +1,9 @@
 import { Component } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
+import { attachmentLabel, attachmentTitle } from "../shared/attachment-label";
 import type { ChatLimitInfo, ChatMessage, ChatPart, ChatSubagentRun, ChatSubagentStep } from "../shared/protocol";
 import { SUBAGENT_TOOL_NAME } from "../tools/subagent-tool";
+import { postMessage } from "./api";
 import { OPEN_MODEL_PICKER_EVENT } from "./events";
 import { formatReset, formatTokens } from "./format";
 import { Markdown } from "./markdown";
@@ -75,7 +77,26 @@ function MessageView({ message, running, editing, compactionBoundary, changedFil
 					{running ? null : (
 						<button type="button" class="msg-edit-button" onClick={() => onEdit(message.id)}>Edit</button>
 					)}
-					<div class="user-bubble">{text}</div>
+					<div class="user-body">
+						<div class="user-bubble">{text}</div>
+						{message.attachments && message.attachments.length > 0 ? (
+							<div class="message-attachments">
+								{message.attachments.map(attachment => (
+									<span class="attachment-chip" key={attachment.id}>
+										<button
+											type="button"
+											class="attachment-chip-open"
+											title={attachmentTitle(attachment)}
+											onClick={() => postMessage({ type: "openAttachment", attachment })}
+										>
+											{attachment.kind === "selection" ? "✂" : "📄"}
+											<span class="attachment-chip-label">{attachmentLabel(attachment)}</span>
+										</button>
+									</span>
+								))}
+							</div>
+						) : null}
+					</div>
 				</div>
 			</>
 		);

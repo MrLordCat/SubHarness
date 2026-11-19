@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useState } from "preact/hooks";
-import type { ChatModelGroup, ChatUsage } from "../shared/protocol";
+import type { ChatAttachment, ChatModelGroup, ChatUsage } from "../shared/protocol";
 import { ActivityBadge } from "./activity-badge";
 import { postMessage } from "./api";
 import { ApprovalCard } from "./approval-card";
@@ -28,8 +28,15 @@ export function App({ store }: { store: ChatStore }) {
 	// Layout effect: subscribe before the host's init message can be delivered.
 	useLayoutEffect(() => store.subscribe(() => setRevision(revision => revision + 1)), [store]);
 
-	const onSend = useCallback((text: string) => postMessage({ type: "send", text }), []);
+	const onSend = useCallback((text: string) => {
+		const attachments = store.takeAttachments();
+		postMessage(attachments.length > 0 ? { type: "send", text, attachments } : { type: "send", text });
+	}, [store]);
 	const onStop = useCallback(() => postMessage({ type: "stop" }), []);
+	const onPickAttachments = useCallback(() => postMessage({ type: "pickAttachments" }), []);
+	const onAddAttachments = useCallback((uris: string[]) => postMessage({ type: "addAttachments", uris }), []);
+	const onOpenAttachment = useCallback((attachment: ChatAttachment) => postMessage({ type: "openAttachment", attachment }), []);
+	const onRemoveAttachment = useCallback((id: string) => store.removeAttachment(id), [store]);
 	const onSelectModel = useCallback((modelId: string) => postMessage({ type: "selectModel", modelId }), []);
 	const onSelectThinking = useCallback((value: string) => postMessage({ type: "selectThinking", value }), []);
 	const onRefreshQuota = useCallback(() => postMessage({ type: "refreshQuota" }), []);
@@ -105,12 +112,17 @@ export function App({ store }: { store: ChatStore }) {
 				selectedThinking={store.selectedThinking}
 				quota={store.quota}
 				context={context}
+				pendingAttachments={store.pendingAttachments}
 				onSend={onSend}
 				onStop={onStop}
 				onSelectModel={onSelectModel}
 				onSelectThinking={onSelectThinking}
 				onRefreshQuota={onRefreshQuota}
 				onSetToolsEnabled={onSetToolsEnabled}
+				onPickAttachments={onPickAttachments}
+				onAddAttachments={onAddAttachments}
+				onOpenAttachment={onOpenAttachment}
+				onRemoveAttachment={onRemoveAttachment}
 			/>
 		</div>
 	);

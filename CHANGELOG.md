@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.21.17 (development patch) - 2026-11-19
+
+- Added: attachments in the bridge chat. The 📎 button picks the editor
+  selection, the active file, open editors, workspace files or any file on
+  disk; Shift+drag files from the Explorer onto the input works too, and the
+  editor and Explorer context menus get "Add Selection to Chat" and "Add File
+  to Chat". Attachments show as chips above the input and under the sent
+  message; clicking one opens the file at the attached lines. Files are read
+  when the message is sent (unsaved editor content included), capped at
+  60,000 characters each and 150,000 per message; binary and very large files
+  are named but not included. Editing a message keeps its attachments exactly
+  as first sent.
+
 ## 1.21.16 (development patch) - 2026-11-19
 
 - Added: bridge chats keep working in the background. Opening another chat

@@ -16,6 +16,21 @@ function formatScaled(value: number): string {
 	return text.endsWith(".0") ? text.slice(0, -2) : text;
 }
 
+/** The entries of a text/uri-list payload: comments and blank lines dropped, unique in order. */
+export function parseUriList(text: string): string[] {
+	const seen = new Set<string>();
+	const result: string[] = [];
+	for (const raw of text.split(/\r\n|\r|\n/)) {
+		const line = raw.trim();
+		if (line.length === 0 || line.startsWith("#") || seen.has(line)) {
+			continue;
+		}
+		seen.add(line);
+		result.push(line);
+	}
+	return result;
+}
+
 /** Reset time as local wall clock plus the wait, e.g. "14:30 (in 2 h 5 min)"; today shows no date. */
 export function formatReset(resetAt: number, now: number): string {
 	const at = new Date(resetAt);

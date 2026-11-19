@@ -1,6 +1,7 @@
 import {
 	applyHostUpdate,
 	type ChatApprovalRequest,
+	type ChatAttachment,
 	type ChatChangeSet,
 	type ChatMessage,
 	type ChatModelGroup,
@@ -34,7 +35,14 @@ const HOST_MESSAGE_TYPES = new Set([
 	"toolResultFull",
 	"subagent",
 	"activity",
+	"attachmentsAdded",
 ]);
+
+const MAX_PENDING_ATTACHMENTS = 20;
+
+function attachmentKey(attachment: ChatAttachment): string {
+	return `${attachment.uri}:${attachment.startLine ?? ""}:${attachment.endLine ?? ""}`;
+}
 
 /** Webview-side chat state shared by the Preact tree; every host update bumps one message version. */
 export class ChatStore {
@@ -53,6 +61,8 @@ export class ChatStore {
 	selectedThinking: string | undefined;
 	quota: ChatProviderQuota[] = [];
 	activity: ChatSessionActivity[] = [];
+	/** Attachments shown in the composer; they are sent with the next message and survive a chat switch. */
+	pendingAttachments: ChatAttachment[] = [];
 	selectedModelId: string | undefined;
 	run: ChatRunState = { running: false };
 	latestUsage: ChatUsage | undefined;
@@ -119,6 +129,25 @@ export class ChatStore {
 		if (changed) {
 			this.listeners.forEach(listener => listener());
 		}
+	};
+
+	removeAttachment = (id: string): void => {
+		const next = this.pendingAttachments.filter(attachment => attachment.id !== id);
+		if (next.length === this.pendingAttachments.length) {
+			return;
+		}
+		this.pendingAttachments = next;
+		this.listeners.forEach(listener => listener());
+	};
+
+	/** Hands the pending attachments to the message that is being sent. */
+	takeAttachments = (): ChatAttachment[] => {
+		const taken = this.pendingAttachments;
+		this.pendingAttachments = [];
+		if (taken.length > 0) {
+			this.listeners.forEach(listener => listener());
+		}
+		return taken;
 	};
 
 	receive = (event: MessageEvent): void => {
@@ -214,6 +243,9 @@ export class ChatStore {
 				this.liveSubagentRuns.set(update.run.callId, update.run);
 				this.bump(update.messageId);
 				return;
+			case "attachmentsAdded":
+				this.addPendingAttachments(update.attachments);
+				return;
 			default:
 				applyHostUpdate(this.messages, update);
 				if (update.type === "messageAdded") {
@@ -226,6 +258,25 @@ export class ChatStore {
 					}
 					this.bump(update.messageId);
 				}
+		}
+	}
+
+	private addPendingAttachments(attachments: readonly ChatAttachment[]): void {
+		const keys = new Set(this.pendingAttachments.map(attachmentKey));
+		const next = this.pendingAttachments.slice(0, MAX_PENDING_ATTACHMENTS);
+		for (const attachment of attachments) {
+			if (next.length >= MAX_PENDING_ATTACHMENTS) {
+				break;
+			}
+			const key = attachmentKey(attachment);
+			if (keys.has(key)) {
+				continue;
+			}
+			keys.add(key);
+			next.push(attachment);
+		}
+		if (next.length !== this.pendingAttachments.length) {
+			this.pendingAttachments = next;
 		}
 	}
 

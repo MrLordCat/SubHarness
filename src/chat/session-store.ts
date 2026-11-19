@@ -462,7 +462,20 @@ function isChatMessage(value: unknown): value is ChatMessage {
 		&& value.parts.every(isChatPart)
 		&& (value.modelId === undefined || typeof value.modelId === "string")
 		&& (value.hostContext === undefined || typeof value.hostContext === "string")
+		&& (value.attachments === undefined || (Array.isArray(value.attachments) && value.attachments.every(isChatAttachment)))
+		&& (value.attachmentContext === undefined || typeof value.attachmentContext === "string")
 		&& (value.usage === undefined || isChatUsage(value.usage));
+}
+
+function isChatAttachment(value: unknown): boolean {
+	return isRecord(value)
+		&& typeof value.id === "string"
+		&& (value.kind === "file" || value.kind === "selection")
+		&& typeof value.path === "string"
+		&& typeof value.uri === "string"
+		&& (value.startLine === undefined || typeof value.startLine === "number")
+		&& (value.endLine === undefined || typeof value.endLine === "number")
+		&& (value.languageId === undefined || typeof value.languageId === "string");
 }
 
 function isChatPart(value: unknown): value is ChatPart {

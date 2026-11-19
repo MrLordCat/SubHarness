@@ -1,5 +1,6 @@
 import {
 	WEBVIEW_TOOL_RESULT_PREVIEW_CHARS,
+	type ChatAttachment,
 	type ChatChangedFile,
 	type ChatChangeSet,
 	type ChatMessage,
@@ -272,7 +273,16 @@ function handleWebviewMessage(message: WebviewMessage): void {
 			emitInit();
 			break;
 		case "send":
-			handleSend(message.text);
+			handleSend(message.text, message.attachments);
+			break;
+		case "pickAttachments":
+			emitPickerAttachments();
+			break;
+		case "addAttachments":
+			emitDroppedAttachments(message.uris);
+			break;
+		case "openAttachment":
+			console.info(`harness: open attachment ${message.attachment.path}`);
 			break;
 		case "stop":
 			if (streamTimer !== undefined) {
@@ -570,13 +580,88 @@ function sessionMeta(): ChatSessionMeta {
 	};
 }
 
-function handleSend(text: string): void {
+/** User messages keep only the display info of their attachments, never the selection text. */
+function displayAttachments(attachments: readonly ChatAttachment[]): ChatAttachment[] {
+	return attachments.map(attachment => ({
+		id: attachment.id,
+		kind: attachment.kind,
+		path: attachment.path,
+		uri: attachment.uri,
+		...(attachment.startLine !== undefined ? { startLine: attachment.startLine } : {}),
+		...(attachment.endLine !== undefined ? { endLine: attachment.endLine } : {}),
+		...(attachment.languageId !== undefined ? { languageId: attachment.languageId } : {}),
+	}));
+}
+
+function emitPickerAttachments(): void {
+	emit({
+		type: "attachmentsAdded",
+		attachments: [
+			{
+				id: `attachment-${nextId++}`,
+				kind: "file",
+				path: "src/chat/chat-controller.ts",
+				uri: "file:///src/chat/chat-controller.ts",
+				languageId: "typescript",
+			},
+			{
+				id: `attachment-${nextId++}`,
+				kind: "selection",
+				path: "src/chat/webview/composer.tsx",
+				uri: "file:///src/chat/webview/composer.tsx",
+				startLine: 40,
+				endLine: 58,
+				text: [
+					"const canSend = text.trim().length > 0 && !run.running;",
+					"const submit = () => {",
+					"\tif (!canSend) {",
+					"\t\treturn;",
+					"\t}",
+					"\tonSend(text);",
+					"\tsetText(\"\");",
+					"};",
+				].join("\n"),
+				languageId: "typescriptreact",
+			},
+		],
+	});
+}
+
+function harnessAttachmentPath(uri: string): string {
+	const segments = uri
+		.replace(/^[a-z][a-z0-9+.-]*:/i, "")
+		.split(/[\\/]/)
+		.filter(segment => segment.length > 0);
+	return segments.slice(-3).join("/") || uri;
+}
+
+function emitDroppedAttachments(uris: readonly string[]): void {
+	const attachments: ChatAttachment[] = uris.map(uri => ({
+		id: `attachment-${nextId++}`,
+		kind: "file",
+		path: harnessAttachmentPath(uri),
+		uri,
+	}));
+	if (attachments.length > 0) {
+		emit({ type: "attachmentsAdded", attachments });
+	}
+}
+
+function handleSend(text: string, attachments?: readonly ChatAttachment[]): void {
 	stopStream();
 	turn += 1;
 	const userId = `sent-user-${nextId++}`;
 	const assistantId = `sent-assistant-${nextId++}`;
 	const now = Date.now();
-	const user: ChatMessage = { id: userId, role: "user", turn, createdAt: now, parts: [{ kind: "text", text }] };
+	const display = attachments && attachments.length > 0 ? displayAttachments(attachments) : undefined;
+	const user: ChatMessage = {
+		id: userId,
+		role: "user",
+		turn,
+		createdAt: now,
+		parts: [{ kind: "text", text }],
+		...(display ? { attachments: display } : {}),
+	};
 	const assistant: ChatMessage = { id: assistantId, role: "assistant", turn, createdAt: now, modelId: selectedModelId, parts: [] };
 	messages.push(user, assistant);
 	emit({ type: "messageAdded", message: user });
@@ -806,6 +891,28 @@ function createMessages(count: number): ChatMessage[] {
 			name: "subagent",
 			input: { description: "Map the subagent flow", prompt: "Trace every place that mentions subagent and report the call chain.", model: "DeepSeek Flash" },
 		});
+	}
+	const attachedFile = result[2];
+	if (attachedFile?.role === "user") {
+		attachedFile.attachments = [{
+			id: "message-attachment-file",
+			kind: "file",
+			path: "src/chat/webview/store.ts",
+			uri: "file:///src/chat/webview/store.ts",
+			languageId: "typescript",
+		}];
+	}
+	const attachedSelection = result[8];
+	if (attachedSelection?.role === "user") {
+		attachedSelection.attachments = [{
+			id: "message-attachment-selection",
+			kind: "selection",
+			path: "src/chat/webview/composer.tsx",
+			uri: "file:///src/chat/webview/composer.tsx",
+			startLine: 40,
+			endLine: 58,
+			languageId: "typescriptreact",
+		}];
 	}
 	return result;
 }

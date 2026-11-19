@@ -1,5 +1,8 @@
+import type { TargetedDragEvent } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import type { ChatModelGroup, ChatProviderQuota, ChatRunState, ChatToolGroup } from "../shared/protocol";
+import { attachmentLabel, attachmentTitle } from "../shared/attachment-label";
+import type { ChatAttachment, ChatModelGroup, ChatProviderQuota, ChatRunState, ChatToolGroup } from "../shared/protocol";
+import { parseUriList } from "./format";
 import { ModelPicker } from "./model-picker";
 import { QuotaIndicator } from "./quota-indicator";
 import { ThinkingPicker } from "./thinking-picker";
@@ -13,12 +16,25 @@ interface ComposerProps {
 	selectedThinking: string | undefined;
 	quota: ChatProviderQuota[];
 	context: string | undefined;
+	pendingAttachments: ChatAttachment[];
 	onSend: (text: string) => void;
 	onStop: () => void;
 	onSelectModel: (modelId: string) => void;
 	onSelectThinking: (value: string) => void;
 	onRefreshQuota: () => void;
 	onSetToolsEnabled: (names: string[], enabled: boolean) => void;
+	onPickAttachments: () => void;
+	onAddAttachments: (uris: string[]) => void;
+	onOpenAttachment: (attachment: ChatAttachment) => void;
+	onRemoveAttachment: (id: string) => void;
+}
+
+function carriesAttachments(transfer: DataTransfer | null): boolean {
+	if (!transfer) {
+		return false;
+	}
+	const types = Array.from(transfer.types);
+	return types.includes("application/vnd.code.uri-list") || types.includes("text/uri-list");
 }
 
 export function Composer({
@@ -29,14 +45,20 @@ export function Composer({
 	selectedThinking,
 	quota,
 	context,
+	pendingAttachments,
 	onSend,
 	onStop,
 	onSelectModel,
 	onSelectThinking,
 	onRefreshQuota,
 	onSetToolsEnabled,
+	onPickAttachments,
+	onAddAttachments,
+	onOpenAttachment,
+	onRemoveAttachment,
 }: ComposerProps) {
 	const [text, setText] = useState("");
+	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 
 	useEffect(() => {
@@ -72,8 +94,79 @@ export function Composer({
 		submit();
 	};
 
+	const onDragEnter = (event: TargetedDragEvent<HTMLDivElement>) => {
+		if (!carriesAttachments(event.dataTransfer)) {
+			return;
+		}
+		event.preventDefault();
+		setDragOver(true);
+	};
+
+	const onDragOver = (event: TargetedDragEvent<HTMLDivElement>) => {
+		if (!carriesAttachments(event.dataTransfer)) {
+			return;
+		}
+		event.preventDefault();
+		if (event.dataTransfer) {
+			event.dataTransfer.dropEffect = "copy";
+		}
+		setDragOver(true);
+	};
+
+	const onDragLeave = (event: TargetedDragEvent<HTMLDivElement>) => {
+		if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+			setDragOver(false);
+		}
+	};
+
+	const onDrop = (event: TargetedDragEvent<HTMLDivElement>) => {
+		event.preventDefault();
+		setDragOver(false);
+		const transfer = event.dataTransfer;
+		if (!transfer) {
+			return;
+		}
+		const payload = transfer.getData("application/vnd.code.uri-list") || transfer.getData("text/uri-list");
+		const uris = parseUriList(payload);
+		if (uris.length > 0) {
+			onAddAttachments(uris);
+		}
+	};
+
 	return (
-		<div class="composer">
+		<div
+			class={dragOver ? "composer composer-dragover" : "composer"}
+			onDragEnter={onDragEnter}
+			onDragOver={onDragOver}
+			onDragLeave={onDragLeave}
+			onDrop={onDrop}
+		>
+			{pendingAttachments.length > 0 ? (
+				<div class="attachment-chips">
+					{pendingAttachments.map(attachment => (
+						<span class="attachment-chip" key={attachment.id}>
+							<button
+								type="button"
+								class="attachment-chip-open"
+								title={attachmentTitle(attachment)}
+								onClick={() => onOpenAttachment(attachment)}
+							>
+								{attachment.kind === "selection" ? "✂" : "📄"}
+								<span class="attachment-chip-label">{attachmentLabel(attachment)}</span>
+							</button>
+							<button
+								type="button"
+								class="attachment-chip-remove"
+								aria-label={`Remove ${attachmentLabel(attachment)}`}
+								title="Remove"
+								onClick={() => onRemoveAttachment(attachment.id)}
+							>
+								×
+							</button>
+						</span>
+					))}
+				</div>
+			) : null}
 			<textarea
 				ref={textareaRef}
 				class="composer-input"
@@ -84,6 +177,15 @@ export function Composer({
 				onKeyDown={onKeyDown}
 			/>
 			<div class="composer-row">
+				<button
+					type="button"
+					class="attach-button"
+					aria-label="Add context"
+					title="Attach files or the editor selection; Shift+drag files here to attach them"
+					onClick={onPickAttachments}
+				>
+					📎
+				</button>
 				<ModelPicker models={models} selectedModelId={selectedModelId} onSelectModel={onSelectModel} />
 				{selectedModel?.thinking
 					? <ThinkingPicker thinking={selectedModel.thinking} selected={selectedThinking} onSelect={onSelectThinking} />

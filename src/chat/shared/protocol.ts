@@ -53,6 +53,20 @@ export interface ChatLimitInfo {
 	resetAt?: number;
 }
 
+export interface ChatAttachment {
+	id: string;
+	kind: "file" | "selection";
+	/** Workspace-relative path for display, forward slashes; absolute when outside the workspace. */
+	path: string;
+	uri: string;
+	/** 1-based inclusive lines of a selection. */
+	startLine?: number;
+	endLine?: number;
+	/** Selection text captured when it was attached. */
+	text?: string;
+	languageId?: string;
+}
+
 export interface ChatMessage {
 	id: string;
 	role: "user" | "assistant";
@@ -64,6 +78,10 @@ export interface ChatMessage {
 	usage?: ChatUsage;
 	/** Host context sent with this user message (date, active file); kept so every later request repeats it byte for byte. */
 	hostContext?: string;
+	/** Display info of the attached files and selections; never their text. */
+	attachments?: ChatAttachment[];
+	/** The rendered <attachments> block sent to the model; kept so later requests repeat it byte for byte. */
+	attachmentContext?: string;
 }
 
 export interface ChatSessionMeta {
@@ -213,12 +231,19 @@ export type HostMessage =
 	/** Live state of a running subagent; the finished run arrives as a "subagent" part. */
 	| { type: "subagent"; messageId: string; run: ChatSubagentRun }
 	/** Chats other than the shown one that run, wait for an approval or finished unseen. */
-	| { type: "activity"; activity: ChatSessionActivity[] };
+	| { type: "activity"; activity: ChatSessionActivity[] }
+	/** Attachments to show in the composer; they are sent with the next message. */
+	| { type: "attachmentsAdded"; attachments: ChatAttachment[] };
 
 /** Webview → host. */
 export type WebviewMessage =
 	| { type: "ready" }
-	| { type: "send"; text: string }
+	| { type: "send"; text: string; attachments?: ChatAttachment[] }
+	/** Opens the attachment picker; the picked files come back as "attachmentsAdded". */
+	| { type: "pickAttachments" }
+	/** Files dropped on the composer. */
+	| { type: "addAttachments"; uris: string[] }
+	| { type: "openAttachment"; attachment: ChatAttachment }
 	/**
 	 * Replaces an earlier user message: it and everything after it are dropped, then the text is sent as a new turn.
 	 * undoChanges also restores the files the agent changed since that message.

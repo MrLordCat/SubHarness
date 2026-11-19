@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ChatSessionStore, DEFAULT_CHAT_TITLE } from "../chat/session-store";
-import type { ChatMessage, ChatPart } from "../chat/shared/protocol";
+import type { ChatAttachment, ChatMessage, ChatPart } from "../chat/shared/protocol";
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -213,6 +213,28 @@ suite("Chat session store", () => {
 			user,
 			{ ...assistant, parts: [...assistant.parts, compaction] },
 		]);
+	});
+
+	test("round-trips attachments and drops a message with an invalid attachment", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create("model-a");
+		const attachments: ChatAttachment[] = [
+			{ id: "a1", kind: "file", path: "src/a.ts", uri: "file:///src/a.ts", languageId: "typescript" },
+			{ id: "a2", kind: "selection", path: "src/b.ts", uri: "file:///src/b.ts", startLine: 2, endLine: 4 },
+		];
+		const user = chatMessage("u1", "user", [{ kind: "text", text: "Look" }], {
+			attachments,
+			attachmentContext: '<attachments>\n<attachment path="src/a.ts">\n```\nx\n```\n</attachment>\n</attachments>',
+		});
+		await store.appendMessage(session.id, user);
+		await store.flush();
+		await fs.appendFile(path.join(root, `${session.id}.jsonl`), `${JSON.stringify({
+			t: "message",
+			message: { id: "u2", role: "user", turn: 2, createdAt: 2, parts: [{ kind: "text", text: "bad" }], attachments: [{ id: "x", kind: "file", path: "p" }] },
+		})}\n`, "utf8");
+
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual(await reopened.load(session.id), [user]);
 	});
 
 	test("replays a notice with its limit info", async () => {

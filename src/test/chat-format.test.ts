@@ -1,5 +1,5 @@
 import * as assert from "node:assert";
-import { formatAge, formatReset, sessionGroup } from "../chat/webview/format";
+import { formatAge, formatReset, parseUriList, sessionGroup } from "../chat/webview/format";
 
 function time(date: Date): string {
 	return date.toLocaleString([], { hour: "2-digit", minute: "2-digit" });
@@ -68,5 +68,27 @@ suite("Chat webview session formatting", () => {
 		const text = formatAge(new Date(2026, 9, 5, 9, 0).getTime(), now);
 		assert.ok(text.length > 0);
 		assert.ok(!text.endsWith(" d"));
+	});
+});
+
+suite("Chat webview drag and drop", () => {
+	test("splits a uri list on CR, LF and CRLF and trims the entries", () => {
+		assert.deepStrictEqual(
+			parseUriList("file:///a.ts\r\nfile:///b.ts\rfile:///c.ts\n  file:///d.ts  \n"),
+			["file:///a.ts", "file:///b.ts", "file:///c.ts", "file:///d.ts"],
+		);
+	});
+
+	test("drops blank lines and comments", () => {
+		assert.deepStrictEqual(parseUriList("\n# a comment\n\nfile:///a.ts\n  # indented comment\n"), ["file:///a.ts"]);
+	});
+
+	test("keeps the first occurrence of a duplicate in order", () => {
+		assert.deepStrictEqual(parseUriList("file:///b.ts\nfile:///a.ts\nfile:///b.ts\n"), ["file:///b.ts", "file:///a.ts"]);
+	});
+
+	test("returns an empty list for empty input", () => {
+		assert.deepStrictEqual(parseUriList(""), []);
+		assert.deepStrictEqual(parseUriList(" \r\n\t\n"), []);
 	});
 });
