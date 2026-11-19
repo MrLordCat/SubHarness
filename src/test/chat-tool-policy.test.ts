@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { createChatToolSource, DENIED_TOOL_RESULT } from "../chat/tool-executor";
-import { ChatToolCatalog, TOOL_OVERRIDES_KEY, type ToolRegistry } from "../chat/tools/catalog";
+import { ChatToolCatalog, isCopilotOnlyTool, TOOL_OVERRIDES_KEY, type ToolRegistry } from "../chat/tools/catalog";
 import { compileDangerousCommandRules, DEFAULT_DANGEROUS_COMMANDS, findDangerousCommand } from "../chat/tools/danger";
 import { createChatTerminalTools } from "../chat/tools/terminal-tools";
 import type { ChatTool } from "../chat/tools/types";
@@ -124,11 +124,16 @@ function info(name: string): vscode.LanguageModelToolInformation {
 	return { name, description: `${name} description`, inputSchema: { type: "object", properties: {} }, tags: [] };
 }
 
-function fakeRegistry(names: string[], local: Record<string, vscode.LanguageModelTool<object>> = {}): ToolRegistry & { invoked: string[] } {
+function fakeRegistry(
+	names: string[],
+	local: Record<string, vscode.LanguageModelTool<object>> = {},
+	copilotNames?: readonly string[],
+): ToolRegistry & { invoked: string[] } {
 	const invoked: string[] = [];
 	return {
 		invoked,
 		tools: () => names.map(info),
+		...(copilotNames ? { copilotToolNames: () => copilotNames } : {}),
 		invoke: async name => {
 			invoked.push(name);
 			return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`external ${name}`)]);
@@ -253,7 +258,7 @@ suite("chat tool policy", () => {
 	test("the catalog groups builtins, bridge tools and external tools with the right defaults", () => {
 		const bridge: vscode.LanguageModelTool<object> = { invoke: () => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart("bridge ran")]) };
 		const registry = fakeRegistry(
-			["llamacpp_store_memory", "llamacpp_coco_run_in_terminal", "llamacpp_wait_for_terminal", "copilot_readFile", "mcp_github_search", "read_file", "dotnet_install"],
+			["llamacpp_store_memory", "llamacpp_coco_run_in_terminal", "llamacpp_wait_for_terminal", "pylance_tool", "mcp_github_search", "read_file", "dotnet_install"],
 			{ llamacpp_store_memory: bridge },
 		);
 		const catalog = new ChatToolCatalog({
@@ -266,12 +271,12 @@ suite("chat tool policy", () => {
 			["Files", ["read_file:true"]],
 			["Terminal", ["run_in_terminal:true"]],
 			["AI Agent Bridge", ["llamacpp_store_memory:true"]],
-			["Copilot", ["copilot_readFile:false"]],
 			["dotnet", ["dotnet_install:false"]],
 			["MCP servers", ["mcp_github_search:false"]],
+			["pylance", ["pylance_tool:false"]],
 		]);
 		assert.strictEqual(groups.find(group => group.label === "Files")?.note, undefined);
-		assert.match(groups.find(group => group.label === "Copilot")?.note ?? "", /confirmation/);
+		assert.match(groups.find(group => group.label === "pylance")?.note ?? "", /confirmation/);
 		assert.deepStrictEqual(catalog.enabledTools().map(tool => tool.name), ["read_file", "run_in_terminal", "llamacpp_store_memory"]);
 	});
 
@@ -293,14 +298,37 @@ suite("chat tool policy", () => {
 		assert.deepStrictEqual(registry.invoked, ["mcp_github_search"]);
 	});
 
+	test("Copilot and chat-session tools disappear from groups, enabled tools and toggles", async () => {
+		const bridge: vscode.LanguageModelTool<object> = { invoke: () => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart("bridge ran")]) };
+		const registry = fakeRegistry(
+			["copilot_readFile", "explore_subagent", "manage_todo_list", "open_browser_page", "mcp_github_search", "pylance_tool", "llamacpp_store_memory"],
+			{ llamacpp_store_memory: bridge },
+			["explore_subagent"],
+		);
+		const state = new FakeMemento();
+		const catalog = new ChatToolCatalog({ builtins: [], state, registry });
+		const tools = new Map(catalog.groups().flatMap(group => group.tools).map(tool => [tool.name, tool]));
+		assert.deepStrictEqual([...tools.keys()], ["llamacpp_store_memory", "mcp_github_search", "pylance_tool"]);
+		assert.strictEqual(tools.get("llamacpp_store_memory")?.enabled, true);
+		assert.strictEqual(tools.get("mcp_github_search")?.enabled, false);
+		assert.strictEqual(tools.get("pylance_tool")?.enabled, false);
+		assert.deepStrictEqual(catalog.enabledTools().map(tool => tool.name), ["llamacpp_store_memory"]);
+		await catalog.setEnabled(["copilot_readFile", "explore_subagent", "manage_todo_list", "open_browser_page"], true);
+		assert.deepStrictEqual(state.get(TOOL_OVERRIDES_KEY) ?? {}, {});
+		assert.deepStrictEqual(catalog.enabledTools().map(tool => tool.name), ["llamacpp_store_memory"]);
+		assert.strictEqual(isCopilotOnlyTool("copilot_readFile", []), true);
+		assert.strictEqual(isCopilotOnlyTool("explore_subagent", ["explore_subagent"]), true);
+		assert.strictEqual(isCopilotOnlyTool("mcp_github_search", ["explore_subagent"]), false);
+	});
+
 	test("tool choices store only differences from the defaults", async () => {
 		const state = new FakeMemento();
-		const catalog = new ChatToolCatalog({ builtins: [chatTool("read_file")], state, registry: fakeRegistry(["copilot_readFile"]) });
-		await catalog.setEnabled(["read_file", "copilot_readFile", "unknown_tool"], false);
+		const catalog = new ChatToolCatalog({ builtins: [chatTool("read_file")], state, registry: fakeRegistry(["pylance_tool"]) });
+		await catalog.setEnabled(["read_file", "pylance_tool", "unknown_tool"], false);
 		assert.deepStrictEqual(state.get(TOOL_OVERRIDES_KEY), { read_file: false });
-		await catalog.setEnabled(["read_file", "copilot_readFile"], true);
-		assert.deepStrictEqual(state.get(TOOL_OVERRIDES_KEY), { copilot_readFile: true });
-		assert.deepStrictEqual(catalog.enabledTools().map(tool => tool.name), ["read_file", "copilot_readFile"]);
+		await catalog.setEnabled(["read_file", "pylance_tool"], true);
+		assert.deepStrictEqual(state.get(TOOL_OVERRIDES_KEY), { pylance_tool: true });
+		assert.deepStrictEqual(catalog.enabledTools().map(tool => tool.name), ["read_file", "pylance_tool"]);
 	});
 
 	test("the tool source refuses disabled tools and never runs a held call without approval", async () => {

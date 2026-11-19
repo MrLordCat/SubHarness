@@ -44,6 +44,8 @@ interface SessionChanges {
 export interface ChatChangeTrackerLike {
 	beginTurn(): Promise<TurnSnapshot | undefined>;
 	endTurn(sessionId: string, turn: number, begin: TurnSnapshot, claimed?: readonly string[]): Promise<void>;
+	/** Changes so far in a turn that is still running; nothing is saved. */
+	liveChangeSet?(sessionId: string, turn: number, begin: TurnSnapshot, claimed?: readonly string[]): Promise<ChatChangeSet>;
 	/** Records that the turn may write before its changes are known. */
 	markOpen?(sessionId: string, turn: number): Promise<void>;
 	/** Turns a turn left open by a crash into a notice. */
@@ -171,34 +173,10 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 	async endTurn(sessionId: string, turn: number, begin: TurnSnapshot, claimed?: readonly string[]): Promise<void> {
 		const overlapped = this._overlapped.has(begin);
 		this._open.delete(begin);
-		let files = await this._enqueueGit(async () => {
-			const changed: FileChange[] = [];
-			for (const [root, before] of begin) {
-				const repo = this._repos.get(root);
-				if (!repo || this._disabled.has(root)) {
-					continue;
-				}
-				try {
-					const after = await repo.snapshot();
-					if (after === before) {
-						continue;
-					}
-					for (const change of await repo.diff(before, after)) {
-						changed.push({ root, path: change.path, before: change.before, after: change.after });
-					}
-				} catch (error) {
-					this._disable(root, error);
-				}
-			}
-			return changed;
-		});
-		let dropped = 0;
-		if (overlapped) {
-			const allowed = new Set((claimed ?? []).map(comparablePath));
-			const kept = files.filter(file => allowed.has(comparablePath(path.join(file.root, ...file.path.split("/")))));
-			dropped = files.length - kept.length;
-			files = kept;
-		}
+		const collected = await this._collectChanges(begin);
+		const filtered = overlapped ? this._filterClaimed(collected, claimed) : { files: collected, dropped: 0 };
+		const files = filtered.files;
+		const dropped = filtered.dropped;
 		const notice = dropped > 0
 			? `Another chat was working at the same time, so ${plural(dropped, "file")} changed by other means ${dropped === 1 ? "is" : "are"} not listed here.`
 			: undefined;
@@ -221,18 +199,23 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 			if (data.turns.length > MAX_TURN_RECORDS) {
 				data.turns.splice(0, data.turns.length - MAX_TURN_RECORDS);
 			}
-			for (const file of files) {
-				const pending = data.pending.find(candidate => sameFile(candidate, file));
-				if (!pending) {
-					data.pending.push({ ...file });
-				} else {
-					pending.after = file.after;
-				}
-			}
-			data.pending = data.pending.filter(file => file.before !== file.after);
+			data.pending = this._mergePending(data.pending, files);
 			data.notice = notice;
 			data.open = undefined;
 		});
+	}
+
+	async liveChangeSet(sessionId: string, turn: number, begin: TurnSnapshot, claimed?: readonly string[]): Promise<ChatChangeSet> {
+		const collected = await this._collectChanges(begin);
+		const filtered = this._overlapped.has(begin) ? this._filterClaimed(collected, claimed) : { files: collected, dropped: 0 };
+		const data = await this._enqueue(() => this._load(sessionId));
+		const turns = filtered.files.length > 0 ? [...data.turns, { turn, files: filtered.files }] : [...data.turns];
+		const live: SessionChanges = {
+			turns,
+			pending: this._mergePending(data.pending, filtered.files),
+			...(data.notice === undefined ? {} : { notice: data.notice }),
+		};
+		return this._buildChangeSet(live);
 	}
 
 	async markOpen(sessionId: string, turn: number): Promise<void> {
@@ -254,6 +237,10 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 
 	async changeSet(sessionId: string): Promise<ChatChangeSet> {
 		const data = await this._enqueue(() => this._load(sessionId));
+		return this._buildChangeSet(data);
+	}
+
+	private async _buildChangeSet(data: SessionChanges): Promise<ChatChangeSet> {
 		const folders = this._options.folders();
 		const multiRoot = folders.length > 1;
 		const files: ChatChangedFile[] = [];
@@ -358,6 +345,52 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 
 	private _select(pending: readonly FileChange[], ids?: readonly string[]): FileChange[] {
 		return ids ? pending.filter(file => ids.includes(fileId(file))) : [...pending];
+	}
+
+	/** Snapshots the work trees again and lists what changed since the begin snapshot. */
+	private async _collectChanges(begin: TurnSnapshot): Promise<FileChange[]> {
+		return this._enqueueGit(async () => {
+			const changed: FileChange[] = [];
+			for (const [root, before] of begin) {
+				const repo = this._repos.get(root);
+				if (!repo || this._disabled.has(root)) {
+					continue;
+				}
+				try {
+					const after = await repo.snapshot();
+					if (after === before) {
+						continue;
+					}
+					for (const change of await repo.diff(before, after)) {
+						changed.push({ root, path: change.path, before: change.before, after: change.after });
+					}
+				} catch (error) {
+					this._disable(root, error);
+				}
+			}
+			return changed;
+		});
+	}
+
+	/** Drops the files another chat changed while this turn was open, keeping only the paths its tools wrote. */
+	private _filterClaimed(files: readonly FileChange[], claimed?: readonly string[]): { files: FileChange[]; dropped: number } {
+		const allowed = new Set((claimed ?? []).map(comparablePath));
+		const kept = files.filter(file => allowed.has(comparablePath(path.join(file.root, ...file.path.split("/")))));
+		return { files: kept, dropped: files.length - kept.length };
+	}
+
+	/** Adds the turn's files to a pending list copy: known files move to their new version, new files are appended. */
+	private _mergePending(pending: readonly FileChange[], files: readonly FileChange[]): FileChange[] {
+		const merged = pending.map(file => ({ ...file }));
+		for (const file of files) {
+			const existing = merged.find(candidate => sameFile(candidate, file));
+			if (!existing) {
+				merged.push({ ...file });
+			} else {
+				existing.after = file.after;
+			}
+		}
+		return merged.filter(file => file.before !== file.after);
 	}
 
 	/** Kept or undone files leave the pending set and the per-turn history. */

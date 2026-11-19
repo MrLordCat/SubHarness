@@ -4,7 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { ShadowGitRepo, findGitExecutable } from "../chat/changes/shadow-git";
+import { MAX_IGNORED_FILE_BYTES, ShadowGitRepo, findGitExecutable } from "../chat/changes/shadow-git";
 
 function runGit(gitPath: string, args: string[]): Promise<void> {
 	return new Promise<void>((resolve, reject) => {
@@ -96,7 +96,7 @@ suite("Shadow git repository", () => {
 		assert.strictEqual(await fs.realpath(alternates.trim()), await fs.realpath(path.join(project, ".git", "objects")));
 	});
 
-	test("diffs modified, added and deleted files but not ignored paths", async function () {
+	test("diffs modified, added and deleted files and adds small ignored files", async function () {
 		if (!gitPath) {
 			this.skip();
 			return;
@@ -114,7 +114,7 @@ suite("Shadow git repository", () => {
 		const changes = await shadow.diff(before, after);
 		assert.deepStrictEqual(
 			changes.map(change => change.path).sort(),
-			["a.txt", "b.txt", "c.txt"],
+			["a.txt", "b.txt", "c.txt", "ignored.txt"],
 		);
 		const byPath = new Map(changes.map(change => [change.path, change]));
 		const modified = byPath.get("a.txt");
@@ -126,6 +126,47 @@ suite("Shadow git repository", () => {
 		const deleted = byPath.get("c.txt");
 		assert.ok(deleted?.before);
 		assert.strictEqual(deleted?.after, undefined);
+	});
+
+	test("tracks ignored files but skips build folders and big files", async function () {
+		if (!gitPath) {
+			this.skip();
+			return;
+		}
+		this.timeout(60_000);
+		const workTree = path.join(tempRoot, "ignored-project");
+		await fs.mkdir(path.join(workTree, "ignored"), { recursive: true });
+		await fs.mkdir(path.join(workTree, "node_modules"), { recursive: true });
+		await fs.mkdir(path.join(workTree, "out"), { recursive: true });
+		await fs.writeFile(path.join(workTree, ".gitignore"), "ignored/\n*.log\nout/\n");
+		await fs.writeFile(path.join(workTree, "node_modules", "a.js"), "a\n");
+		await fs.writeFile(path.join(workTree, "out", "b.js"), "b\n");
+		await fs.writeFile(path.join(workTree, "ignored", "keep.txt"), "keep\n");
+		const ignoredRepo = new ShadowGitRepo({ gitPath, gitDir: path.join(tempRoot, "ignored-shadow"), workTree, timeoutMs: 60_000 });
+		const before = await ignoredRepo.snapshot();
+
+		await fs.writeFile(path.join(workTree, "ignored", "new.txt"), "new\n");
+		await fs.writeFile(path.join(workTree, "x.log"), "log\n");
+		await fs.writeFile(path.join(workTree, "ignored", "big.bin"), Buffer.alloc(MAX_IGNORED_FILE_BYTES + 1, 1));
+		await fs.writeFile(path.join(workTree, "node_modules", "c.js"), "c\n");
+		await fs.writeFile(path.join(workTree, "out", "d.js"), "d\n");
+		await fs.writeFile(path.join(workTree, "ignored", "keep.txt"), "keep edited\n");
+		const after = await ignoredRepo.snapshot();
+
+		const changes = await ignoredRepo.diff(before, after);
+		assert.deepStrictEqual(changes.map(change => change.path).sort(), ["ignored/keep.txt", "ignored/new.txt", "x.log"]);
+		const byPath = new Map(changes.map(change => [change.path, change]));
+		assert.strictEqual(byPath.get("ignored/new.txt")?.before, undefined);
+		assert.ok(byPath.get("ignored/new.txt")?.after);
+		assert.strictEqual(byPath.get("x.log")?.before, undefined);
+		assert.ok(byPath.get("x.log")?.after);
+		assert.ok(byPath.get("ignored/keep.txt")?.before);
+		assert.ok(byPath.get("ignored/keep.txt")?.after);
+
+		await fs.rm(path.join(workTree, "ignored", "new.txt"));
+		const last = await ignoredRepo.snapshot();
+		const removed = await ignoredRepo.diff(after, last);
+		assert.deepStrictEqual(removed.map(change => [change.path, change.before !== undefined, change.after !== undefined]), [["ignored/new.txt", true, false]]);
 	});
 
 	test("reads raw blobs and hashes files without filters", async function () {

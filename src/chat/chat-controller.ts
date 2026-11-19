@@ -862,9 +862,47 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		const tracker = this._deps.changes;
 		let begin: Promise<TurnSnapshot | undefined> | undefined;
 		const claimed = new Set<string>();
+		let liveRun: Promise<void> | undefined;
+		let liveQueued = false;
+		// One live refresh at a time; tool calls that finish during it queue a single follow-up.
+		const refreshLive = (): void => {
+			if (!tracker?.liveChangeSet || !begin) {
+				return;
+			}
+			if (liveRun) {
+				liveQueued = true;
+				return;
+			}
+			const readLive = tracker.liveChangeSet.bind(tracker);
+			const run = async (): Promise<void> => {
+				do {
+					liveQueued = false;
+					const snapshot = await begin;
+					if (!snapshot) {
+						return;
+					}
+					try {
+						const changes = await readLive(runtime.meta.id, turn, snapshot, [...claimed]);
+						if (runtime.running === running) {
+							runtime.changes = changes;
+							this._emit(runtime, { type: "changes", changes });
+						}
+					} catch (error) {
+						this._log("chat.changes.live_failed", { message: errorMessage(error) });
+					}
+				} while (liveQueued);
+			};
+			liveRun = run().finally(() => {
+				liveRun = undefined;
+				if (liveQueued) {
+					refreshLive();
+				}
+			}).catch(() => undefined);
+		};
 		const invoke = async (name: string, input: unknown, token: vscode.CancellationToken, callId: string | undefined, nested: boolean) => {
+			const readOnly = source.isReadOnly?.(name) ?? false;
 			// The snapshot must exist before the first tool that may write; read-only rounds cost nothing.
-			if (tracker && !begin && !source.isReadOnly?.(name)) {
+			if (tracker && !begin && !readOnly) {
 				begin = (async () => {
 					const snapshot = await tracker.beginTurn().catch(error => {
 						this._log("chat.changes.begin_failed", { message: errorMessage(error) });
@@ -884,14 +922,20 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			for (const file of source.writtenPaths?.(name, input) ?? []) {
 				claimed.add(file);
 			}
-			return source.invoke(name, input, token, {
-				callId,
-				approve: confirmation => this._requestApproval(running, name, callId, confirmation, token),
-				...(nested ? {} : {
-					runSubagent: (request: SubagentRequest, subagentToken: vscode.CancellationToken) =>
-						this._runSubagent(running, callId ?? randomUUID(), request, subagentTools, subagentToken),
-				}),
-			});
+			try {
+				return await source.invoke(name, input, token, {
+					callId,
+					approve: confirmation => this._requestApproval(running, name, callId, confirmation, token),
+					...(nested ? {} : {
+						runSubagent: (request: SubagentRequest, subagentToken: vscode.CancellationToken) =>
+							this._runSubagent(running, callId ?? randomUUID(), request, subagentTools, subagentToken),
+					}),
+				});
+			} finally {
+				if (!readOnly) {
+					refreshLive();
+				}
+			}
 		};
 		const subagentTools: ChatToolExecutor = {
 			get tools() { return source.tools.filter(tool => tool.name !== SUBAGENT_TOOL_NAME); },
@@ -930,6 +974,10 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			this._persistFinishedParts(running);
 			void this._persistEnd(running);
 			const snapshot = await begin;
+			// A live result must not land after the final list.
+			while (liveRun) {
+				await liveRun;
+			}
 			if (tracker && snapshot) {
 				try {
 					await tracker.endTurn(runtime.meta.id, turn, snapshot, [...claimed]);

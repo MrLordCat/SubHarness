@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.21.23 (development patch) - 2026-11-19
+
+- Changed: the bridge chat's changed-files list updates after every tool call
+  that may write, so created, edited and deleted files show up while the agent
+  works instead of only when the answer ends.
+- Fixed: files excluded by .gitignore were missing from the changed-files list.
+  They are recorded now, except build and dependency folders (node_modules,
+  out, dist, build, .vscode-test and similar) and ignored files over 1 MB.
+- Changed: the bridge chat no longer offers tools that only work inside
+  Copilot Chat: the Copilot Chat extension's tools and the VS Code chat tools
+  for questions, todo lists, chat terminals, tasks and the integrated browser.
+
 ## 1.21.22 (development patch) - 2026-11-19
 
 - Fixed: grep_search in the bridge chat found nothing when includePattern

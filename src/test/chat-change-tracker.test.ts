@@ -82,6 +82,42 @@ suite("chat change tracker", () => {
 		assert.deepStrictEqual(reloaded.files.map(entry => entry.id).sort(), set.files.map(entry => entry.id).sort());
 	});
 
+	test("a live change set merges the running turn with pending files and saves nothing", async () => {
+		const current = tracker();
+		await turn(current, 1, async () => fs.writeFile(file("b.txt"), "turn one\n"));
+		const begin = await current.beginTurn();
+		assert.ok(begin, "the turn snapshot must exist");
+		await fs.writeFile(file("a.txt"), "turn two\n");
+
+		const live = await current.liveChangeSet(SESSION, 2, begin, [file("a.txt")]);
+		assert.deepStrictEqual(live.files.map(entry => entry.path).sort(), ["a.txt", "b.txt"]);
+		assert.deepStrictEqual(live.sinceTurn, [{ turn: 1, files: 2 }, { turn: 2, files: 1 }]);
+
+		const saved = await current.changeSet(SESSION);
+		assert.deepStrictEqual(saved.files.map(entry => entry.path), ["b.txt"]);
+		assert.deepStrictEqual(saved.sinceTurn, [{ turn: 1, files: 1 }]);
+
+		await current.endTurn(SESSION, 2, begin, [file("a.txt")]);
+		assert.deepStrictEqual(await current.changeSet(SESSION), live);
+	});
+
+	test("a live change set shows ignored files written during the turn", async () => {
+		const current = tracker();
+		await fs.writeFile(file(".gitignore"), "ignored/\n*.log\n");
+		const begin = await current.beginTurn();
+		assert.ok(begin, "the turn snapshot must exist");
+		await fs.mkdir(file("ignored"), { recursive: true });
+		await fs.writeFile(file("ignored/live.txt"), "ignored\n");
+		await fs.writeFile(file("trace.log"), "log\n");
+
+		const live = await current.liveChangeSet(SESSION, 1, begin);
+		assert.deepStrictEqual(live.files.map(entry => entry.path).sort(), ["ignored/live.txt", "trace.log"]);
+		assert.deepStrictEqual((await current.changeSet(SESSION)).files, []);
+
+		await current.endTurn(SESSION, 1, begin);
+		assert.deepStrictEqual(await current.changeSet(SESSION), live);
+	});
+
 	test("a turn that changes nothing and a file changed back leave no pending entry", async () => {
 		const current = tracker();
 		await turn(current, 1, async () => undefined);

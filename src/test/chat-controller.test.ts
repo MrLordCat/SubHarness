@@ -317,6 +317,15 @@ class FakeForgettingTracker extends FakeTracker {
 	}
 }
 
+/** A tracker that answers live snapshots while the turn is still running. */
+class FakeLiveTracker extends FakeTracker {
+	readonly liveTurns: number[] = [];
+	async liveChangeSet(_sessionId: string, turn: number): Promise<ChatChangeSet> {
+		this.liveTurns.push(turn);
+		return { files: [{ id: "live-f1", path: "live.txt", status: "added" }], sinceTurn: [{ turn, files: 1 }] };
+	}
+}
+
 class FakeRecoveringTracker extends FakeTracker {
 	readonly recovered: string[] = [];
 	async markOpen(_sessionId: string, turn: number): Promise<void> {
@@ -1533,6 +1542,43 @@ suite("chat controller", () => {
 		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
 		assert.deepStrictEqual(calls, ["tool:reader"]);
 		assert.deepStrictEqual(current.webview.ofType("changes"), []);
+	});
+
+	test("a writing tool publishes live changes before the run ends", async () => {
+		const calls: string[] = [];
+		const tracker = new FakeLiveTracker(calls);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-r", "reader", {})),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-w", "writer", {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("done")),
+		]);
+		const current = createHarness(root, backend, loggingTools(calls), tracker);
+		harness = current;
+		current.webview.receive({ type: "send", text: "edit a file" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+
+		const changes = current.webview.ofType("changes");
+		assert.deepStrictEqual(changes[0]?.changes.files.map(entry => entry.path), ["live.txt"]);
+		assert.deepStrictEqual(changes.at(-1)?.changes.files.map(entry => entry.path), ["a.txt"]);
+		const types = current.webview.messages.map(message => message.type);
+		assert.ok(types.indexOf("changes") < types.lastIndexOf("run"), "the live changes arrive before the run ends");
+		assert.deepStrictEqual(tracker.liveTurns, [1]);
+	});
+
+	test("read-only tools do not publish live changes", async () => {
+		const calls: string[] = [];
+		const tracker = new FakeLiveTracker(calls);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-r", "reader", {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("done")),
+		]);
+		const current = createHarness(root, backend, loggingTools(calls), tracker);
+		harness = current;
+		current.webview.receive({ type: "send", text: "just read" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+
+		assert.deepStrictEqual(current.webview.ofType("changes"), []);
+		assert.deepStrictEqual(tracker.liveTurns, []);
 	});
 
 	test("keep, undo and message edits reach the change tracker", async () => {

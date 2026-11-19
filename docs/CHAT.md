@@ -45,7 +45,14 @@ The model runs tools without asking, with one exception: a terminal command
 that matches a rule in `llamacpp.chat.dangerousCommands` waits for your
 approval in the chat. The default rules cover force pushes, hard resets,
 recursive deletes, disk formatting, publishing packages and similar commands.
-Edit the list in Settings; each entry is a regular expression.
+Edit the list in Settings; each entry is a regular expression. `delete_file`
+also asks before it deletes a folder or anything outside the workspace.
+
+Tools that only work inside Copilot Chat or a VS Code chat session are not
+offered: every tool of the Copilot Chat extension (`copilot_*`, its subagents
+and skills) and the VS Code chat tools for questions, todo lists, chat
+terminals, tasks and the integrated browser. Tools of MCP servers and other
+extensions stay available in the **Tools** picker.
 
 ## Changed files: Keep and Undo
 
@@ -53,8 +60,14 @@ Files the agent changes are listed above the input. Open one to see its diff,
 then **Keep** or **Undo** single files or all of them. Undo restores a file only
 while it still holds the agent's version, so later edits by hand survive.
 
+The list updates after every tool call that may write, so it grows while the
+agent works; Keep and Undo unlock when the answer ends.
+
 The bridge records changes with a private git snapshot of the workspace
-folders in the extension's storage; your repository is not touched.
+folders in the extension's storage; your repository is not touched. Files your
+`.gitignore` excludes are recorded too, except build and dependency folders
+(`node_modules`, `out`, `dist`, `build`, `target`, `.vscode-test`, `.venv` and
+similar) and ignored files over 1 MB.
 
 When two chats work at the same time, a chat lists only the files its own
 edit tools wrote, and says how many other changed files it left out. Undo in

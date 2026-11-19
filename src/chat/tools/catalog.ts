@@ -10,6 +10,42 @@ export const TOOL_OVERRIDES_KEY = "llamacpp.chat.toolOverrides";
 /** The chat has its own terminal tools; these bridge tools serve Copilot and Coco. */
 const HIDDEN_TOOLS = new Set<string>([...Object.values(COCO_TERMINAL_TOOLS), WAIT_TERMINAL_TOOL_NAME]);
 
+/** VS Code tools that need a Copilot Chat / VS Code chat session; here they fail or open dialogs in the wrong window. */
+export const CHAT_SESSION_TOOLS: ReadonlySet<string> = new Set([
+	"runSubagent",
+	"manage_todo_list",
+	"vscode_askQuestions",
+	"vscode_get_confirmation",
+	"vscode_get_terminal_confirmation",
+	"vscode_editFile_internal",
+	"vscode_fetchWebPage_internal",
+	"vscode_searchExtensions_internal",
+	"vscode_listCodeUsages",
+	"vscode_renameSymbol",
+	"testFailure",
+	"get_terminal_output",
+	"terminal_last_command",
+	"terminal_selection",
+	"create_and_run_task",
+	"run_task",
+	"get_task_output",
+	"open_browser_page",
+	"navigate_page",
+	"read_page",
+	"click_element",
+	"drag_element",
+	"hover_element",
+	"type_in_page",
+	"handle_dialog",
+	"screenshot_page",
+	"run_playwright_code",
+]);
+
+/** Tools that only work inside Copilot Chat: contributed by it or carrying its name prefix. */
+export function isCopilotOnlyTool(name: string, copilotNames: readonly string[]): boolean {
+	return name.startsWith("copilot_") || copilotNames.includes(name);
+}
+
 const BUILTIN_GROUP_LABELS: Record<string, string> = {
 	[CHAT_TOOL_GROUPS.files]: "Files",
 	[CHAT_TOOL_GROUPS.search]: "Search",
@@ -23,13 +59,28 @@ const EXTERNAL_NOTE = "Run through VS Code, which may ask for confirmation in a 
 
 export interface ToolRegistry {
 	tools(): readonly vscode.LanguageModelToolInformation[];
+	/** Tools contributed by the Copilot Chat extension; re-read on every catalog refresh so extension changes are followed. */
+	copilotToolNames?(): readonly string[];
 	invoke(name: string, input: object, token: vscode.CancellationToken): Thenable<vscode.LanguageModelToolResult>;
 	/** Implementation of a tool this extension registered; it runs without the VS Code confirmation dialog. */
 	local(name: string): vscode.LanguageModelTool<object> | undefined;
 }
 
+function copilotContributedToolNames(): readonly string[] {
+	const contributes = vscode.extensions.getExtension("GitHub.copilot-chat")?.packageJSON?.contributes as { languageModelTools?: unknown } | undefined;
+	const tools = contributes?.languageModelTools;
+	if (!Array.isArray(tools)) {
+		return [];
+	}
+	return (tools as readonly unknown[]).flatMap(tool => {
+		const name = typeof tool === "object" && tool !== null ? (tool as { name?: unknown }).name : undefined;
+		return typeof name === "string" ? [name] : [];
+	});
+}
+
 export const vscodeToolRegistry: ToolRegistry = {
 	tools: () => vscode.lm.tools,
+	copilotToolNames: copilotContributedToolNames,
 	invoke: (name, input, token) => vscode.lm.invokeTool(name, { input, toolInvocationToken: undefined }, token),
 	local: getLocalTool,
 };
@@ -64,13 +115,10 @@ function inputObject(input: unknown): object {
 	return typeof input === "object" && input !== null ? input : {};
 }
 
-/** External tools are grouped by their name prefix: mcp_, copilot_, vscode_ or the text before the first underscore. */
+/** External tools are grouped by their name prefix: mcp_, vscode_ or the text before the first underscore. */
 function externalGroup(name: string): { id: string; label: string } {
 	if (name.startsWith("mcp_")) {
 		return { id: "ext:mcp", label: "MCP servers" };
-	}
-	if (name.startsWith("copilot_")) {
-		return { id: "ext:copilot", label: "Copilot" };
 	}
 	const separator = name.search(/[_.]/);
 	if (name.startsWith("vscode_") || separator <= 0) {
@@ -158,8 +206,9 @@ export class ChatToolCatalog {
 			external: false,
 		}));
 		const taken = new Set(this._builtins.map(tool => tool.name));
+		const copilotNames = this._registry.copilotToolNames?.() ?? [];
 		for (const info of this._registry.tools()) {
-			if (taken.has(info.name) || HIDDEN_TOOLS.has(info.name)) {
+			if (taken.has(info.name) || HIDDEN_TOOLS.has(info.name) || CHAT_SESSION_TOOLS.has(info.name) || isCopilotOnlyTool(info.name, copilotNames)) {
 				continue;
 			}
 			taken.add(info.name);

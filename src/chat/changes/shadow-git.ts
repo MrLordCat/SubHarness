@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdir, stat, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
@@ -49,6 +49,89 @@ const REPO_CONFIG: ReadonlyArray<readonly [string, string]> = [
 ];
 const INFO_ATTRIBUTES = "* -text -filter -ident -working-tree-encoding\n";
 const INFO_EXCLUDE = "node_modules/\n.venv/\n__pycache__/\n.vscode-test/\n";
+
+/** Directory names whose ignored contents stay out of the snapshots: build output and dependencies. */
+export const UNTRACKED_DIRECTORY_NAMES: ReadonlySet<string> = new Set([
+	"node_modules",
+	".git",
+	"out",
+	"dist",
+	"build",
+	"target",
+	"coverage",
+	".vscode-test",
+	".venv",
+	"venv",
+	"__pycache__",
+	".tox",
+	".mypy_cache",
+	".pytest_cache",
+	".ruff_cache",
+	".gradle",
+	".next",
+	".nuxt",
+	".turbo",
+	".cache",
+	".parcel-cache",
+	"obj",
+]);
+export const MAX_IGNORED_FILE_BYTES = 1_000_000;
+export const MAX_IGNORED_FILES = 5_000;
+
+function acceptIndexFailure(code: number | null, stderr: string): boolean {
+	return code === 1 && stderr.includes("unable to index");
+}
+
+/** Ignored files worth recording: small regular files outside build and dependency folders. */
+async function collectIgnoredFiles(workTree: string, listing: Buffer): Promise<string[]> {
+	const files: string[] = [];
+	const addIfSmall = async (relative: string): Promise<void> => {
+		try {
+			const info = await lstat(path.join(workTree, ...relative.split("/")));
+			if (info.isFile() && info.size <= MAX_IGNORED_FILE_BYTES) {
+				files.push(relative);
+			}
+		} catch {
+			// The file vanished since the listing.
+		}
+	};
+	const walk = async (relative: string): Promise<void> => {
+		const entries = await readdir(path.join(workTree, ...relative.split("/")), { withFileTypes: true }).catch(() => undefined);
+		if (!entries) {
+			return;
+		}
+		for (const entry of entries) {
+			if (files.length >= MAX_IGNORED_FILES) {
+				return;
+			}
+			if (entry.isSymbolicLink()) {
+				continue;
+			}
+			const child = `${relative}/${entry.name}`;
+			if (entry.isDirectory()) {
+				if (!UNTRACKED_DIRECTORY_NAMES.has(entry.name)) {
+					await walk(child);
+				}
+			} else if (entry.isFile()) {
+				await addIfSmall(child);
+			}
+		}
+	};
+	for (const entry of listing.toString("utf8").split("\0")) {
+		if (files.length >= MAX_IGNORED_FILES) {
+			break;
+		}
+		if (entry.length === 0 || entry.split("/").some(segment => UNTRACKED_DIRECTORY_NAMES.has(segment))) {
+			continue;
+		}
+		if (entry.endsWith("/")) {
+			await walk(entry.slice(0, -1));
+		} else {
+			await addIfSmall(entry);
+		}
+	}
+	return files;
+}
 
 function isZeroBlobId(blobId: string): boolean {
 	return /^0+$/.test(blobId);
@@ -162,8 +245,24 @@ export class ShadowGitRepo {
 			await this.execGit(["add", "-A", "--ignore-errors", "--", "."], {
 				cwd: this.options.workTree,
 				label: "add",
-				acceptFailure: (code, stderr) => code === 1 && stderr.includes("unable to index"),
+				acceptFailure: acceptIndexFailure,
 			});
+			const listing = await this.execGit(
+				["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+				{ cwd: this.options.workTree, label: "ls-files" },
+			);
+			const ignored = await collectIgnoredFiles(this.options.workTree, listing);
+			if (ignored.length > 0) {
+				await this.execGit(
+					["--literal-pathspecs", "add", "-f", "--ignore-errors", "--pathspec-from-file=-", "--pathspec-file-nul"],
+					{
+						cwd: this.options.workTree,
+						input: Buffer.from(ignored.join("\0"), "utf8"),
+						label: "add-ignored",
+						acceptFailure: acceptIndexFailure,
+					},
+				);
+			}
 			const tree = await this.execGit(["write-tree"], { label: "write-tree" });
 			return tree.toString("utf8").trim();
 		});
