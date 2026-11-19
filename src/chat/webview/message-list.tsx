@@ -8,6 +8,8 @@ import type { ChatStore } from "./store";
 const ESTIMATED_HEIGHT = 80;
 const OVERSCAN = 800;
 const STICK_THRESHOLD = 40;
+// Each scroll correction can change the rendered range; past this, wait a frame so the ResizeObserver measures first.
+const MAX_SYNC_SCROLL_PASSES = 4;
 const SCROLL_UP_KEYS = new Set(["ArrowUp", "PageUp", "Home"]);
 
 interface MessageListProps {
@@ -40,6 +42,8 @@ export function MessageList({ store, running, context }: MessageListProps) {
 	const lastTopRef = useRef(0);
 	const shiftRef = useRef(0);
 	const frameRef = useRef(0);
+	const passesRef = useRef(0);
+	const passesFrameRef = useRef(0);
 	const [viewportHeight, setViewportHeight] = useState(0);
 	const [scrollTop, setScrollTop] = useState(0);
 	const [, setRevision] = useState(0);
@@ -67,7 +71,23 @@ export function MessageList({ store, running, context }: MessageListProps) {
 		if (frameRef.current) {
 			cancelAnimationFrame(frameRef.current);
 		}
+		if (passesFrameRef.current) {
+			cancelAnimationFrame(passesFrameRef.current);
+		}
 	}, []);
+
+	const requestScrollSync = () => {
+		if (frameRef.current) {
+			return;
+		}
+		frameRef.current = requestAnimationFrame(() => {
+			frameRef.current = 0;
+			const node = scrollerRef.current;
+			if (node) {
+				setScrollTop(node.scrollTop);
+			}
+		});
+	};
 
 	useEffect(() => {
 		const scroller = scrollerRef.current;
@@ -86,7 +106,8 @@ export function MessageList({ store, running, context }: MessageListProps) {
 						continue;
 					}
 					const messageId = target.dataset.messageId;
-					if (!messageId) {
+					// A message that left the rendered range reports a last size of 0; its measured height still holds.
+					if (!messageId || !target.isConnected) {
 						continue;
 					}
 					const index = store.indexOf(messageId);
@@ -148,8 +169,23 @@ export function MessageList({ store, running, context }: MessageListProps) {
 			scroller.scrollTop += shiftRef.current;
 			shiftRef.current = 0;
 		}
-		lastTopRef.current = scroller.scrollTop;
-		setScrollTop(current => current === scroller.scrollTop ? current : scroller.scrollTop);
+		const top = scroller.scrollTop;
+		lastTopRef.current = top;
+		if (top === scrollTop) {
+			return;
+		}
+		if (passesRef.current >= MAX_SYNC_SCROLL_PASSES) {
+			requestScrollSync();
+			return;
+		}
+		passesRef.current += 1;
+		if (!passesFrameRef.current) {
+			passesFrameRef.current = requestAnimationFrame(() => {
+				passesFrameRef.current = 0;
+				passesRef.current = 0;
+			});
+		}
+		setScrollTop(top);
 	});
 
 	const unstick = () => {
@@ -191,16 +227,7 @@ export function MessageList({ store, running, context }: MessageListProps) {
 			stickRef.current = true;
 		}
 		lastTopRef.current = top;
-		if (frameRef.current) {
-			return;
-		}
-		frameRef.current = requestAnimationFrame(() => {
-			frameRef.current = 0;
-			const node = scrollerRef.current;
-			if (node) {
-				setScrollTop(node.scrollTop);
-			}
-		});
+		requestScrollSync();
 	};
 
 	const viewport = viewportHeight || scrollerRef.current?.clientHeight || 600;

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.21.21 (development patch) - 2026-11-19
+
+- Fixed: the bridge chat could hang when it opened a chat with a very long
+  answer (many tool calls or a subagent). The view kept correcting its scroll
+  position before it could measure the messages, and the window used one CPU
+  core and several gigabytes of memory until VS Code was reloaded.
+- Fixed: messages could disappear from a chat after scrolling them out of view
+  and back. A message leaving the view reported a height of 0, which hid it for
+  good.
+- Fixed: model, thinking, tools and limit popups open downwards when there is
+  no room above, for example while editing the first message.
+
 ## 1.21.20 (development patch) - 2026-11-19
 
 - Added: a live prompt-cache indicator in the bridge chat composer. It shows

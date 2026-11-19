@@ -32,15 +32,15 @@ export class VirtualLayout {
 		this.validTo = target;
 	}
 
+	/** A zero height is ignored: an item of height 0 could never come back into the visible range. */
 	setHeight(index: number, height: number): boolean {
-		if (!Number.isInteger(index) || index < 0 || index >= this.count) {
+		if (!Number.isInteger(index) || index < 0 || index >= this.count || !Number.isFinite(height) || height <= 0) {
 			return false;
 		}
-		const next = Number.isFinite(height) && height > 0 ? height : 0;
-		if (this.heights[index] === next) {
+		if (this.heights[index] === height) {
 			return false;
 		}
-		this.heights[index] = next;
+		this.heights[index] = height;
 		this.validTo = Math.min(this.validTo, index);
 		return true;
 	}

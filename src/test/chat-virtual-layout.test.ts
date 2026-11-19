@@ -88,6 +88,18 @@ suite("Chat virtual layout", () => {
 		assert.strictEqual(layout.totalHeight, 0);
 	});
 
+	test("ignores zero and invalid heights so the item stays reachable", () => {
+		const layout = new VirtualLayout(100);
+		layout.setCount(4);
+		assert.strictEqual(layout.setHeight(0, 300), true);
+		assert.strictEqual(layout.setHeight(0, 0), false);
+		assert.strictEqual(layout.setHeight(1, -5), false);
+		assert.strictEqual(layout.setHeight(2, Number.NaN), false);
+		assert.strictEqual(layout.setHeight(3, Number.POSITIVE_INFINITY), false);
+		assert.deepStrictEqual([0, 1, 2, 3, 4].map(index => layout.offsetOf(index)), [0, 300, 400, 500, 600]);
+		assert.deepStrictEqual(layout.range(0, 100, 0), { start: 0, end: 1 });
+	});
+
 	test("empty list reports zero size and an empty range", () => {
 		const layout = new VirtualLayout(80);
 		assert.strictEqual(layout.totalHeight, 0);

@@ -133,6 +133,10 @@ body {
 .message-canvas {
 	position: relative;
 	width: 100%;
+	/* Full height keeps popups of a short chat inside the clip. */
+	min-height: 100%;
+	/* An unmeasured message taller than its estimate must not stretch the scroll height. */
+	overflow-y: clip;
 }
 
 .chat-message {
@@ -1424,6 +1428,13 @@ body {
 	border-radius: 4px;
 	background: var(--vscode-quickInput-background, var(--vscode-editor-background));
 	box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+
+.picker-popup-below {
+	top: 100%;
+	bottom: auto;
+	margin-top: 4px;
+	margin-bottom: 0;
 }
 
 .picker-search {
