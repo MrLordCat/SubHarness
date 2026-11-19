@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.21.20 (development patch) - 2026-11-19
+
+- Added: a live prompt-cache indicator in the bridge chat composer. It shows
+  the cache hit share of the selected model over its turns since it took
+  over the chat, starts again after a model switch, and updates after every
+  request; the tooltip lists cached and prompt tokens, the request count and
+  the last request's hit rate.
+- Changed: the bridge chat composer is one rounded box like Copilot Chat:
+  attachment chips, the input and a flat toolbar with the model, thinking
+  level, tools and quota, plus a round send button. The changed-files bar
+  sits on top of the box.
+
+## 1.21.19 (development patch) - 2026-11-19
+
+- Changed: long bridge chats open much faster. Tool output reaches the chat
+  window as a 600-character preview and long thinking as its last 1,000
+  characters; both load in full when you expand them. A chat with 2,000
+  messages and 3,000 large tool results now opens with about 2.4 MB instead
+  of 14 MB.
+- Added: recovery after VS Code closes or reloads while an answer runs. The
+  chat reopens with a note that the answer was interrupted and a Retry
+  button, and the changes panel says when files changed by such a turn could
+  not be listed for Keep/Undo. Failed answers also get Retry, which sends the
+  same message again with its attachments.
+- Docs: [bridge chat guide](docs/CHAT.md).
+
 ## 1.21.18 (development patch) - 2026-11-19
 
 - Changed: click a sent message in the bridge chat to edit it. The editor in

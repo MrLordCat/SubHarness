@@ -37,11 +37,17 @@ interface SessionChanges {
 	turns: TurnRecord[];
 	pending: FileChange[];
 	notice?: string;
+	/** Turn whose write window is open; a crash leaves it set. */
+	open?: number;
 }
 
 export interface ChatChangeTrackerLike {
 	beginTurn(): Promise<TurnSnapshot | undefined>;
 	endTurn(sessionId: string, turn: number, begin: TurnSnapshot, claimed?: readonly string[]): Promise<void>;
+	/** Records that the turn may write before its changes are known. */
+	markOpen?(sessionId: string, turn: number): Promise<void>;
+	/** Turns a turn left open by a crash into a notice. */
+	recoverInterrupted?(sessionId: string): Promise<void>;
 	changeSet(sessionId: string): Promise<ChatChangeSet>;
 	keep(sessionId: string, ids?: readonly string[]): Promise<void>;
 	undo(sessionId: string, ids?: readonly string[]): Promise<void>;
@@ -111,7 +117,7 @@ function parseSessionChanges(raw: string): SessionChanges | undefined {
 			turns.push({ turn: turn.turn, files: (turn.files as unknown[]).filter(isFileChange) });
 		}
 	}
-	return { turns, pending: (record.pending as unknown[]).filter(isFileChange) };
+	return { turns, pending: (record.pending as unknown[]).filter(isFileChange), ...(typeof record.open === "number" ? { open: record.open } : {}) };
 }
 
 /**
@@ -203,7 +209,10 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 			if (notice) {
 				await this._update(sessionId, data => {
 					data.notice = notice;
+					data.open = undefined;
 				});
+			} else {
+				await this._clearOpen(sessionId);
 			}
 			return;
 		}
@@ -222,6 +231,24 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 			}
 			data.pending = data.pending.filter(file => file.before !== file.after);
 			data.notice = notice;
+			data.open = undefined;
+		});
+	}
+
+	async markOpen(sessionId: string, turn: number): Promise<void> {
+		await this._update(sessionId, data => {
+			data.open = turn;
+		});
+	}
+
+	async recoverInterrupted(sessionId: string): Promise<void> {
+		const data = await this._enqueue(() => this._load(sessionId));
+		if (data.open === undefined) {
+			return;
+		}
+		await this._update(sessionId, current => {
+			current.open = undefined;
+			current.notice = "A turn was interrupted before its file changes were recorded; files it changed are not listed here.";
 		});
 	}
 
@@ -443,6 +470,16 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 		});
 	}
 
+	private async _clearOpen(sessionId: string): Promise<void> {
+		const data = await this._enqueue(() => this._load(sessionId));
+		if (data.open === undefined) {
+			return;
+		}
+		await this._update(sessionId, current => {
+			current.open = undefined;
+		});
+	}
+
 	private _enqueue<T>(operation: () => Promise<T>): Promise<T> {
 		const result = this._queue.then(operation, operation);
 		this._queue = result.catch(() => undefined);
@@ -484,7 +521,7 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 		const file = this._file(sessionId);
 		await fs.mkdir(path.dirname(file), { recursive: true });
 		const temporary = `${file}.tmp`;
-		await fs.writeFile(temporary, JSON.stringify({ version: FILE_VERSION, turns: data.turns, pending: data.pending }), "utf8");
+		await fs.writeFile(temporary, JSON.stringify({ version: FILE_VERSION, turns: data.turns, pending: data.pending, open: data.open }), "utf8");
 		await fs.rename(temporary, file);
 	}
 }

@@ -107,7 +107,7 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<stri
 			}
 			publish();
 		},
-		usage: usage => {
+		usage: (usage, _totals) => {
 			run.usage = usage;
 		},
 	};

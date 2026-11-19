@@ -10,7 +10,7 @@ import type { ChatCompactionPlan } from "../chat/compaction";
 import { compactionSummaryText } from "../chat/lm-messages";
 import { ChatSessionStore } from "../chat/session-store";
 import { groupModels } from "../chat/shared/model-groups";
-import { applyHostUpdate, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatAttachment, type ChatChangeSet, type ChatMessage, type ChatProviderQuota, type ChatToolGroup, type HostMessage } from "../chat/shared/protocol";
+import { applyHostUpdate, WEBVIEW_THINKING_PREVIEW_CHARS, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatAttachment, type ChatChangeSet, type ChatMessage, type ChatProviderQuota, type ChatToolGroup, type HostMessage } from "../chat/shared/protocol";
 import { createChatToolSource, DENIED_TOOL_RESULT, type ChatToolSource } from "../chat/tool-executor";
 import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
 import type { ChatTool } from "../chat/tools/types";
@@ -53,6 +53,7 @@ const NEVER_FIRES: vscode.Event<void> = () => new vscode.Disposable(() => undefi
 const ACTIVE_SESSION_KEY = "llamacpp.chat.activeSession";
 const LAST_MODEL_KEY = "llamacpp.chat.lastModel";
 const THINKING_KEY = "llamacpp.chat.thinking";
+const INTERRUPTED_TEXT = "This answer was interrupted: VS Code closed or reloaded while it was running.";
 
 type Round = (progress: vscode.Progress<vscode.LanguageModelResponsePart>, token: vscode.CancellationToken) => void | Promise<void>;
 
@@ -316,6 +317,16 @@ class FakeForgettingTracker extends FakeTracker {
 	}
 }
 
+class FakeRecoveringTracker extends FakeTracker {
+	readonly recovered: string[] = [];
+	async markOpen(_sessionId: string, turn: number): Promise<void> {
+		this.calls.push(`markOpen:${turn}`);
+	}
+	async recoverInterrupted(sessionId: string): Promise<void> {
+		this.recovered.push(sessionId);
+	}
+}
+
 /** A writer and a read-only reader that log their runs into the shared call list. */
 function loggingTools(calls: string[]): ChatToolSource {
 	return {
@@ -477,6 +488,8 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(current.webview.ofType("usage").map(message => message.usage), [
 			{ promptTokens: 10, completionTokens: 5, totalTokens: 15 },
 		]);
+		const totals = { requests: 1, promptTokens: 10, cachedTokens: 0, completionTokens: 5, cacheReported: 0 };
+		assert.deepStrictEqual(current.webview.ofType("usage").map(message => message.totals), [totals]);
 		assert.deepStrictEqual(current.webview.ofType("run").map(message => message.run.running), [true, false]);
 
 		await current.store.flush();
@@ -485,6 +498,8 @@ suite("chat controller", () => {
 			throw new Error("no active session");
 		}
 		const persisted = await new ChatSessionStore(root).load(sessionId);
+		const persistedAssistant = persisted.find(message => message.role === "assistant");
+		assert.deepStrictEqual(persistedAssistant?.usageTotals, totals);
 		const replayed: ChatMessage[] = [];
 		for (const message of current.webview.messages) {
 			applyHostUpdate(replayed, message);
@@ -518,7 +533,7 @@ suite("chat controller", () => {
 		assert.strictEqual(current.webview.ofType("run").at(-1)?.run.running, false);
 	});
 
-	test("trims a long tool result for the webview and loads the full text on request", async () => {
+	test("init sends short tool result previews and loads the full text on request", async () => {
 		const full = "x".repeat(WEBVIEW_TOOL_RESULT_PREVIEW_CHARS + 500);
 		const backend = new FakeBackend([
 			progress => progress.report(new vscode.LanguageModelToolCallPart("call-big", "llamacpp_read", {})),
@@ -536,6 +551,16 @@ suite("chat controller", () => {
 		assert.strictEqual(broadcast.part.preview, true);
 		assert.strictEqual(broadcast.part.text.length, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS);
 		assert.ok(full.startsWith(broadcast.part.text));
+
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const initResult = current.webview.ofType("init")[0].messages.flatMap(message => message.parts).find(part => part.kind === "toolResult");
+		if (initResult?.kind !== "toolResult") {
+			throw new Error("expected a tool result in init");
+		}
+		assert.strictEqual(initResult.preview, true);
+		assert.strictEqual(initResult.text.length, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS);
+		assert.ok(full.startsWith(initResult.text));
 
 		current.webview.receive({ type: "loadToolResult", messageId: broadcast.messageId, callId: "call-big" });
 		await waitFor(() => current.webview.ofType("toolResultFull").length === 1, "full tool result");
@@ -556,6 +581,122 @@ suite("chat controller", () => {
 		}
 		assert.strictEqual(persistedResult.text, full);
 		assert.strictEqual(persistedResult.preview, undefined);
+	});
+
+	test("init trims long thinking to its tail and loads the full text on request", async () => {
+		const current = createHarness(root, new FakeBackend());
+		harness = current;
+		const meta = await current.store.create("codex::fast");
+		const thinking = `Start of the reasoning. ${"checked one more message height. ".repeat(80)}Final tail line.`;
+		assert.ok(thinking.length > WEBVIEW_THINKING_PREVIEW_CHARS);
+		await current.store.appendMessage(meta.id, {
+			id: "thinking-message",
+			role: "assistant",
+			turn: 1,
+			createdAt: 1,
+			modelId: "codex::fast",
+			parts: [{ kind: "thinking", text: thinking }, { kind: "text", text: "Done." }],
+		});
+		await current.store.flush();
+		await current.state.update(ACTIVE_SESSION_KEY, meta.id);
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+
+		const part = current.webview.ofType("init")[0].messages[0].parts[0];
+		if (part.kind !== "thinking") {
+			throw new Error("expected a thinking part");
+		}
+		assert.strictEqual(part.preview, true);
+		assert.strictEqual(part.text.length, WEBVIEW_THINKING_PREVIEW_CHARS);
+		assert.strictEqual(part.text, thinking.slice(-WEBVIEW_THINKING_PREVIEW_CHARS));
+		assert.ok(part.text.endsWith("Final tail line."));
+
+		current.webview.receive({ type: "loadPartText", messageId: "thinking-message", index: 0 });
+		await waitFor(() => current.webview.ofType("partTextFull").length === 1, "full thinking");
+		const loaded = current.webview.ofType("partTextFull")[0];
+		assert.strictEqual(loaded.messageId, "thinking-message");
+		assert.strictEqual(loaded.index, 0);
+		assert.strictEqual(loaded.text, thinking);
+	});
+
+	test("the running turn's thinking is not trimmed when switching back to it", async () => {
+		const ThinkingPart = (vscode as unknown as Record<string, unknown>)["LanguageModelThinkingPart"] as
+			(new (value: string) => vscode.LanguageModelResponsePart) | undefined;
+		if (!ThinkingPart) {
+			return;
+		}
+		const gate = deferred();
+		const thinking = `${"checked one more message height. ".repeat(120)}last thought`;
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new ThinkingPart(thinking));
+				await gate.promise;
+				progress.report(new vscode.LanguageModelTextPart("Done."));
+			},
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		current.webview.receive({ type: "send", text: "Think it through" });
+		await waitFor(() => current.webview.ofType("textDelta").some(message => message.kind === "thinking"), "thinking delta");
+		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(first);
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		current.webview.receive({ type: "openSession", sessionId: first });
+		await waitFor(() => current.webview.ofType("init").length === 3, "third init");
+
+		const assistant = current.webview.ofType("init")[2].messages.find(message => message.role === "assistant");
+		assert.ok(assistant);
+		const part = assistant.parts.find(candidate => candidate.kind === "thinking");
+		if (part?.kind !== "thinking") {
+			throw new Error("expected a thinking part");
+		}
+		assert.strictEqual(part.text, thinking);
+		assert.strictEqual(part.preview, undefined);
+
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+	});
+
+	test("a long chat's init stays small", async function () {
+		this.timeout(60_000);
+		const current = createHarness(root, new FakeBackend());
+		harness = current;
+		const meta = await current.store.create("codex::fast");
+		const full = "x".repeat(20_000);
+		for (let turn = 1; turn <= 1_000; turn += 1) {
+			await current.store.appendMessage(meta.id, {
+				id: `u${turn}`,
+				role: "user",
+				turn,
+				createdAt: turn,
+				parts: [{ kind: "text", text: `Question ${turn}` }],
+			});
+			await current.store.appendMessage(meta.id, {
+				id: `a${turn}`,
+				role: "assistant",
+				turn,
+				createdAt: turn,
+				modelId: "codex::fast",
+				parts: [1, 2, 3].flatMap(index => [
+					{ kind: "toolCall" as const, callId: `c${turn}-${index}`, name: "read_file", input: { filePath: `src/file-${turn}-${index}.ts` } },
+					{ kind: "toolResult" as const, callId: `c${turn}-${index}`, text: full },
+				]),
+			});
+		}
+		await current.store.flush();
+		await current.state.update(ACTIVE_SESSION_KEY, meta.id);
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+
+		const init = current.webview.ofType("init")[0];
+		const size = JSON.stringify(init).length;
+		assert.ok(size < 3 * 1024 * 1024, `init was ${size} chars`);
+		const results = init.messages.flatMap(message => message.parts).filter((part): part is Extract<ChatMessage["parts"][number], { kind: "toolResult" }> => part.kind === "toolResult");
+		assert.strictEqual(results.length, 3_000);
+		assert.ok(results.every(part => part.preview === true && part.text.length === WEBVIEW_TOOL_RESULT_PREVIEW_CHARS));
 	});
 
 	test("persists a selected model on the session and the workspace state", async () => {
@@ -1225,6 +1366,10 @@ suite("chat controller", () => {
 			{ type: "send", text: "   " },
 			{ type: "selectModel" },
 			{ type: "loadToolResult", messageId: "m1" },
+			{ type: "loadPartText", messageId: "m1" },
+			{ type: "loadPartText", messageId: "m1", index: -1 },
+			{ type: "loadPartText", messageId: "m1", index: 1.5 },
+			{ type: "loadPartText", messageId: 7, index: 0 },
 		];
 		for (const message of malformed) {
 			current.webview.receive(message);
@@ -1820,5 +1965,176 @@ suite("chat controller", () => {
 		const added = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
 		assert.strictEqual(added?.attachments, undefined);
 		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+	});
+
+	test("a finished turn writes an end marker", async () => {
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("Done."))]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Question" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+
+		await current.store.flush();
+		const loaded = await new ChatSessionStore(root).loadSession(sessionId);
+		assert.deepStrictEqual(loaded.messages.map(message => message.role), ["user", "assistant"]);
+		assert.strictEqual(loaded.interruptedMessageId, undefined);
+	});
+
+	test("reopening an interrupted answer warns once and retryable", async () => {
+		const store = new ChatSessionStore(root);
+		const meta = await store.create("codex::fast");
+		await store.appendMessage(meta.id, { id: "u1", role: "user", turn: 1, createdAt: 1, parts: [{ kind: "text", text: "One" }] });
+		await store.appendMessage(meta.id, { id: "a1", role: "assistant", turn: 1, createdAt: 1, modelId: "codex::fast", parts: [{ kind: "text", text: "First" }] });
+		await store.endMessage(meta.id, "a1");
+		await store.appendMessage(meta.id, { id: "u2", role: "user", turn: 2, createdAt: 2, parts: [{ kind: "text", text: "Two" }] });
+		await store.appendMessage(meta.id, { id: "a2", role: "assistant", turn: 2, createdAt: 2, modelId: "codex::fast", parts: [{ kind: "text", text: "Second" }] });
+
+		const countWarnings = (init: HostMessage & { type: "init" }): number =>
+			init.messages.flatMap(message => message.parts).filter(part => part.kind === "notice" && part.text === INTERRUPTED_TEXT).length;
+
+		const first = createHarness(root, new FakeBackend());
+		harness = first;
+		await first.state.update(ACTIVE_SESSION_KEY, meta.id);
+		first.webview.receive({ type: "ready" });
+		await waitFor(() => first.webview.ofType("init").length === 1, "first init");
+		const opened = first.webview.ofType("init")[0];
+		const last = opened.messages.at(-1);
+		assert.strictEqual(last?.id, "a2");
+		assert.deepStrictEqual(last?.parts.at(-1), { kind: "notice", level: "warning", text: INTERRUPTED_TEXT, retryable: true });
+		assert.strictEqual(countWarnings(opened), 1);
+		first.controller.dispose();
+		first.webview.dispose();
+
+		const second = createHarness(root, new FakeBackend());
+		harness = second;
+		await second.state.update(ACTIVE_SESSION_KEY, meta.id);
+		second.webview.receive({ type: "ready" });
+		await waitFor(() => second.webview.ofType("init").length === 1, "second init");
+		assert.strictEqual(countWarnings(second.webview.ofType("init")[0]), 1);
+	});
+
+	test("a failed turn is retryable and a stopped turn is not", async () => {
+		const backend = new FakeBackend([
+			() => {
+				throw new Error("provider failed");
+			},
+			async (progress, token) => {
+				progress.report(new vscode.LanguageModelTextPart("Working"));
+				await new Promise<void>(resolve => token.onCancellationRequested(() => resolve()));
+				throw new vscode.CancellationError();
+			},
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "fails" });
+		await waitFor(() => finished() === 1, "failed turn");
+		const failed = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "notice");
+		assert.deepStrictEqual(failed, { kind: "notice", level: "error", text: "provider failed", retryable: true });
+
+		current.webview.receive({ type: "send", text: "stops" });
+		await waitFor(() => current.webview.ofType("run").at(-1)?.run.running === true, "second run");
+		current.webview.receive({ type: "stop" });
+		await waitFor(() => finished() === 2, "stopped turn");
+		const notices = current.webview.ofType("partAdded").map(message => message.part).filter(part => part.kind === "notice");
+		assert.deepStrictEqual(notices.at(-1), { kind: "notice", level: "info", text: "Stopped." });
+	});
+
+	test("retryTurn re-sends the user text with the attachment context it already rendered", async () => {
+		const backend = new FakeBackend([
+			() => {
+				throw new Error("provider failed");
+			},
+			progress => progress.report(new vscode.LanguageModelTextPart("Recovered.")),
+		]);
+		const fake = new FakeAttachments();
+		fake.contents = [{ attachment: ATTACHMENT, text: "const a = 1;" }];
+		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "Explain", attachments: [ATTACHMENT] });
+		await waitFor(() => finished() === 1, "failed turn");
+		const assistant = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "assistant");
+		assert.ok(assistant);
+
+		current.webview.receive({ type: "retryTurn", messageId: assistant.id });
+		await waitFor(() => finished() === 2 && backend.requests.length === 2, "retried turn");
+		const block = renderAttachments([{ attachment: ATTACHMENT, text: "const a = 1;" }]);
+		const expected = `${block}\n<userRequest>\nExplain\n</userRequest>`;
+		assert.strictEqual(messageText(backend.requests[0].messages.at(-1)!), expected);
+		assert.strictEqual(messageText(backend.requests[1].messages.at(-1)!), expected);
+		assert.strictEqual(fake.reads.length, 1, "the retry reuses the rendered block");
+		const resent = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user").at(-1);
+		assert.deepStrictEqual(resent?.attachments, [STORED_ATTACHMENT]);
+
+		await current.store.flush();
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		const loaded = await new ChatSessionStore(root).loadSession(sessionId);
+		assert.deepStrictEqual(loaded.messages.map(message => message.role), ["user", "assistant"]);
+		assert.deepStrictEqual(loaded.messages[0].parts, [{ kind: "text", text: "Explain" }]);
+		assert.deepStrictEqual(loaded.messages[1].parts, [{ kind: "text", text: "Recovered." }]);
+		assert.strictEqual(loaded.interruptedMessageId, undefined);
+	});
+
+	test("ignores retryTurn while the chat is running", async () => {
+		const gate = deferred();
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new vscode.LanguageModelTextPart("Working"));
+				await gate.promise;
+				progress.report(new vscode.LanguageModelTextPart("Done."));
+			},
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Question" });
+		await waitFor(() => current.webview.ofType("textDelta").length > 0, "first delta");
+		const assistant = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "assistant");
+		assert.ok(assistant);
+
+		current.webview.receive({ type: "retryTurn", messageId: assistant.id });
+		await new Promise<void>(resolve => setTimeout(resolve, 50));
+		assert.strictEqual(backend.requests.length, 1);
+		assert.deepStrictEqual(current.webview.ofType("truncated"), []);
+
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.strictEqual(backend.requests.length, 1);
+		assert.deepStrictEqual(current.webview.ofType("truncated"), []);
+		assert.strictEqual(current.webview.ofType("messageAdded").length, 2);
+	});
+
+	test("a writing turn marks its changes open and loading a chat recovers the mark", async () => {
+		const calls: string[] = [];
+		const tracker = new FakeRecoveringTracker(calls);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-w", "writer", {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("done")),
+		]);
+		const current = createHarness(root, backend, loggingTools(calls), tracker);
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const first = current.webview.ofType("init")[0].session.id;
+		assert.deepStrictEqual(tracker.recovered, [first]);
+
+		current.webview.receive({ type: "send", text: "edit a file" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		const opened = calls.indexOf("markOpen:1");
+		assert.ok(opened >= 0, "the writing turn must mark its change window open");
+		assert.ok(opened < calls.indexOf("end:1:tree-before"), "the mark comes before the turn ends");
+
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		const second = current.webview.ofType("init")[1].session.id;
+		assert.notStrictEqual(second, first);
+		assert.deepStrictEqual(tracker.recovered, [first, second]);
+
+		current.webview.receive({ type: "openSession", sessionId: first });
+		await waitFor(() => current.webview.ofType("init").length === 3, "third init");
+		assert.deepStrictEqual(tracker.recovered, [first, second, first]);
 	});
 });

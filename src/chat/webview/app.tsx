@@ -6,7 +6,7 @@ import { ChangesPanel } from "./changes-panel";
 import { ChatHistory } from "./chat-history";
 import { Composer } from "./composer";
 import { useComposerActions } from "./composer-actions";
-import { contextIndicator } from "./format";
+import { contextIndicator, formatCacheHit, modelCacheStats } from "./format";
 import { MessageList } from "./message-list";
 import type { ChatStore } from "./store";
 
@@ -32,10 +32,6 @@ export function App({ store }: { store: ChatStore }) {
 		onRemoveAttachment,
 	} = useComposerActions(store);
 	const onApprove = useCallback((id: string, allow: boolean) => postMessage({ type: "approve", id, allow }), []);
-	const onLoadToolResult = useCallback(
-		(messageId: string, callId: string) => postMessage({ type: "loadToolResult", messageId, callId }),
-		[],
-	);
 	const onListSessions = useCallback(() => postMessage({ type: "listSessions" }), []);
 	const onOpenSession = useCallback((sessionId: string) => postMessage({ type: "openSession", sessionId }), []);
 	const onDeleteSession = useCallback((sessionId: string) => postMessage({ type: "deleteSession", sessionId }), []);
@@ -44,6 +40,8 @@ export function App({ store }: { store: ChatStore }) {
 
 	const title = store.session?.title ?? "Chat";
 	const context = contextIndicator(store.latestUsage, store.models, store.selectedModelId);
+	const cacheStats = modelCacheStats(store.messages, store.selectedModelId);
+	const cache = cacheStats ? formatCacheHit(cacheStats) : undefined;
 
 	return (
 		<div class="chat-root">
@@ -69,7 +67,6 @@ export function App({ store }: { store: ChatStore }) {
 					store={store}
 					running={store.run.running}
 					context={context}
-					onLoadToolResult={onLoadToolResult}
 				/>
 			)}
 			{store.run.running && store.run.detail ? <div class="run-status" role="status">{store.run.detail}</div> : null}
@@ -89,6 +86,7 @@ export function App({ store }: { store: ChatStore }) {
 				tools={store.tools}
 				selectedModelId={store.selectedModelId}
 				selectedThinking={store.selectedThinking}
+				cache={cache}
 				quota={store.quota}
 				context={context}
 				attachments={store.pendingAttachments}

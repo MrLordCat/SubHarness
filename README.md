@@ -160,7 +160,7 @@ See [Coco continuity and cache verification](docs/COCO_CONTINUITY.md).
 
 ## Useful features
 
-- **Chat (preview):** the bridge's own chat view and editor tab with its own tools, subagents on cheaper models, context compaction when you switch models, and Keep/Undo for changed files, independent of Copilot Chat.
+- **Chat (preview):** the bridge's own chat view and editor tab, independent of Copilot Chat: its own tools with approvals for dangerous commands, attachments, editing sent messages, chat history with chats that keep running in the background, subagents on cheaper models, context compaction when you switch models, and Keep/Undo for changed files. See [the chat guide](docs/CHAT.md).
 - **Session Quality / Live Report:** inspect usage, cache, context and slow steps.
 - **Continue Latest Codex/Claude Session in New Chat:** resume work with a clean Chat transcript.
 - **Shared Memory:** save and retrieve project information across conversations.
@@ -181,7 +181,7 @@ See [Coco continuity and cache verification](docs/COCO_CONTINUITY.md).
 - Providers: [APIs](docs/API_PROVIDERS.md), [Codex](docs/CODEX_SUBSCRIPTION.md),
   [Claude](docs/CLAUDE_SUBSCRIPTION.md), [Coco](docs/COCO.md).
 - Chat integration: [patches](docs/COPILOT_PATCH.md),
-  [Agents Window](docs/AGENTS_WINDOW_INTEGRATION.md).
+  [Agents Window](docs/AGENTS_WINDOW_INTEGRATION.md), [bridge chat](docs/CHAT.md).
 - Long conversations: [tokens, reasoning and cache](docs/TOKENS_REASONING_CACHE.md),
   [memory](docs/MEMORY.md), [diagnostics](docs/RELIABILITY_DIAGNOSTICS.md).
 - Development: [architecture](docs/ARCHITECTURE.md), [agent tools](docs/AGENT_TOOLS_GUIDE.md),
@@ -194,16 +194,16 @@ See [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md),
 [provider architecture](docs/PROVIDER_ARCHITECTURE.md), and
 [Quick Access](docs/QUICK_ACCESS.md) for the current maintenance contracts.
 
-**Stable release: 1.21.0. Current build: 1.21.18.**
+**Stable release: 1.21.0. Current build: 1.21.20.**
 
 ```sh
 npm ci
 npm run compile
 npm run check:metadata
 npm run lint
-npm test              # 1199 extension-host tests on VS Code 1.143.1 in the current 1.21.18 build
+npm test              # 1225 extension-host tests on VS Code 1.143.1 in the current 1.21.20 build
 npm run package       # builds the local VSIX
-code --install-extension ./llama-vscode-chat-1.21.18.vsix --force
+code --install-extension ./llama-vscode-chat-1.21.20.vsix --force
 ```
 
 The extension ID is `mrlordcat.llama-vscode-chat`; settings and commands retain

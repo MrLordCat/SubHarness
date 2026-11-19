@@ -2,7 +2,7 @@ import type { ComponentChildren, TargetedDragEvent } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { attachmentLabel, attachmentTitle } from "../shared/attachment-label";
 import type { ChatAttachment, ChatModelGroup, ChatProviderQuota, ChatRunState, ChatToolGroup } from "../shared/protocol";
-import { parseUriList } from "./format";
+import { parseUriList, type CacheHitLabel } from "./format";
 import { ModelPicker } from "./model-picker";
 import { QuotaIndicator } from "./quota-indicator";
 import { ThinkingPicker } from "./thinking-picker";
@@ -16,6 +16,7 @@ interface ComposerProps {
 	selectedThinking: string | undefined;
 	quota: ChatProviderQuota[];
 	context: string | undefined;
+	cache?: CacheHitLabel;
 	attachments: ChatAttachment[];
 	/** Text the textarea starts with; later changes come from typing. */
 	initialText?: string;
@@ -55,6 +56,7 @@ export function Composer({
 	selectedModelId,
 	selectedThinking,
 	quota,
+	cache,
 	context,
 	attachments,
 	initialText,
@@ -175,71 +177,84 @@ export function Composer({
 			onDragLeave={onDragLeave}
 			onDrop={onDrop}
 		>
-			{attachments.length > 0 ? (
-				<div class="attachment-chips">
-					{attachments.map(attachment => (
-						<span class="attachment-chip" key={attachment.id}>
-							<button
-								type="button"
-								class="attachment-chip-open"
-								title={attachmentTitle(attachment)}
-								onClick={() => onOpenAttachment(attachment)}
-							>
-								{attachment.kind === "selection" ? "✂" : "📄"}
-								<span class="attachment-chip-label">{attachmentLabel(attachment)}</span>
+			<div class="composer-box">
+				{attachments.length > 0 ? (
+					<div class="attachment-chips">
+						{attachments.map(attachment => (
+							<span class="attachment-chip" key={attachment.id}>
+								<button
+									type="button"
+									class="attachment-chip-open"
+									title={attachmentTitle(attachment)}
+									onClick={() => onOpenAttachment(attachment)}
+								>
+									{attachment.kind === "selection" ? "✂" : "📄"}
+									<span class="attachment-chip-label">{attachmentLabel(attachment)}</span>
+								</button>
+								<button
+									type="button"
+									class="attachment-chip-remove"
+									aria-label={`Remove ${attachmentLabel(attachment)}`}
+									title="Remove"
+									onClick={() => onRemoveAttachment(attachment.id)}
+								>
+									×
+								</button>
+							</span>
+						))}
+					</div>
+				) : null}
+				<textarea
+					ref={textareaRef}
+					class="composer-input"
+					rows={1}
+					placeholder={placeholder ?? "Ask anything…"}
+					value={text}
+					onInput={event => setText(event.currentTarget.value)}
+					onKeyDown={onKeyDown}
+				/>
+				<div class="composer-row">
+					<div class="composer-tools">
+						<button
+							type="button"
+							class="attach-button"
+							aria-label="Add context"
+							title="Attach files or the editor selection; Shift+drag files here to attach them"
+							onClick={onPickAttachments}
+						>
+							<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+								<path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+							</svg>
+						</button>
+						<ModelPicker models={models} selectedModelId={selectedModelId} onSelectModel={onSelectModel} />
+						{selectedModel?.thinking
+							? <ThinkingPicker thinking={selectedModel.thinking} selected={selectedThinking} onSelect={onSelectThinking} />
+							: null}
+						<ToolPicker tools={tools} onSetToolsEnabled={onSetToolsEnabled} />
+						<QuotaIndicator quota={quota} provider={selectedGroup?.provider} onRefresh={onRefreshQuota} />
+					</div>
+					<div class="composer-actions">
+						{cache ? <span class={`cache-indicator cache-${cache.level}`} title={cache.title}>{cache.text}</span> : null}
+						{context ? <span class="context-indicator" title="Prompt tokens / context window">{context}</span> : null}
+						{run.running && !onCancel ? (
+							<button type="button" class="send-button send-button-stop" aria-label="Stop" title="Stop" onClick={onStop}>
+								<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+									<rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor" />
+								</svg>
 							</button>
-							<button
-								type="button"
-								class="attachment-chip-remove"
-								aria-label={`Remove ${attachmentLabel(attachment)}`}
-								title="Remove"
-								onClick={() => onRemoveAttachment(attachment.id)}
-							>
-								×
-							</button>
-						</span>
-					))}
-				</div>
-			) : null}
-			<textarea
-				ref={textareaRef}
-				class="composer-input"
-				rows={1}
-				placeholder={placeholder ?? "Ask anything…"}
-				value={text}
-				onInput={event => setText(event.currentTarget.value)}
-				onKeyDown={onKeyDown}
-			/>
-			<div class="composer-row">
-				<div class="composer-tools">
-					<button
-						type="button"
-						class="attach-button"
-						aria-label="Add context"
-						title="Attach files or the editor selection; Shift+drag files here to attach them"
-						onClick={onPickAttachments}
-					>
-						📎
-					</button>
-					<ModelPicker models={models} selectedModelId={selectedModelId} onSelectModel={onSelectModel} />
-					{selectedModel?.thinking
-						? <ThinkingPicker thinking={selectedModel.thinking} selected={selectedThinking} onSelect={onSelectThinking} />
-						: null}
-					<ToolPicker tools={tools} onSetToolsEnabled={onSetToolsEnabled} />
-					<QuotaIndicator quota={quota} provider={selectedGroup?.provider} onRefresh={onRefreshQuota} />
-				</div>
-				<div class="composer-actions">
-					{context ? <span class="context-indicator" title="Prompt tokens / context window">{context}</span> : null}
-					{run.running && !onCancel ? (
-						<button type="button" class="send-button" onClick={onStop}>Stop</button>
-					) : (
-						<>
-							{onCancel ? (
-								<button type="button" class="composer-cancel" onClick={onCancel}>Cancel</button>
-							) : null}
-							<button type="button" class="send-button" disabled={!canSend} onClick={submit}>Send</button>
-						</>
-					)}
+						) : (
+							<>
+								{onCancel ? (
+									<button type="button" class="composer-cancel" onClick={onCancel}>Cancel</button>
+								) : null}
+								<button type="button" class="send-button" aria-label="Send" title="Send (Enter)" disabled={!canSend} onClick={submit}>
+									<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+										<path d="M8 13V3.5M3.75 7.5 8 3.25l4.25 4.25" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+									</svg>
+								</button>
+							</>
+						)}
+					</div>
 				</div>
 			</div>
 			{footer}

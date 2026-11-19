@@ -9,7 +9,7 @@ import type { ChatSessionStore } from "./session-store";
 import { runChatSubagent } from "./subagent-runner";
 import { SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
 import { groupModels, thinkingOptions } from "./shared/model-groups";
-import { appendChatText, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS } from "./shared/protocol";
+import { appendChatText, WEBVIEW_THINKING_PREVIEW_CHARS, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS } from "./shared/protocol";
 import type {
 	ChatApprovalRequest,
 	ChatAttachment,
@@ -25,6 +25,7 @@ import type {
 	ChatTextKind,
 	ChatToolGroup,
 	ChatUsage,
+	ChatUsageTotals,
 	HostMessage,
 	WebviewMessage,
 } from "./shared/protocol";
@@ -92,6 +93,7 @@ const DELTA_FLUSH_MS = 50;
 const QUOTA_COALESCE_MS = 2_000;
 const QUOTA_REFRESH_INTERVAL_MS = 30_000;
 const NO_MODEL_NOTICE = "No model is available. Configure a provider first.";
+const INTERRUPTED_NOTICE = "This answer was interrupted: VS Code closed or reloaded while it was running.";
 const COMPACTING_DETAIL = "Compacting context…";
 const SEND_ATTACHMENT_LIMIT = 20;
 const ADD_ATTACHMENT_LIMIT = 50;
@@ -233,6 +235,7 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 				...(attachments ? { attachments } : {}),
 			};
 		}
+		case "retryTurn": return typeof value.messageId === "string" ? { type: "retryTurn", messageId: value.messageId } : undefined;
 		case "keepChanges":
 		case "undoChanges": {
 			if (value.ids === undefined) {
@@ -261,6 +264,10 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 		case "loadToolResult":
 			return typeof value.messageId === "string" && typeof value.callId === "string"
 				? { type: "loadToolResult", messageId: value.messageId, callId: value.callId }
+				: undefined;
+		case "loadPartText":
+			return typeof value.messageId === "string" && typeof value.index === "number" && Number.isInteger(value.index) && value.index >= 0
+				? { type: "loadPartText", messageId: value.messageId, index: value.index }
 				: undefined;
 		default: return undefined;
 	}
@@ -292,18 +299,21 @@ function maxTurn(messages: readonly ChatMessage[]): number {
 	return max;
 }
 
-/** Copies a part for the webview and cuts long tool results down to a preview. */
-function viewPart(part: ChatStructuredPart): ChatStructuredPart;
-function viewPart(part: ChatPart): ChatPart;
-function viewPart(part: ChatPart): ChatPart {
+/** Copies a part for the webview and cuts long tool results and thinking down to a preview. */
+function viewPart(part: ChatStructuredPart, keepThinking?: boolean): ChatStructuredPart;
+function viewPart(part: ChatPart, keepThinking?: boolean): ChatPart;
+function viewPart(part: ChatPart, keepThinking?: boolean): ChatPart {
 	if (part.kind === "toolResult" && part.text.length > WEBVIEW_TOOL_RESULT_PREVIEW_CHARS) {
 		return { ...part, text: part.text.slice(0, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS), preview: true };
+	}
+	if (!keepThinking && part.kind === "thinking" && part.text.length > WEBVIEW_THINKING_PREVIEW_CHARS) {
+		return { ...part, text: part.text.slice(-WEBVIEW_THINKING_PREVIEW_CHARS), preview: true };
 	}
 	return { ...part };
 }
 
-function viewMessage(message: ChatMessage): ChatMessage {
-	const view: ChatMessage = { ...message, parts: message.parts.map(part => viewPart(part)) };
+function viewMessage(message: ChatMessage, keepThinking = false): ChatMessage {
+	const view: ChatMessage = { ...message, parts: message.parts.map(part => viewPart(part, keepThinking)) };
 	delete view.attachmentContext;
 	return view;
 }
@@ -563,6 +573,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "editMessage":
 				await this._edit(message.messageId, message.text, message.undoChanges === true, message.attachments);
 				return;
+			case "retryTurn":
+				await this._retryTurn(message.messageId);
+				return;
 			case "keepChanges":
 			case "undoChanges":
 				await this._resolveChanges(message.type === "keepChanges" ? "keep" : "undo", message.ids);
@@ -612,6 +625,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				return;
 			case "deleteSession":
 				await this.deleteSession(message.sessionId);
+				return;
+			case "loadPartText":
+				this._sendFullPartText(webview, message.messageId, message.index);
 				return;
 			case "loadToolResult":
 				this._sendFullToolResult(webview, message.messageId, message.callId);
@@ -729,6 +745,31 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
+	/** Sends the user message of the failed answer again, keeping its attachments and rendered context. */
+	private async _retryTurn(messageId: string): Promise<void> {
+		await this._ensureSession();
+		const runtime = this._active();
+		if (!runtime || runtime.busy || runtime.running) {
+			return;
+		}
+		const index = runtime.messages.findIndex(message => message.id === messageId && message.role === "assistant");
+		if (index < 0) {
+			return;
+		}
+		let user: ChatMessage | undefined;
+		for (let earlier = index - 1; earlier >= 0; earlier -= 1) {
+			if (runtime.messages[earlier].role === "user") {
+				user = runtime.messages[earlier];
+				break;
+			}
+		}
+		if (!user) {
+			return;
+		}
+		const text = user.parts.flatMap(part => part.kind === "text" ? [part.text] : []).join("\n\n");
+		await this._edit(user.id, text, false);
+	}
+
 	private async _sendTurn(
 		runtime: SessionRuntime,
 		text: string,
@@ -742,7 +783,12 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		if (!model) {
 			const turn = Math.max(1, maxTurn(messages));
 			const notice: ChatStructuredPart = { kind: "notice", level: "error", text: NO_MODEL_NOTICE };
-			await this._appendMessage(runtime, { id: randomUUID(), role: "assistant", turn, createdAt: Date.now(), parts: [notice] });
+			const answer: ChatMessage = { id: randomUUID(), role: "assistant", turn, createdAt: Date.now(), parts: [notice] };
+			await this._appendMessage(runtime, answer);
+			// Without the end marker the next load would take this notice for an interrupted answer.
+			await this._deps.store.endMessage(runtime.meta.id, answer.id).catch(error => {
+				this._log("chat.persist.end_failed", { message: errorMessage(error) });
+			});
 			return;
 		}
 		const turn = maxTurn(messages) + 1;
@@ -805,10 +851,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				this._queueDelta(running, kind, text);
 			},
 			part: part => this._addPart(running, part),
-			usage: usage => {
+			usage: (usage, totals) => {
 				running.message.usage = usage;
-				void this._persistUsage(running, usage);
-				this._emit(runtime, { type: "usage", messageId: running.message.id, usage });
+				running.message.usageTotals = totals;
+				void this._persistUsage(running, usage, totals);
+				this._emit(runtime, { type: "usage", messageId: running.message.id, usage, totals });
 			},
 		};
 		const source = this._deps.tools;
@@ -818,10 +865,20 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		const invoke = async (name: string, input: unknown, token: vscode.CancellationToken, callId: string | undefined, nested: boolean) => {
 			// The snapshot must exist before the first tool that may write; read-only rounds cost nothing.
 			if (tracker && !begin && !source.isReadOnly?.(name)) {
-				begin = tracker.beginTurn().catch(error => {
-					this._log("chat.changes.begin_failed", { message: errorMessage(error) });
-					return undefined;
-				});
+				begin = (async () => {
+					const snapshot = await tracker.beginTurn().catch(error => {
+						this._log("chat.changes.begin_failed", { message: errorMessage(error) });
+						return undefined;
+					});
+					if (snapshot) {
+						try {
+							await tracker.markOpen?.(running.sessionId, turn);
+						} catch (error) {
+							this._log("chat.changes.mark_failed", { message: errorMessage(error) });
+						}
+					}
+					return snapshot;
+				})();
 			}
 			await begin;
 			for (const file of source.writtenPaths?.(name, input) ?? []) {
@@ -865,12 +922,13 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			this._flushDelta(running);
 			const notice: ChatStructuredPart = error instanceof vscode.CancellationError
 				? { kind: "notice", level: "info", text: "Stopped." }
-				: { kind: "notice", level: "error", text: turnErrorText(error) };
+				: { kind: "notice", level: "error", text: turnErrorText(error), retryable: true };
 			running.message.parts.push(notice);
 			this._emit(runtime, { type: "partAdded", messageId: running.message.id, part: viewPart(notice) });
 		} finally {
 			this._flushDelta(running);
 			this._persistFinishedParts(running);
+			void this._persistEnd(running);
 			const snapshot = await begin;
 			if (tracker && snapshot) {
 				try {
@@ -1058,9 +1116,17 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
-	private async _persistUsage(running: RunningTurn, usage: ChatUsage): Promise<void> {
+	private async _persistEnd(running: RunningTurn): Promise<void> {
 		try {
-			await this._deps.store.setUsage(running.sessionId, running.message.id, usage);
+			await this._deps.store.endMessage(running.sessionId, running.message.id);
+		} catch (error) {
+			this._log("chat.persist.end_failed", { message: errorMessage(error) });
+		}
+	}
+
+	private async _persistUsage(running: RunningTurn, usage: ChatUsage, totals: ChatUsageTotals): Promise<void> {
+		try {
+			await this._deps.store.setUsage(running.sessionId, running.message.id, usage, totals);
 		} catch (error) {
 			this._log("chat.persist.usage_failed", { message: errorMessage(error) });
 		}
@@ -1235,6 +1301,13 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
+	private _sendFullPartText(webview: vscode.Webview, messageId: string, index: number): void {
+		const part = this._active()?.messages.find(candidate => candidate.id === messageId)?.parts[index];
+		if (part?.kind === "thinking") {
+			this._post(webview, { type: "partTextFull", messageId, index, text: part.text });
+		}
+	}
+
 	private async _ensureModels(): Promise<void> {
 		if (this._modelsLoaded) {
 			return;
@@ -1308,9 +1381,16 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			existing.meta = meta;
 			return existing;
 		}
+		const loaded = await this._deps.store.loadSession(meta.id);
+		await this._markInterrupted(meta.id, loaded.messages, loaded.interruptedMessageId);
+		try {
+			await this._deps.changes?.recoverInterrupted?.(meta.id);
+		} catch (error) {
+			this._log("chat.changes.recover_failed", { message: errorMessage(error) });
+		}
 		const runtime: SessionRuntime = {
 			meta,
-			messages: await this._deps.store.load(meta.id),
+			messages: loaded.messages,
 			changes: await this._loadChanges(meta.id),
 			running: undefined,
 			busy: false,
@@ -1320,6 +1400,22 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		};
 		this._runtimes.set(meta.id, runtime);
 		return runtime;
+	}
+
+	/** Adds the warning once: the end marker that follows keeps the next load from flagging it again. */
+	private async _markInterrupted(sessionId: string, messages: ChatMessage[], messageId: string | undefined): Promise<void> {
+		const message = messageId === undefined ? undefined : messages.find(candidate => candidate.id === messageId);
+		if (!message) {
+			return;
+		}
+		const notice: ChatStructuredPart = { kind: "notice", level: "warning", text: INTERRUPTED_NOTICE, retryable: true };
+		message.parts.push(notice);
+		try {
+			await this._deps.store.appendPart(sessionId, message.id, notice);
+			await this._deps.store.endMessage(sessionId, message.id);
+		} catch (error) {
+			this._log("chat.persist.interrupted_failed", { message: errorMessage(error) });
+		}
 	}
 
 	private async _activate(runtime: SessionRuntime): Promise<void> {
@@ -1339,7 +1435,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		return {
 			type: "init",
 			session: { ...runtime.meta },
-			messages: runtime.messages.map(viewMessage),
+			messages: runtime.messages.map(message => viewMessage(message, runtime.running?.message === message)),
 			models: groupModels(this._models),
 			selectedModelId: this._selectedModelId,
 			run: this._runState(),

@@ -3,6 +3,7 @@ import type { ChatMessage } from "../shared/protocol";
 import { postMessage } from "./api";
 import { Composer } from "./composer";
 import { useComposerActions } from "./composer-actions";
+import { formatCacheHit, modelCacheStats } from "./format";
 import type { ChatStore } from "./store";
 
 interface EditComposerProps {
@@ -23,6 +24,7 @@ export function EditComposer({ store, message, changedFilesSinceTurn, context }:
 	const text = message.parts
 		.flatMap(part => part.kind === "text" ? [part.text] : [])
 		.join("\n\n");
+	const cacheStats = modelCacheStats(store.messages, store.selectedModelId);
 
 	const submit = (value: string) => {
 		postMessage({
@@ -46,6 +48,7 @@ export function EditComposer({ store, message, changedFilesSinceTurn, context }:
 			selectedModelId={store.selectedModelId}
 			selectedThinking={store.selectedThinking}
 			quota={store.quota}
+			cache={cacheStats ? formatCacheHit(cacheStats) : undefined}
 			context={context}
 			attachments={attachments}
 			onSend={submit}

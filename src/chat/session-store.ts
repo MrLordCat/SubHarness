@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { ChatMessage, ChatPart, ChatSessionMeta, ChatUsage } from "./shared/protocol";
+import type { ChatMessage, ChatPart, ChatSessionMeta, ChatUsage, ChatUsageTotals } from "./shared/protocol";
 
 export const DEFAULT_CHAT_TITLE = "New chat";
 
@@ -17,9 +17,19 @@ const INDEX_THROTTLE_MS = 1_000;
 type LogEvent =
 	| { t: "message"; message: ChatMessage }
 	| { t: "part"; messageId: string; part: ChatPart }
-	| { t: "usage"; messageId: string; usage: ChatUsage }
+	| { t: "usage"; messageId: string; usage: ChatUsage; totals?: ChatUsageTotals }
+	/** The turn finished, so a later load does not take the answer for a half-written one. */
+	| { t: "end"; messageId: string }
 	/** Drops the message and everything after it; an earlier message was edited. */
 	| { t: "truncate"; messageId: string };
+
+interface ReplayResult {
+	messages: ChatMessage[];
+	/** Messages whose end event survived truncation. */
+	ended: Set<string>;
+	/** The log holds at least one end event, so it was written after turns started ending. */
+	hasEnd: boolean;
+}
 
 export class ChatSessionStore {
 	private readonly _root: string;
@@ -67,8 +77,19 @@ export class ChatSessionStore {
 	}
 
 	async load(sessionId: string): Promise<ChatMessage[]> {
+		return (await this.loadSession(sessionId)).messages;
+	}
+
+	async loadSession(sessionId: string): Promise<{ messages: ChatMessage[]; interruptedMessageId?: string }> {
 		assertSessionId(sessionId);
-		return this._enqueue(async () => (await this._replay(this._logFile(sessionId))) ?? []);
+		return this._enqueue(async () => {
+			const replay = await this._replaySession(this._logFile(sessionId));
+			if (!replay) {
+				return { messages: [] };
+			}
+			const interrupted = interruptedMessageId(replay);
+			return interrupted ? { messages: replay.messages, interruptedMessageId: interrupted } : { messages: replay.messages };
+		});
 	}
 
 	async appendMessage(sessionId: string, message: ChatMessage): Promise<void> {
@@ -105,9 +126,21 @@ export class ChatSessionStore {
 		});
 	}
 
-	async setUsage(sessionId: string, messageId: string, usage: ChatUsage): Promise<void> {
+	async endMessage(sessionId: string, messageId: string): Promise<void> {
 		assertSessionId(sessionId);
-		const event: LogEvent = { t: "usage", messageId, usage };
+		const event: LogEvent = { t: "end", messageId };
+		const line = `${JSON.stringify(event)}\n`;
+		await this._enqueue(async () => {
+			await this._ensureIndex();
+			const meta = this._requireSession(sessionId);
+			await this._appendLine(sessionId, line);
+			await this._touchIndex(sessionId, meta);
+		});
+	}
+
+	async setUsage(sessionId: string, messageId: string, usage: ChatUsage, totals?: ChatUsageTotals): Promise<void> {
+		assertSessionId(sessionId);
+		const event: LogEvent = { t: "usage", messageId, usage, ...(totals ? { totals } : {}) };
 		const line = `${JSON.stringify(event)}\n`;
 		await this._enqueue(async () => {
 			await this._ensureIndex();
@@ -307,6 +340,10 @@ export class ChatSessionStore {
 	}
 
 	private async _replay(file: string): Promise<ChatMessage[] | undefined> {
+		return (await this._replaySession(file))?.messages;
+	}
+
+	private async _replaySession(file: string): Promise<ReplayResult | undefined> {
 		let raw: string;
 		try {
 			raw = await fs.readFile(file, "utf8");
@@ -391,9 +428,11 @@ function asSessionMeta(value: unknown): ChatSessionMeta | undefined {
 	return meta;
 }
 
-function replayEvents(raw: string): ChatMessage[] {
+function replayEvents(raw: string): ReplayResult {
 	const messages: ChatMessage[] = [];
 	const byId = new Map<string, ChatMessage>();
+	const ended = new Set<string>();
+	let hasEnd = false;
 	for (const line of raw.split("\n")) {
 		const event = asLogEvent(line);
 		if (!event) {
@@ -404,21 +443,40 @@ function replayEvents(raw: string): ChatMessage[] {
 			byId.set(event.message.id, event.message);
 		} else if (event.t === "part") {
 			byId.get(event.messageId)?.parts.push(event.part);
+		} else if (event.t === "end") {
+			ended.add(event.messageId);
+			hasEnd = true;
 		} else if (event.t === "truncate") {
 			const index = messages.findIndex(message => message.id === event.messageId);
 			if (index >= 0) {
 				for (const removed of messages.splice(index)) {
 					byId.delete(removed.id);
+					ended.delete(removed.id);
 				}
 			}
 		} else {
 			const message = byId.get(event.messageId);
 			if (message) {
 				message.usage = event.usage;
+				if (event.totals) {
+					message.usageTotals = event.totals;
+				}
 			}
 		}
 	}
-	return messages;
+	return { messages, ended, hasEnd };
+}
+
+/** Logs written before end events existed have none, so there an empty or dangling answer marks the interruption. */
+function interruptedMessageId(replay: ReplayResult): string | undefined {
+	const last = replay.messages.at(-1);
+	if (!last || last.role !== "assistant" || replay.ended.has(last.id)) {
+		return undefined;
+	}
+	const called = new Set(last.parts.flatMap(part => part.kind === "toolCall" ? [part.callId] : []));
+	const answered = new Set(last.parts.flatMap(part => part.kind === "toolResult" ? [part.callId] : []));
+	const dangling = [...called].some(callId => !answered.has(callId));
+	return replay.hasEnd || last.parts.length === 0 || dangling ? last.id : undefined;
 }
 
 function asLogEvent(line: string): LogEvent | undefined {
@@ -442,7 +500,11 @@ function asLogEvent(line: string): LogEvent | undefined {
 		return { t: "part", messageId: value.messageId, part: value.part };
 	}
 	if (value.t === "usage" && typeof value.messageId === "string" && isChatUsage(value.usage)) {
-		return { t: "usage", messageId: value.messageId, usage: value.usage };
+		const totals = value.totals === undefined || isChatUsageTotals(value.totals) ? value.totals : undefined;
+		return { t: "usage", messageId: value.messageId, usage: value.usage, ...(totals ? { totals } : {}) };
+	}
+	if (value.t === "end" && typeof value.messageId === "string") {
+		return { t: "end", messageId: value.messageId };
 	}
 	if (value.t === "truncate" && typeof value.messageId === "string") {
 		return { t: "truncate", messageId: value.messageId };
@@ -464,7 +526,8 @@ function isChatMessage(value: unknown): value is ChatMessage {
 		&& (value.hostContext === undefined || typeof value.hostContext === "string")
 		&& (value.attachments === undefined || (Array.isArray(value.attachments) && value.attachments.every(isChatAttachment)))
 		&& (value.attachmentContext === undefined || typeof value.attachmentContext === "string")
-		&& (value.usage === undefined || isChatUsage(value.usage));
+		&& (value.usage === undefined || isChatUsage(value.usage))
+		&& (value.usageTotals === undefined || isChatUsageTotals(value.usageTotals));
 }
 
 function isChatAttachment(value: unknown): boolean {
@@ -493,7 +556,8 @@ function isChatPart(value: unknown): value is ChatPart {
 		case "notice":
 			return (value.level === "info" || value.level === "warning" || value.level === "error")
 				&& typeof value.text === "string"
-				&& (value.limit === undefined || isChatLimitInfo(value.limit));
+				&& (value.limit === undefined || isChatLimitInfo(value.limit))
+				&& (value.retryable === undefined || typeof value.retryable === "boolean");
 		case "compaction":
 			return typeof value.summary === "string"
 				&& typeof value.keepFromMessageId === "string"
@@ -542,6 +606,17 @@ function isChatUsage(value: unknown): value is ChatUsage {
 	}
 	return ["promptTokens", "completionTokens", "totalTokens", "cachedTokens"]
 		.every(key => value[key] === undefined || typeof value[key] === "number");
+}
+
+function isChatUsageTotals(value: unknown): value is ChatUsageTotals {
+	if (!isRecord(value)) {
+		return false;
+	}
+	return ["requests", "promptTokens", "cachedTokens", "completionTokens", "cacheReported"]
+		.every(key => {
+			const entry = value[key];
+			return typeof entry === "number" && Number.isFinite(entry) && entry >= 0;
+		});
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

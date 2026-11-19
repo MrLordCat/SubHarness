@@ -1,12 +1,12 @@
 import * as vscode from "vscode";
 import { LIMIT_SIGNAL_OPTION, parseLimitSignal, type LimitSignal } from "../providers/limit-signal";
 import { toLanguageModelMessages } from "./lm-messages";
-import { appendChatText, type ChatMessage, type ChatPart, type ChatStructuredPart, type ChatTextKind, type ChatUsage } from "./shared/protocol";
+import { appendChatText, type ChatMessage, type ChatPart, type ChatStructuredPart, type ChatTextKind, type ChatUsage, type ChatUsageTotals } from "./shared/protocol";
 
 export interface AgentTurnSink {
 	text(kind: ChatTextKind, text: string): void;
 	part(part: ChatStructuredPart): void;
-	usage(usage: ChatUsage): void;
+	usage(usage: ChatUsage, totals: ChatUsageTotals): void;
 }
 
 export interface ChatToolExecutor {
@@ -85,6 +85,19 @@ function limitNotice(signal: LimitSignal): ChatStructuredPart {
 	};
 }
 
+function addUsage(totals: ChatUsageTotals, usage: ChatUsage): void {
+	if (usage.promptTokens === undefined) {
+		return;
+	}
+	totals.requests += 1;
+	totals.promptTokens += usage.promptTokens;
+	totals.cachedTokens += usage.cachedTokens ?? 0;
+	totals.completionTokens += usage.completionTokens ?? 0;
+	if (usage.cachedTokens !== undefined) {
+		totals.cacheReported += 1;
+	}
+}
+
 function thinkingText(part: vscode.LanguageModelResponsePart): string {
 	const value = (part as { value?: unknown }).value;
 	if (typeof value === "string") {
@@ -100,7 +113,10 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 	const maxRounds = request.maxRounds ?? DEFAULT_MAX_ROUNDS;
 	const parts: ChatPart[] = [...(request.initialParts ?? [])];
 	const assistant: ChatMessage = { id: "agent-message", role: "assistant", turn: request.turn, createdAt: Date.now(), parts };
+	const completed: ChatUsageTotals = { requests: 0, promptTokens: 0, cachedTokens: 0, completionTokens: 0, cacheReported: 0 };
+	let roundUsage: ChatUsage | undefined;
 	for (let round = 1; round <= maxRounds; round++) {
+		roundUsage = undefined;
 		const calls: Array<{ callId: string; name: string; input: unknown }> = [];
 		// The notice text that follows a limit signal is already shown by the notice part.
 		let signalledText = "";
@@ -137,7 +153,10 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 					}
 					const usage = parseUsage(part);
 					if (usage) {
-						request.sink.usage(usage);
+						roundUsage = usage;
+						const totals = { ...completed };
+						addUsage(totals, usage);
+						request.sink.usage(usage, totals);
 					}
 				} else if (THINKING_PART && part instanceof THINKING_PART) {
 					const text = thinkingText(part);
@@ -153,6 +172,9 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 			tools: request.tools.tools,
 			modelOptions: { ...request.modelOptions, _conversationId: request.conversationId, _copilotTurnIndex: request.turn, [LIMIT_SIGNAL_OPTION]: true },
 		}, progress, request.token);
+		if (roundUsage) {
+			addUsage(completed, roundUsage);
+		}
 		if (calls.length === 0) {
 			return { rounds: round, stopReason: "done" };
 		}

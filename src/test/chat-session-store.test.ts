@@ -60,7 +60,12 @@ suite("Chat session store", () => {
 		const user = textMessage("m1", "user", "Hello there");
 		await store.appendMessage(session.id, user);
 		await store.appendPart(session.id, "m1", { kind: "thinking", text: "working" });
-		await store.setUsage(session.id, "m1", { promptTokens: 3, completionTokens: 4, totalTokens: 7 });
+		await store.setUsage(
+			session.id,
+			"m1",
+			{ promptTokens: 3, completionTokens: 4, totalTokens: 7 },
+			{ requests: 2, promptTokens: 6, cachedTokens: 2, completionTokens: 8, cacheReported: 1 },
+		);
 		await store.flush();
 
 		const reopened = new ChatSessionStore(root);
@@ -68,11 +73,47 @@ suite("Chat session store", () => {
 			...user,
 			parts: [{ kind: "text", text: "Hello there" }, { kind: "thinking", text: "working" }],
 			usage: { promptTokens: 3, completionTokens: 4, totalTokens: 7 },
+			usageTotals: { requests: 2, promptTokens: 6, cachedTokens: 2, completionTokens: 8, cacheReported: 1 },
 		}]);
 		const meta = await reopened.get(session.id);
 		assert.strictEqual(meta?.title, "Hello there");
 		assert.strictEqual(meta?.messageCount, 1);
 		assert.strictEqual(meta?.modelId, "model-a");
+	});
+
+	test("loads a usage line with malformed totals without totals", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		await store.appendMessage(session.id, textMessage("m1", "user", "kept"));
+		const usage = { promptTokens: 5, completionTokens: 6, totalTokens: 11 };
+		await store.setUsage(session.id, "m1", usage);
+		await store.flush();
+		const line = JSON.stringify({
+			t: "usage",
+			messageId: "m1",
+			usage,
+			totals: { requests: 1, promptTokens: 5, cachedTokens: -1, completionTokens: 6, cacheReported: 1 },
+		});
+		await fs.appendFile(path.join(root, `${session.id}.jsonl`), `${line}\n`, "utf8");
+
+		const reopened = new ChatSessionStore(root);
+		const loaded = (await reopened.load(session.id))[0];
+		assert.deepStrictEqual(loaded.usage, usage);
+		assert.strictEqual(loaded.usageTotals, undefined);
+	});
+
+	test("loads an old usage line without totals", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		await store.appendMessage(session.id, textMessage("m1", "user", "old"));
+		await store.flush();
+		const line = JSON.stringify({ t: "usage", messageId: "m1", usage: { promptTokens: 3, cachedTokens: 1 } });
+		await fs.appendFile(path.join(root, `${session.id}.jsonl`), `${line}\n`, "utf8");
+
+		const reopened = new ChatSessionStore(root);
+		const loaded = (await reopened.load(session.id))[0];
+		assert.deepStrictEqual(loaded.usage, { promptTokens: 3, cachedTokens: 1 });
+		assert.strictEqual(loaded.usageTotals, undefined);
 	});
 
 	test("derives the title from the first user message and cuts it at 60 characters", async () => {
@@ -318,5 +359,86 @@ suite("Chat session store", () => {
 
 		const reopened = new ChatSessionStore(root);
 		assert.deepStrictEqual((await reopened.load(session.id))[0].parts, [{ kind: "text", text: "kept" }]);
+	});
+
+	test("endMessage marks an answer complete", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		await store.appendMessage(session.id, textMessage("u1", "user", "Question"));
+		await store.appendMessage(session.id, textMessage("a1", "assistant", "Answer"));
+		await store.endMessage(session.id, "a1");
+
+		const loaded = await new ChatSessionStore(root).loadSession(session.id);
+		assert.deepStrictEqual(loaded.messages.map(message => message.id), ["u1", "a1"]);
+		assert.strictEqual(loaded.interruptedMessageId, undefined);
+	});
+
+	test("reports an unfinished last answer when the log has end markers", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		await store.appendMessage(session.id, textMessage("u1", "user", "One"));
+		await store.appendMessage(session.id, textMessage("a1", "assistant", "First"));
+		await store.endMessage(session.id, "a1");
+		await store.appendMessage(session.id, textMessage("u2", "user", "Two"));
+		await store.appendMessage(session.id, textMessage("a2", "assistant", "Second"));
+
+		const loaded = await new ChatSessionStore(root).loadSession(session.id);
+		assert.deepStrictEqual(loaded.messages.map(message => message.id), ["u1", "a1", "u2", "a2"]);
+		assert.strictEqual(loaded.interruptedMessageId, "a2");
+	});
+
+	test("flags only an empty or dangling last answer in a log without end markers", async () => {
+		const store = new ChatSessionStore(root);
+		const complete = await store.create();
+		await store.appendMessage(complete.id, textMessage("u1", "user", "Question"));
+		await store.appendMessage(complete.id, textMessage("a1", "assistant", "Answer"));
+		const empty = await store.create();
+		await store.appendMessage(empty.id, textMessage("u1", "user", "Question"));
+		await store.appendMessage(empty.id, chatMessage("a1", "assistant", []));
+		const dangling = await store.create();
+		await store.appendMessage(dangling.id, textMessage("u1", "user", "Question"));
+		await store.appendMessage(dangling.id, chatMessage("a1", "assistant", [{ kind: "toolCall", callId: "call-1", name: "read", input: {} }]));
+
+		assert.strictEqual((await store.loadSession(complete.id)).interruptedMessageId, undefined);
+		assert.strictEqual((await store.loadSession(empty.id)).interruptedMessageId, "a1");
+		assert.strictEqual((await store.loadSession(dangling.id)).interruptedMessageId, "a1");
+	});
+
+	test("truncate drops the end markers of the removed messages", async () => {
+		const store = new ChatSessionStore(root);
+		const reused = await store.create();
+		await store.appendMessage(reused.id, textMessage("u1", "user", "One"));
+		await store.appendMessage(reused.id, textMessage("a1", "assistant", "First"));
+		await store.endMessage(reused.id, "a1");
+		await store.truncateFrom(reused.id, "u1");
+		await store.appendMessage(reused.id, textMessage("u1b", "user", "Two"));
+		await store.appendMessage(reused.id, textMessage("a1", "assistant", "Second"));
+		assert.deepStrictEqual((await store.loadSession(reused.id)).messages.map(message => message.id), ["u1b", "a1"]);
+		assert.strictEqual((await store.loadSession(reused.id)).interruptedMessageId, "a1");
+
+		const truncated = await store.create();
+		await store.appendMessage(truncated.id, textMessage("u2", "user", "One"));
+		await store.appendMessage(truncated.id, textMessage("a2", "assistant", "First"));
+		await store.endMessage(truncated.id, "a2");
+		await store.truncateFrom(truncated.id, "u2");
+		await store.appendMessage(truncated.id, textMessage("u3", "user", "Two"));
+		await store.appendMessage(truncated.id, textMessage("a3", "assistant", "Second"));
+		// The log still holds an end event, so a text answer without one stays unfinished.
+		assert.strictEqual((await store.loadSession(truncated.id)).interruptedMessageId, "a3");
+	});
+
+	test("skips an invalid end event without breaking replay", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		await store.appendMessage(session.id, textMessage("u1", "user", "Question"));
+		await store.appendMessage(session.id, textMessage("a1", "assistant", "Answer"));
+		const invalid = `${JSON.stringify({ t: "end" })}\n${JSON.stringify({ t: "end", messageId: 7 })}\n`;
+		await fs.appendFile(path.join(root, `${session.id}.jsonl`), invalid, "utf8");
+
+		const loaded = await store.loadSession(session.id);
+		assert.deepStrictEqual(loaded.messages.map(message => message.id), ["u1", "a1"]);
+		assert.strictEqual(loaded.interruptedMessageId, undefined);
+		await store.endMessage(session.id, "a1");
+		assert.strictEqual((await store.loadSession(session.id)).interruptedMessageId, undefined);
 	});
 });

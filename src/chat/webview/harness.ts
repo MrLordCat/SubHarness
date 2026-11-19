@@ -1,4 +1,5 @@
 import {
+	WEBVIEW_THINKING_PREVIEW_CHARS,
 	WEBVIEW_TOOL_RESULT_PREVIEW_CHARS,
 	type ChatAttachment,
 	type ChatChangedFile,
@@ -13,6 +14,7 @@ import {
 	type ChatSubagentStep,
 	type ChatThinkingOptions,
 	type ChatToolGroup,
+	type ChatUsageTotals,
 	type HostMessage,
 	type WebviewMessage,
 } from "../shared/protocol";
@@ -312,6 +314,9 @@ function handleWebviewMessage(message: WebviewMessage): void {
 		case "editMessage":
 			handleEdit(message.messageId, message.text, message.undoChanges, message.attachments);
 			break;
+		case "retryTurn":
+			handleRetryTurn(message.messageId);
+			break;
 		case "keepChanges":
 			handleKeepChanges(message.ids);
 			break;
@@ -326,6 +331,9 @@ function handleWebviewMessage(message: WebviewMessage): void {
 			break;
 		case "loadToolResult":
 			handleLoadToolResult(message.messageId, message.callId);
+			break;
+		case "loadPartText":
+			handleLoadPartText(message.messageId, message.index);
 			break;
 		case "newChat":
 			createHarnessChat();
@@ -677,18 +685,47 @@ function handleSend(text: string, attachments?: readonly ChatAttachment[]): void
 
 function startStream(assistantId: string): void {
 	const chunks = splitText(streamText(), 300).filter(chunk => chunk.length > 0);
+	const steps = [
+		{ promptTokens: 12_400, cachedTokens: 6_200, completionTokens: 700 },
+		{ promptTokens: 25_600, cachedTokens: 19_200, completionTokens: 1_500 },
+		{ promptTokens: 38_900, cachedTokens: 35_800, completionTokens: 2_400 },
+	];
+	const totals: ChatUsageTotals = { requests: 0, promptTokens: 0, cachedTokens: 0, completionTokens: 0, cacheReported: 0 };
+	const reportUsage = (step: typeof steps[number]): void => {
+		totals.requests += 1;
+		totals.promptTokens += step.promptTokens;
+		totals.cachedTokens += step.cachedTokens;
+		totals.completionTokens += step.completionTokens;
+		totals.cacheReported += 1;
+		const usage = {
+			promptTokens: step.promptTokens,
+			completionTokens: step.completionTokens,
+			totalTokens: step.promptTokens + step.completionTokens,
+			cachedTokens: step.cachedTokens,
+		};
+		emit({ type: "usage", messageId: assistantId, usage, totals: { ...totals } });
+	};
+	const stepSpacing = Math.max(1, Math.floor(chunks.length / (steps.length + 1)));
+	let stepIndex = 0;
 	let index = 0;
 	streamStarted = performance.now();
 	streamTimer = window.setInterval(() => {
 		if (index >= chunks.length) {
 			stopStream();
 			lastStreamMs = Math.round(performance.now() - streamStarted);
-			emit({ type: "usage", messageId: assistantId, usage: { promptTokens: 12_345, completionTokens: 3000, totalTokens: 15_345 } });
+			while (stepIndex < steps.length) {
+				reportUsage(steps[stepIndex]);
+				stepIndex += 1;
+			}
 			emit({ type: "run", run: { running: false } });
 			return;
 		}
 		emit({ type: "textDelta", messageId: assistantId, kind: "text", text: chunks[index] });
 		index += 1;
+		if (index % stepSpacing === 0 && stepIndex < steps.length) {
+			reportUsage(steps[stepIndex]);
+			stepIndex += 1;
+		}
 	}, 16);
 }
 
@@ -759,6 +796,36 @@ function handleEdit(messageId: string, text: string, undoChanges: boolean | unde
 		activeSession().title = titleFromText(text);
 		emit({ type: "session", session: sessionMeta() });
 	}
+}
+
+/** Truncates at the failed answer's user message and replays a short fake answer. */
+function handleRetryTurn(messageId: string): void {
+	const index = messages.findIndex(candidate => candidate.id === messageId && candidate.role === "assistant");
+	if (index < 0) {
+		return;
+	}
+	let userIndex = index - 1;
+	while (userIndex >= 0 && messages[userIndex].role !== "user") {
+		userIndex -= 1;
+	}
+	const user = messages[userIndex];
+	if (!user) {
+		return;
+	}
+	stopStream();
+	pendingApproval = undefined;
+	emit({ type: "truncated", messageId: user.id });
+	messages.splice(userIndex);
+	turn += 1;
+	const now = Date.now();
+	const resent: ChatMessage = { ...user, id: `sent-user-${nextId++}`, turn, createdAt: now };
+	const assistant: ChatMessage = { id: `sent-assistant-${nextId++}`, role: "assistant", turn, createdAt: now, modelId: selectedModelId, parts: [] };
+	messages.push(resent, assistant);
+	emit({ type: "messageAdded", message: resent });
+	emit({ type: "messageAdded", message: assistant });
+	emit({ type: "run", run: { running: true } });
+	emit({ type: "textDelta", messageId: assistant.id, kind: "text", text: "Retry: this is a short fake answer." });
+	emit({ type: "run", run: { running: false } });
 }
 
 function handleKeepChanges(ids?: string[]): void {
@@ -842,6 +909,17 @@ function handleLoadToolResult(messageId: string, callId: string): void {
 	emit({ type: "toolResultFull", messageId, callId, text });
 }
 
+function handleLoadPartText(messageId: string, index: number): void {
+	const message = messages.find(candidate => candidate.id === messageId);
+	const part = message?.parts[index];
+	if (part && (part.kind === "thinking" || part.kind === "text") && part.preview === true) {
+		const text = longThinkingText();
+		part.text = text;
+		part.preview = false;
+		emit({ type: "partTextFull", messageId, index, text });
+	}
+}
+
 function createMessages(count: number): ChatMessage[] {
 	const random = makeRandom(42);
 	const result: ChatMessage[] = [];
@@ -868,6 +946,16 @@ function createMessages(count: number): ChatMessage[] {
 			parts: assistantParts(index, random),
 			usage: { promptTokens: 12_000 + (index % 40) * 250, completionTokens: 400 + (index % 17) * 30, totalTokens: 16_000 + index },
 		});
+	}
+	// The newest turns ran on the default model, so the cache indicator has a streak to show.
+	const recent = result.filter(message => message.role === "assistant").slice(-4);
+	for (let offset = 0; offset < recent.length; offset += 1) {
+		const message = recent[offset];
+		const promptTokens = 12_000 + offset * 1_500;
+		const cachedTokens = Math.round(promptTokens * (0.82 + offset * 0.02));
+		message.modelId = "gpt-5.5-codex";
+		message.usage = { promptTokens, completionTokens: 1_400, totalTokens: promptTokens + 1_400, cachedTokens };
+		message.usageTotals = { requests: 2, promptTokens: promptTokens * 2, cachedTokens: cachedTokens * 2, completionTokens: 2_800, cacheReported: 2 };
 	}
 	const compacted = result[3];
 	const kept = result[6];
@@ -913,6 +1001,10 @@ function createMessages(count: number): ChatMessage[] {
 			endLine: 58,
 			languageId: "typescriptreact",
 		}];
+	}
+	const failing = result.at(-1);
+	if (failing?.role === "assistant") {
+		failing.parts.push({ kind: "notice", level: "error", text: "The provider stopped before the answer finished.", retryable: true });
 	}
 	return result;
 }
@@ -1017,14 +1109,16 @@ function assistantParts(index: number, random: () => number): ChatPart[] {
 	const parts: ChatPart[] = [];
 	const variant = index % 8;
 	if (variant === 1 || variant === 6) {
-		parts.push({
-			kind: "thinking",
-			text: [
-				"Looking at the request, then at the rendered message heights.",
-				"The heights come from one ResizeObserver per visible message.",
-				"Only the changed message should re-render, so the list stays cheap.",
-			].join("\n"),
-		});
+		parts.push(variant === 1
+			? { kind: "thinking", text: previewThinkingText(), preview: true }
+			: {
+				kind: "thinking",
+				text: [
+					"Looking at the request, then at the rendered message heights.",
+					"The heights come from one ResizeObserver per visible message.",
+					"Only the changed message should re-render, so the list stays cheap.",
+				].join("\n"),
+			});
 	}
 	if (variant === 2 || variant === 5) {
 		const callId = `call-${index}`;
@@ -1115,6 +1209,15 @@ function previewToolResult(index: number): string {
 function longToolResult(callId: string): string {
 	const line = `full output for ${callId}: a much longer tool result body served on demand.\n`;
 	return line.repeat(400);
+}
+
+function longThinkingText(): string {
+	const line = "Checking the store, the virtual layout and the visible message heights.\n";
+	return line.repeat(40) + "Only the changed message should re-render, so the list stays cheap.";
+}
+
+function previewThinkingText(): string {
+	return longThinkingText().slice(-WEBVIEW_THINKING_PREVIEW_CHARS);
 }
 
 function streamText(): string {

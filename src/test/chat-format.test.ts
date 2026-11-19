@@ -1,5 +1,6 @@
 import * as assert from "node:assert";
-import { describeToolCall, formatAge, formatReset, parseUriList, sessionGroup } from "../chat/webview/format";
+import type { ChatMessage, ChatUsageTotals } from "../chat/shared/protocol";
+import { describeToolCall, formatAge, formatCacheHit, formatReset, modelCacheStats, parseUriList, sessionGroup } from "../chat/webview/format";
 
 function time(date: Date): string {
 	return date.toLocaleString([], { hour: "2-digit", minute: "2-digit" });
@@ -36,6 +37,136 @@ suite("Chat webview formatting", () => {
 		const now = new Date(2026, 10, 18, 9, 0).getTime();
 		const past = new Date(2026, 10, 18, 8, 0);
 		assert.strictEqual(formatReset(past.getTime(), now), `${time(past)} (now)`);
+	});
+});
+
+suite("Chat webview cache stats", () => {
+	let seq = 0;
+
+	function message(role: ChatMessage["role"], modelId?: string, usage?: ChatMessage["usage"], totals?: ChatUsageTotals): ChatMessage {
+		seq += 1;
+		return {
+			id: `m${seq}`,
+			role,
+			turn: 1,
+			createdAt: 0,
+			parts: [],
+			...(modelId !== undefined ? { modelId } : {}),
+			...(usage ? { usage } : {}),
+			...(totals ? { usageTotals: totals } : {}),
+		};
+	}
+
+	function totals(requests: number, promptTokens: number, cachedTokens: number, cacheReported: number): ChatUsageTotals {
+		return { requests, promptTokens, cachedTokens, completionTokens: 0, cacheReported };
+	}
+
+	test("counts the newest streak of the model, skipping user messages and stopping at another model", () => {
+		const stats = modelCacheStats([
+			message("assistant", "m1", { promptTokens: 500, cachedTokens: 400 }, totals(2, 1000, 800, 2)),
+			message("user"),
+			message("assistant", "m2", { promptTokens: 300 }, totals(1, 300, 0, 0)),
+			message("user"),
+			message("assistant", "m1", { promptTokens: 1000, cachedTokens: 920 }, totals(2, 2000, 1700, 2)),
+		], "m1");
+		assert.deepStrictEqual(stats, {
+			modelId: "m1",
+			requests: 2,
+			promptTokens: 2000,
+			cachedTokens: 1700,
+			cacheReported: 2,
+			lastHitPercent: 92,
+		});
+	});
+
+	test("skips an assistant message without a model but does not stop there", () => {
+		const stats = modelCacheStats([
+			message("assistant", "m1", { promptTokens: 100, cachedTokens: 80 }, totals(1, 100, 80, 1)),
+			message("assistant", undefined, { promptTokens: 900, cachedTokens: 100 }, totals(1, 900, 100, 1)),
+		], "m1");
+		assert.deepStrictEqual(stats, {
+			modelId: "m1",
+			requests: 1,
+			promptTokens: 100,
+			cachedTokens: 80,
+			cacheReported: 1,
+			lastHitPercent: 80,
+		});
+	});
+
+	test("falls back to usage as one request when totals are missing", () => {
+		const stats = modelCacheStats([
+			message("assistant", "m1", { promptTokens: 1000, cachedTokens: 850 }),
+		], "m1");
+		assert.deepStrictEqual(stats, {
+			modelId: "m1",
+			requests: 1,
+			promptTokens: 1000,
+			cachedTokens: 850,
+			cacheReported: 1,
+			lastHitPercent: 85,
+		});
+	});
+
+	test("returns undefined without a model, without a matching message or without prompt tokens", () => {
+		assert.strictEqual(modelCacheStats([message("assistant", "m1", { promptTokens: 10 }, totals(1, 10, 0, 0))], undefined), undefined);
+		assert.strictEqual(modelCacheStats([], "m1"), undefined);
+		assert.strictEqual(modelCacheStats([message("assistant", "m2", { promptTokens: 10 }, totals(1, 10, 0, 0))], "m1"), undefined);
+		assert.strictEqual(modelCacheStats([message("assistant", "m1")], "m2"), undefined);
+		assert.strictEqual(modelCacheStats([message("user")], "m1"), undefined);
+	});
+
+	test("formats the rounded percent, the title in tokens and the last request", () => {
+		const label = formatCacheHit({
+			modelId: "m1",
+			requests: 34,
+			promptTokens: 1_400_000,
+			cachedTokens: 1_218_000,
+			cacheReported: 34,
+			lastHitPercent: 92,
+		});
+		assert.strictEqual(label.text, "cache 87%");
+		assert.strictEqual(label.level, "normal");
+		assert.strictEqual(
+			label.title,
+			"Prompt cache hits for this model since it took over this chat: 87% (1.2M of 1.4M prompt tokens, 34 requests). Last request: 92%.",
+		);
+	});
+
+	test("says n/a when the provider reports no cached tokens", () => {
+		const label = formatCacheHit({
+			modelId: "m1",
+			requests: 2,
+			promptTokens: 1000,
+			cachedTokens: 0,
+			cacheReported: 0,
+		});
+		assert.strictEqual(label.text, "cache n/a");
+		assert.strictEqual(label.title, "The provider does not report cached tokens for this model.");
+		assert.strictEqual(label.level, "normal");
+	});
+
+	test("omits the last request when unknown and marks a low hit rate", () => {
+		const label = formatCacheHit({
+			modelId: "m1",
+			requests: 3,
+			promptTokens: 1000,
+			cachedTokens: 250,
+			cacheReported: 3,
+		});
+		assert.strictEqual(label.text, "cache 25%");
+		assert.strictEqual(label.level, "low");
+		assert.strictEqual(
+			label.title,
+			"Prompt cache hits for this model since it took over this chat: 25% (250 of 1k prompt tokens, 3 requests).",
+		);
+		assert.strictEqual(formatCacheHit({
+			modelId: "m1",
+			requests: 2,
+			promptTokens: 1000,
+			cachedTokens: 100,
+			cacheReported: 2,
+		}).level, "normal");
 	});
 });
 

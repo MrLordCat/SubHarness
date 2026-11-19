@@ -32,6 +32,9 @@ suite("chat change tracker", () => {
 		await current.endTurn(SESSION, number, begin);
 	}
 
+	const stored = async (): Promise<Record<string, unknown>> =>
+		JSON.parse(await fs.readFile(path.join(storage, "sessions", `${SESSION}.json`), "utf8")) as Record<string, unknown>;
+
 	suiteSetup(async () => {
 		git = await findGitExecutable();
 	});
@@ -263,5 +266,37 @@ suite("chat change tracker", () => {
 		const current = new ChatChangeTracker({ storageDir: storage, folders: () => [{ name: "project", fsPath: project }], findGit: async () => undefined });
 		assert.strictEqual(await current.beginTurn(), undefined);
 		assert.strictEqual((await current.changeSet(SESSION)).unavailable, "git was not found.");
+	});
+
+	test("an open turn left by a crash becomes a notice once", async () => {
+		const current = tracker();
+		await current.markOpen(SESSION, 3);
+		assert.strictEqual((await stored()).open, 3);
+
+		await current.recoverInterrupted(SESSION);
+		const set = await current.changeSet(SESSION);
+		assert.deepStrictEqual(set.files, []);
+		assert.deepStrictEqual(set.sinceTurn, []);
+		assert.strictEqual(set.notice, "A turn was interrupted before its file changes were recorded; files it changed are not listed here.");
+		assert.strictEqual((await stored()).open, undefined);
+
+		await current.recoverInterrupted(SESSION);
+		assert.deepStrictEqual(await current.changeSet(SESSION), set);
+	});
+
+	test("endTurn clears the open turn so recovery stays quiet", async () => {
+		const current = tracker();
+		const begin = await current.beginTurn();
+		assert.ok(begin, "the turn snapshot must exist");
+		await current.markOpen(SESSION, 1);
+		assert.strictEqual((await stored()).open, 1);
+		await fs.writeFile(file("a.txt"), "agent\n");
+		await current.endTurn(SESSION, 1, begin);
+		assert.strictEqual((await stored()).open, undefined);
+
+		await current.recoverInterrupted(SESSION);
+		const set = await current.changeSet(SESSION);
+		assert.deepStrictEqual(set.files.map(entry => entry.path), ["a.txt"]);
+		assert.strictEqual(set.notice, undefined);
 	});
 });

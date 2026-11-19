@@ -14,6 +14,7 @@ import {
 	type ChatUsage,
 	type HostMessage,
 } from "../shared/protocol";
+import { postMessage } from "./api";
 
 const HOST_MESSAGE_TYPES = new Set([
 	"init",
@@ -33,6 +34,7 @@ const HOST_MESSAGE_TYPES = new Set([
 	"approval",
 	"approvalResolved",
 	"toolResultFull",
+	"partTextFull",
 	"subagent",
 	"activity",
 	"attachmentsAdded",
@@ -91,6 +93,8 @@ export class ChatStore {
 	private readonly messageById = new Map<string, ChatMessage>();
 	private readonly indexById = new Map<string, number>();
 	private readonly liveSubagentRuns = new Map<string, ChatSubagentRun>();
+	private readonly pendingToolResults = new Set<string>();
+	private readonly pendingPartTexts = new Set<string>();
 	private readonly listeners = new Set<() => void>();
 	private versionSeq = 0;
 
@@ -105,6 +109,29 @@ export class ChatStore {
 
 	/** Live state of a running subagent, until its finished part arrives. */
 	subagentRun = (callId: string): ChatSubagentRun | undefined => this.liveSubagentRuns.get(callId);
+
+	/** Asks the host for a full tool result; the webview holds only its preview. */
+	loadToolResult = (messageId: string, callId: string): void => {
+		if (this.pendingToolResults.has(callId)) {
+			return;
+		}
+		this.pendingToolResults.add(callId);
+		postMessage({ type: "loadToolResult", messageId, callId });
+	};
+
+	toolResultPending = (callId: string): boolean => this.pendingToolResults.has(callId);
+
+	/** Asks the host for the full thinking text; the webview holds only its tail. */
+	loadPartText = (messageId: string, index: number): void => {
+		const key = `${messageId}:${index}`;
+		if (this.pendingPartTexts.has(key)) {
+			return;
+		}
+		this.pendingPartTexts.add(key);
+		postMessage({ type: "loadPartText", messageId, index });
+	};
+
+	partTextPending = (messageId: string, index: number): boolean => this.pendingPartTexts.has(`${messageId}:${index}`);
 
 	indexOf = (messageId: string): number | undefined => this.indexById.get(messageId);
 
@@ -286,6 +313,17 @@ export class ChatStore {
 				if (part && part.kind === "toolResult") {
 					part.text = update.text;
 					part.preview = false;
+					this.pendingToolResults.delete(update.callId);
+					this.bump(update.messageId);
+				}
+				return;
+			}
+			case "partTextFull": {
+				const part = this.messageById.get(update.messageId)?.parts[update.index];
+				if (part && (part.kind === "text" || part.kind === "thinking")) {
+					part.text = update.text;
+					part.preview = false;
+					this.pendingPartTexts.delete(`${update.messageId}:${update.index}`);
 					this.bump(update.messageId);
 				}
 				return;
@@ -336,6 +374,8 @@ export class ChatStore {
 		this.messageById.clear();
 		this.indexById.clear();
 		this.versions.clear();
+		this.pendingToolResults.clear();
+		this.pendingPartTexts.clear();
 		this.messages.forEach((message, index) => {
 			this.messageById.set(message.id, message);
 			this.indexById.set(message.id, index);

@@ -14,7 +14,6 @@ interface MessageListProps {
 	store: ChatStore;
 	running: boolean;
 	context: string | undefined;
-	onLoadToolResult: (messageId: string, callId: string) => void;
 }
 
 /** The newest compaction decides where the "summarized" divider goes. */
@@ -31,7 +30,7 @@ function compactionBoundaryId(messages: ChatMessage[]): string | undefined {
 	return undefined;
 }
 
-export function MessageList({ store, running, context, onLoadToolResult }: MessageListProps) {
+export function MessageList({ store, running, context }: MessageListProps) {
 	const scrollerRef = useRef<HTMLDivElement>(null);
 	const observerRef = useRef<ResizeObserver | null>(null);
 	const observedRef = useRef(new Set<Element>());
@@ -227,11 +226,11 @@ export function MessageList({ store, running, context, onLoadToolResult }: Messa
 					running={running}
 					editing={message.id === editingId}
 					compactionBoundary={message.id === boundaryId}
+					isLast={index === store.messages.length - 1}
 					changedFilesSinceTurn={message.id === editingId ? store.filesChangedSince(message.turn) : 0}
 					context={context}
 					store={store}
 					onEdit={onEdit}
-					onLoadToolResult={onLoadToolResult}
 					liveSubagentRun={store.subagentRun}
 				/>
 			</div>,

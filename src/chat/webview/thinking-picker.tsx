@@ -29,7 +29,7 @@ export function ThinkingPicker({ thinking, selected, onSelect }: ThinkingPickerP
 		() => thinking.levels.findIndex(level => level.value === effective),
 		[thinking, effective],
 	);
-	const activeLabel = (selectedIndex >= 0 ? thinking.levels[selectedIndex] : undefined)?.label ?? "Default";
+	const activeLabel = (selectedIndex >= 0 ? thinking.levels[selectedIndex] : undefined)?.label ?? "Thinking";
 	const optionId = (index: number) => `${instanceId}-option-${index}`;
 
 	useEffect(() => {
@@ -105,7 +105,7 @@ export function ThinkingPicker({ thinking, selected, onSelect }: ThinkingPickerP
 				title={selectedIndex >= 0 ? `Thinking: ${thinking.levels[selectedIndex].label}` : "Thinking: Default"}
 				onClick={() => (open ? setOpen(false) : openPopup())}
 			>
-				<span class="picker-trigger-name">Thinking: {activeLabel}</span>
+				<span class="picker-trigger-name">{activeLabel}</span>
 			</button>
 			{open ? (
 				<div

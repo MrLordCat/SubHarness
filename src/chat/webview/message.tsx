@@ -12,6 +12,7 @@ import type { ChatStore } from "./store";
 
 type ToolResultPart = Extract<ChatPart, { kind: "toolResult" }>;
 type ToolCallPart = Extract<ChatPart, { kind: "toolCall" }>;
+type ThinkingPart = Extract<ChatPart, { kind: "thinking" }>;
 type CompactionPart = Extract<ChatPart, { kind: "compaction" }>;
 type ToolRowState = "ok" | "error" | "pending";
 type SubagentStatus = ChatSubagentRun["status"] | "pending";
@@ -23,13 +24,14 @@ export interface MessageItemProps {
 	editing: boolean;
 	/** The latest compaction keeps this message, so the summarized divider sits above it. */
 	compactionBoundary: boolean;
+	/** Retry and other end-of-answer actions only belong to the newest message. */
+	isLast: boolean;
 	/** Files the agent changed at or after this message's turn; used when editing. */
 	changedFilesSinceTurn: number;
 	/** The same context indicator the main composer shows. */
 	context: string | undefined;
 	store: ChatStore;
 	onEdit: (messageId: string) => void;
-	onLoadToolResult: (messageId: string, callId: string) => void;
 	/** Live state of a running subagent; the finished run is a "subagent" part of the message. */
 	liveSubagentRun: (callId: string) => ChatSubagentRun | undefined;
 }
@@ -42,6 +44,7 @@ class MessageItemMemo extends Component<MessageItemProps> {
 			|| next.running !== this.props.running
 			|| next.editing !== this.props.editing
 			|| next.compactionBoundary !== this.props.compactionBoundary
+			|| next.isLast !== this.props.isLast
 			|| next.store !== this.props.store
 			|| (next.editing && (next.changedFilesSinceTurn !== this.props.changedFilesSinceTurn || next.context !== this.props.context));
 	}
@@ -53,7 +56,7 @@ class MessageItemMemo extends Component<MessageItemProps> {
 
 export const MessageItem = MessageItemMemo;
 
-function MessageView({ message, running, editing, compactionBoundary, changedFilesSinceTurn, context, store, onEdit, onLoadToolResult, liveSubagentRun }: Omit<MessageItemProps, "version">) {
+function MessageView({ message, running, editing, compactionBoundary, isLast, changedFilesSinceTurn, context, store, onEdit, liveSubagentRun }: Omit<MessageItemProps, "version">) {
 	const divider = compactionBoundary
 		? <div class="compaction-divider">Earlier messages are summarized for the model</div>
 		: null;
@@ -161,7 +164,7 @@ function MessageView({ message, running, editing, compactionBoundary, changedFil
 								result={results.get(part.callId)}
 								running={running}
 								messageId={message.id}
-								onLoadToolResult={onLoadToolResult}
+								store={store}
 							/>
 						));
 						return unit.parts.length > 1
@@ -173,18 +176,8 @@ function MessageView({ message, running, editing, compactionBoundary, changedFil
 					switch (part.kind) {
 						case "text":
 							return <Markdown key={index} text={part.text} />;
-						case "thinking": {
-							const progress = lastTextLine(part.text);
-							return (
-								<details key={index} class="msg-thinking">
-									<summary>
-										<span class="thinking-label">Thinking</span>
-										{progress ? <span class="thinking-progress" title={progress}>{progress}</span> : null}
-									</summary>
-									<pre>{part.text}</pre>
-								</details>
-							);
-						}
+						case "thinking":
+							return <ThinkingBlock key={index} part={part} index={index} messageId={message.id} store={store} />;
 						case "toolCall":
 							return (
 								<SubagentCard
@@ -195,19 +188,33 @@ function MessageView({ message, running, editing, compactionBoundary, changedFil
 									liveRun={liveSubagentRun(part.callId)}
 									running={running}
 									messageId={message.id}
-									onLoadToolResult={onLoadToolResult}
+									store={store}
 								/>
 							);
 						case "toolResult":
 							return calls.has(part.callId)
 								? null
-								: <ToolResultCard key={index} part={part} messageId={message.id} onLoadToolResult={onLoadToolResult} />;
+								: <ToolResultCard key={index} part={part} messageId={message.id} store={store} />;
 						case "subagent":
 							return null;
 						case "notice":
-							return part.limit
-								? <LimitCard key={index} level={part.level} text={part.text} limit={part.limit} />
-								: <div key={index} class={`msg-notice notice-${part.level}`}>{part.text}</div>;
+							if (part.limit) {
+								return <LimitCard key={index} level={part.level} text={part.text} limit={part.limit} />;
+							}
+							return (
+								<div key={index} class={`msg-notice notice-${part.level}`}>
+									{part.text}
+									{part.retryable && isLast && !running ? (
+										<button
+											type="button"
+											class="msg-notice-retry"
+											onClick={() => postMessage({ type: "retryTurn", messageId: message.id })}
+										>
+											Retry
+										</button>
+									) : null}
+								</div>
+							);
 						case "compaction":
 							return <CompactionCard key={index} part={part} />;
 					}
@@ -252,6 +259,30 @@ function firstTextLine(text: string): string {
 function lastTextLine(text: string): string {
 	const lines = text.split(/\r\n|\r|\n/).map(line => line.trim()).filter(line => line.length > 0);
 	return lines.length > 0 ? lines[lines.length - 1] : "";
+}
+
+function ThinkingBlock({ part, index, messageId, store }: { part: ThinkingPart; index: number; messageId: string; store: ChatStore }) {
+	const [open, setOpen] = useState(false);
+	const [loading, setLoading] = useState(() => part.preview === true && store.partTextPending(messageId, index));
+	useEffect(() => {
+		if (!open || !part.preview) {
+			setLoading(false);
+			return;
+		}
+		store.loadPartText(messageId, index);
+		setLoading(true);
+	}, [open, part.preview, messageId, index, store]);
+	const progress = lastTextLine(part.text);
+	return (
+		<details class="msg-thinking" open={open} onToggle={event => setOpen((event.currentTarget as HTMLDetailsElement).open)}>
+			<summary>
+				<span class="thinking-label">Thinking</span>
+				{progress ? <span class="thinking-progress" title={progress}>{progress}</span> : null}
+			</summary>
+			<pre>{part.text}</pre>
+			{loading && part.preview ? <div class="part-loading">Loading…</div> : null}
+		</details>
+	);
 }
 
 function markdownFirstLine(text: string | undefined): string {
@@ -312,13 +343,13 @@ interface ToolCallProps {
 	result: ToolResultPart | undefined;
 	running: boolean;
 	messageId: string;
-	onLoadToolResult: (messageId: string, callId: string) => void;
+	store: ChatStore;
 }
 
 interface ToolResultProps {
 	part: ToolResultPart;
 	messageId: string;
-	onLoadToolResult: (messageId: string, callId: string) => void;
+	store: ChatStore;
 }
 
 interface ToolRowProps {
@@ -369,7 +400,7 @@ function prettyInput(input: unknown): string {
 	}
 }
 
-function ToolCallCard({ name, input, result, running, messageId, onLoadToolResult }: ToolCallProps) {
+function ToolCallCard({ name, input, result, running, messageId, store }: ToolCallProps) {
 	const described = describeToolCall(name, input);
 	const state: ToolRowState = result ? (result.isError ? "error" : "ok") : "pending";
 	const detail = state === "error" ? firstTextLine(result?.text ?? "") : described.detail;
@@ -381,12 +412,12 @@ function ToolCallCard({ name, input, result, running, messageId, onLoadToolResul
 		<ToolRow state={state} running={running} title={title} detail={detail || undefined} summary={summarizeInput(input)}>
 			<div class="tool-row-label">Input</div>
 			<pre class="tool-input">{prettyInput(input)}</pre>
-			{result ? <ToolResultDetails part={result} messageId={messageId} onLoadToolResult={onLoadToolResult} openByDefault /> : null}
+			{result ? <ToolResultDetails part={result} messageId={messageId} store={store} openByDefault /> : null}
 		</ToolRow>
 	);
 }
 
-function ToolResultCard({ part, messageId, onLoadToolResult }: ToolResultProps) {
+function ToolResultCard({ part, messageId, store }: ToolResultProps) {
 	const first = firstTextLine(part.text);
 	return (
 		<ToolRow
@@ -396,26 +427,32 @@ function ToolResultCard({ part, messageId, onLoadToolResult }: ToolResultProps) 
 			detail={part.isError ? first : undefined}
 			summary={first || "Tool output"}
 		>
-			<ToolResultDetails part={part} messageId={messageId} onLoadToolResult={onLoadToolResult} openByDefault />
+			<ToolResultDetails part={part} messageId={messageId} store={store} openByDefault />
 		</ToolRow>
 	);
 }
 
-function ToolResultDetails({ part, messageId, onLoadToolResult, report, openByDefault }: ToolResultProps & { report?: boolean; openByDefault?: boolean }) {
+function ToolResultDetails({ part, messageId, store, report, openByDefault }: ToolResultProps & { report?: boolean; openByDefault?: boolean }) {
 	const markdown = report === true && !part.isError;
+	const [open, setOpen] = useState(markdown || openByDefault === true);
+	const [loading, setLoading] = useState(() => part.preview === true && store.toolResultPending(part.callId));
+	useEffect(() => {
+		if (!open || !part.preview) {
+			setLoading(false);
+			return;
+		}
+		store.loadToolResult(messageId, part.callId);
+		setLoading(true);
+	}, [open, part.preview, messageId, part.callId, store]);
 	return (
-		<details class={`tool-result${part.isError ? " tool-result-error" : ""}`} open={markdown || openByDefault === true}>
+		<details
+			class={`tool-result${part.isError ? " tool-result-error" : ""}`}
+			open={open}
+			onToggle={event => setOpen((event.currentTarget as HTMLDetailsElement).open)}
+		>
 			<summary>{part.isError ? "Error output" : markdown ? "Report" : "Output"}{part.preview ? " (preview)" : ""}</summary>
 			{markdown ? <div class="tool-report"><Markdown text={part.text} /></div> : <pre class="tool-output">{part.text}</pre>}
-			{part.preview ? (
-				<button
-					type="button"
-					class="tool-full"
-					onClick={() => onLoadToolResult(messageId, part.callId)}
-				>
-					Show full output
-				</button>
-			) : null}
+			{loading && part.preview ? <div class="part-loading">Loading full output…</div> : null}
 		</details>
 	);
 }
@@ -565,10 +602,10 @@ interface SubagentCardProps {
 	liveRun: ChatSubagentRun | undefined;
 	running: boolean;
 	messageId: string;
-	onLoadToolResult: (messageId: string, callId: string) => void;
+	store: ChatStore;
 }
 
-function SubagentCard({ input, result, part, liveRun, running, messageId, onLoadToolResult }: SubagentCardProps) {
+function SubagentCard({ input, result, part, liveRun, running, messageId, store }: SubagentCardProps) {
 	const [open, setOpen] = useState(false);
 	const parsed = readSubagentInput(input);
 	const run = part ?? liveRun;
@@ -610,7 +647,7 @@ function SubagentCard({ input, result, part, liveRun, running, messageId, onLoad
 					<div class="subagent-section">
 						<div class="subagent-section-title">Report</div>
 						{result
-							? <ToolResultDetails part={result} messageId={messageId} onLoadToolResult={onLoadToolResult} report />
+							? <ToolResultDetails part={result} messageId={messageId} store={store} report />
 							: <div class="subagent-empty">No report yet</div>}
 					</div>
 				</div>

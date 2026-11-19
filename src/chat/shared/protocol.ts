@@ -7,15 +7,25 @@ export interface ChatUsage {
 	cachedTokens?: number;
 }
 
+export interface ChatUsageTotals {
+	requests: number;
+	promptTokens: number;
+	cachedTokens: number;
+	completionTokens: number;
+	cacheReported: number;
+}
+
 export type ChatTextKind = "text" | "thinking";
 
 export type ChatPart =
-	| { kind: "text"; text: string }
-	| { kind: "thinking"; text: string }
+	/** Only the tail of a long thinking text; the full text loads on request. */
+	| { kind: "text"; text: string; preview?: boolean }
+	| { kind: "thinking"; text: string; preview?: boolean }
 	| { kind: "toolCall"; callId: string; name: string; input: unknown }
 	/** truncated: the model received a cut result; preview: the webview holds only the first WEBVIEW_TOOL_RESULT_PREVIEW_CHARS. */
 	| { kind: "toolResult"; callId: string; text: string; isError?: boolean; truncated?: boolean; preview?: boolean }
-	| { kind: "notice"; level: "info" | "warning" | "error"; text: string; limit?: ChatLimitInfo }
+	/** Shows Retry when the notice is in the last answer. */
+	| { kind: "notice"; level: "info" | "warning" | "error"; text: string; limit?: ChatLimitInfo; retryable?: boolean }
 	/** Messages before keepFromMessageId reach the model only as this summary. */
 	| {
 		kind: "compaction"; summary: string; keepFromMessageId: string; summarizedMessages: number;
@@ -76,6 +86,8 @@ export interface ChatMessage {
 	modelId?: string;
 	parts: ChatPart[];
 	usage?: ChatUsage;
+	/** Sums over every request of this answer; the last request alone is `usage`. */
+	usageTotals?: ChatUsageTotals;
 	/** Host context sent with this user message (date, active file); kept so every later request repeats it byte for byte. */
 	hostContext?: string;
 	/** Display info of the attached files and selections; never their text. */
@@ -221,13 +233,14 @@ export type HostMessage =
 	| { type: "messageAdded"; message: ChatMessage }
 	| { type: "partAdded"; messageId: string; part: ChatStructuredPart }
 	| { type: "textDelta"; messageId: string; kind: ChatTextKind; text: string }
-	| { type: "usage"; messageId: string; usage: ChatUsage }
+	| { type: "usage"; messageId: string; usage: ChatUsage; totals?: ChatUsageTotals }
 	/** The message and everything after it were removed (an earlier message was edited). */
 	| { type: "truncated"; messageId: string }
 	| { type: "run"; run: ChatRunState }
 	| { type: "approval"; request: ChatApprovalRequest }
 	| { type: "approvalResolved"; id: string; allowed: boolean }
 	| { type: "toolResultFull"; messageId: string; callId: string; text: string }
+	| { type: "partTextFull"; messageId: string; index: number; text: string }
 	/** Live state of a running subagent; the finished run arrives as a "subagent" part. */
 	| { type: "subagent"; messageId: string; run: ChatSubagentRun }
 	/** Chats other than the shown one that run, wait for an approval or finished unseen. */
@@ -250,6 +263,8 @@ export type WebviewMessage =
 	 * attachments: the attachments to send with the edited text; absent keeps the original ones.
 	 */
 	| { type: "editMessage"; messageId: string; text: string; undoChanges?: boolean; attachments?: ChatAttachment[] }
+	/** Sends the user message of the failed answer (messageId) again, keeping its text and attachments. */
+	| { type: "retryTurn"; messageId: string }
 	/** Without ids the whole change set is kept or undone. */
 	| { type: "keepChanges"; ids?: string[] }
 	| { type: "undoChanges"; ids?: string[] }
@@ -266,10 +281,14 @@ export type WebviewMessage =
 	| { type: "listSessions" }
 	| { type: "openSession"; sessionId: string }
 	| { type: "deleteSession"; sessionId: string }
-	| { type: "loadToolResult"; messageId: string; callId: string };
+	| { type: "loadToolResult"; messageId: string; callId: string }
+	| { type: "loadPartText"; messageId: string; index: number };
 
 /** Tool results longer than this reach the webview as a preview; the full text is loaded on request. */
-export const WEBVIEW_TOOL_RESULT_PREVIEW_CHARS = 4_000;
+export const WEBVIEW_TOOL_RESULT_PREVIEW_CHARS = 600;
+
+/** Thinking longer than this reaches the webview as its tail; the full text is loaded on request. */
+export const WEBVIEW_THINKING_PREVIEW_CHARS = 1_000;
 
 /** Streaming text joins the last part when it has the same kind, otherwise it starts a new part. */
 export function appendChatText(parts: ChatPart[], kind: ChatTextKind, text: string): void {
@@ -286,7 +305,16 @@ export function applyHostUpdate(messages: ChatMessage[], update: HostMessage): v
 		case "messageAdded": messages.push(update.message); break;
 		case "partAdded": find(update.messageId)?.parts.push(update.part); break;
 		case "textDelta": { const message = find(update.messageId); if (message) { appendChatText(message.parts, update.kind, update.text); } break; }
-		case "usage": { const message = find(update.messageId); if (message) { message.usage = update.usage; } break; }
+		case "usage": {
+			const message = find(update.messageId);
+			if (message) {
+				message.usage = update.usage;
+				if (update.totals) {
+					message.usageTotals = update.totals;
+				}
+			}
+			break;
+		}
 		case "truncated": { const index = messages.findIndex(message => message.id === update.messageId); if (index >= 0) { messages.splice(index); } break; }
 		default: break;
 	}

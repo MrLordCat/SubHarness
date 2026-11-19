@@ -3,7 +3,7 @@ import * as vscode from "vscode";
 import { MAX_TOOL_RESULT_CHARS, runAgentTurn, type AgentTurnSink, type ChatToolExecutor } from "../chat/agent-loop";
 import { toLanguageModelMessages } from "../chat/lm-messages";
 import { groupModels } from "../chat/shared/model-groups";
-import type { ChatMessage, ChatPart, ChatStructuredPart, ChatUsage } from "../chat/shared/protocol";
+import type { ChatMessage, ChatPart, ChatStructuredPart, ChatUsage, ChatUsageTotals } from "../chat/shared/protocol";
 import { limitSignalPart } from "../providers/limit-signal";
 
 const none: vscode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) };
@@ -55,24 +55,30 @@ function fakeBackend(rounds: Round[]): { requests: Request[]; provider: Pick<vsc
 	};
 }
 
-function recorder(): { sink: AgentTurnSink; events: string[]; parts: ChatStructuredPart[]; usage: ChatUsage[] } {
-	const events: string[] = [], parts: ChatStructuredPart[] = [], usage: ChatUsage[] = [];
+function recorder(): { sink: AgentTurnSink; events: string[]; parts: ChatStructuredPart[]; usage: ChatUsage[]; totals: ChatUsageTotals[] } {
+	const events: string[] = [], parts: ChatStructuredPart[] = [], usage: ChatUsage[] = [], totals: ChatUsageTotals[] = [];
 	return {
 		events,
 		parts,
 		usage,
+		totals,
 		sink: {
 			text: (kind, text) => events.push(`text:${kind}:${text}`),
 			part: part => {
 				parts.push(part);
 				events.push(part.kind === "toolResult" ? `part:toolResult:${part.callId}:${part.isError ? "error" : "ok"}` : `part:${part.kind}`);
 			},
-			usage: value => {
+			usage: (value, total) => {
 				usage.push(value);
+				totals.push(total);
 				events.push("usage");
 			},
 		},
 	};
+}
+
+function usagePart(payload: Record<string, unknown>): vscode.LanguageModelDataPart {
+	return new vscode.LanguageModelDataPart(new TextEncoder().encode(JSON.stringify(payload)), "usage");
 }
 
 function tools(handler: ChatToolExecutor["invoke"]): ChatToolExecutor {
@@ -224,6 +230,42 @@ suite("chat agent loop", () => {
 		const body = resultPart.content[0];
 		assert.ok(body instanceof vscode.LanguageModelTextPart);
 		assert.strictEqual(body.value, "file body");
+	});
+
+	test("sums usage over rounds and replaces incremental reports within a round", async () => {
+		const fake = fakeBackend([
+			progress => {
+				progress.report(usagePart({ prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 }));
+				progress.report(new vscode.LanguageModelToolCallPart("call-1", "read", { path: "a.txt" }));
+				progress.report(usagePart({ prompt_tokens: 1000, completion_tokens: 50, total_tokens: 1050, prompt_tokens_details: { cached_tokens: 800 } }));
+			},
+			progress => {
+				progress.report(usagePart({ prompt_tokens: 1200, completion_tokens: 60, total_tokens: 1260, prompt_tokens_details: { cached_tokens: 1100 } }));
+				progress.report(new vscode.LanguageModelTextPart("Done."));
+			},
+		]);
+		const { sink, usage, totals } = recorder();
+		const result = await runAgentTurn({
+			backend: fake.provider,
+			model,
+			history: [chatMessage("user", [{ kind: "text", text: "Go" }])],
+			conversationId: "chat-usage",
+			turn: 1,
+			tools: tools(async () => ({ text: "file body", isError: false })),
+			sink,
+			token: none,
+		});
+		assert.deepStrictEqual(result, { rounds: 2, stopReason: "done" });
+		assert.deepStrictEqual(usage, [
+			{ promptTokens: 100, completionTokens: 5, totalTokens: 105 },
+			{ promptTokens: 1000, completionTokens: 50, totalTokens: 1050, cachedTokens: 800 },
+			{ promptTokens: 1200, completionTokens: 60, totalTokens: 1260, cachedTokens: 1100 },
+		]);
+		assert.deepStrictEqual(totals, [
+			{ requests: 1, promptTokens: 100, cachedTokens: 0, completionTokens: 5, cacheReported: 0 },
+			{ requests: 1, promptTokens: 1000, cachedTokens: 800, completionTokens: 50, cacheReported: 1 },
+			{ requests: 2, promptTokens: 2200, cachedTokens: 1900, completionTokens: 110, cacheReported: 2 },
+		]);
 	});
 
 	test("turns a limit signal into one notice and swallows the repeated text", async () => {

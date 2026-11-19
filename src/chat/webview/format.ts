@@ -1,4 +1,4 @@
-import type { ChatModelGroup, ChatProviderQuota, ChatUsage } from "../shared/protocol";
+import type { ChatMessage, ChatModelGroup, ChatProviderQuota, ChatUsage } from "../shared/protocol";
 
 /** 312000 → "312k", 1_200_000 → "1.2M"; used wherever token counts are shown. */
 export function formatTokens(value: number): string {
@@ -22,6 +22,81 @@ export function contextIndicator(latestUsage: ChatUsage | undefined, models: Cha
 		return undefined;
 	}
 	return `${formatTokens(promptTokens)} / ${formatTokens(model.maxInputTokens)}`;
+}
+
+export interface ModelCacheStats {
+	modelId: string;
+	requests: number;
+	promptTokens: number;
+	cachedTokens: number;
+	cacheReported: number;
+	lastHitPercent?: number;
+}
+
+/** Cache hits of the selected model over its turns in this chat, newest streak only. */
+export function modelCacheStats(messages: readonly ChatMessage[], modelId: string | undefined): ModelCacheStats | undefined {
+	if (modelId === undefined) {
+		return undefined;
+	}
+	const stats: ModelCacheStats = { modelId, requests: 0, promptTokens: 0, cachedTokens: 0, cacheReported: 0 };
+	let included = 0;
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (message.role !== "assistant") {
+			continue;
+		}
+		if (message.modelId !== undefined && message.modelId !== modelId) {
+			break;
+		}
+		if (message.modelId !== modelId) {
+			continue;
+		}
+		const usage = message.usage;
+		if (included === 0 && usage?.promptTokens !== undefined && usage.promptTokens > 0 && usage.cachedTokens !== undefined) {
+			stats.lastHitPercent = Math.round(usage.cachedTokens / usage.promptTokens * 100);
+		}
+		included += 1;
+		if (message.usageTotals) {
+			stats.requests += message.usageTotals.requests;
+			stats.promptTokens += message.usageTotals.promptTokens;
+			stats.cachedTokens += message.usageTotals.cachedTokens;
+			stats.cacheReported += message.usageTotals.cacheReported;
+		} else if (usage?.promptTokens !== undefined) {
+			stats.requests += 1;
+			stats.promptTokens += usage.promptTokens;
+			stats.cachedTokens += usage.cachedTokens ?? 0;
+			if (usage.cachedTokens !== undefined) {
+				stats.cacheReported += 1;
+			}
+		}
+	}
+	if (included === 0 || stats.promptTokens === 0) {
+		return undefined;
+	}
+	return stats;
+}
+
+export interface CacheHitLabel {
+	text: string;
+	title: string;
+	level: "normal" | "low";
+}
+
+export function formatCacheHit(stats: ModelCacheStats): CacheHitLabel {
+	if (stats.cacheReported === 0) {
+		return {
+			text: "cache n/a",
+			title: "The provider does not report cached tokens for this model.",
+			level: "normal",
+		};
+	}
+	const percent = Math.round(stats.cachedTokens / stats.promptTokens * 100);
+	const last = stats.lastHitPercent === undefined ? "" : ` Last request: ${stats.lastHitPercent}%.`;
+	return {
+		text: `cache ${percent}%`,
+		title: `Prompt cache hits for this model since it took over this chat: ${percent}% (${formatTokens(stats.cachedTokens)} of ${formatTokens(stats.promptTokens)} prompt tokens, ${stats.requests} ${stats.requests === 1 ? "request" : "requests"}).${last}`,
+		level: percent < 30 && stats.requests >= 3 ? "low" : "normal",
+	};
 }
 
 function formatScaled(value: number): string {
