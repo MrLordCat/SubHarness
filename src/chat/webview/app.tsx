@@ -8,6 +8,7 @@ import { Composer } from "./composer";
 import { useComposerActions } from "./composer-actions";
 import { contextIndicator, formatCacheHit, modelCacheStats } from "./format";
 import { MessageList } from "./message-list";
+import { QueuedMessages } from "./queued-messages";
 import type { ChatStore } from "./store";
 
 export function App({ store }: { store: ChatStore }) {
@@ -37,6 +38,7 @@ export function App({ store }: { store: ChatStore }) {
 	const onDeleteSession = useCallback((sessionId: string) => postMessage({ type: "deleteSession", sessionId }), []);
 	const onShowActivity = useCallback(() => setBadgeOpens(count => count + 1), []);
 	const onNewChat = useCallback(() => postMessage({ type: "newChat" }), []);
+	const onRemoveQueued = useCallback((id: string) => postMessage({ type: "removeQueued", id }), []);
 
 	const title = store.session?.title ?? "Chat";
 	const context = contextIndicator(store.latestUsage, store.models, store.selectedModelId);
@@ -80,6 +82,7 @@ export function App({ store }: { store: ChatStore }) {
 					))}
 				</div>
 			) : null}
+			<QueuedMessages queued={store.queued} onRemove={onRemoveQueued} />
 			<Composer
 				run={store.run}
 				models={store.models}
@@ -90,6 +93,7 @@ export function App({ store }: { store: ChatStore }) {
 				quota={store.quota}
 				context={context}
 				attachments={store.pendingAttachments}
+				draft={store.draftRequest}
 				onSend={onSend}
 				onStop={onStop}
 				onSelectModel={onSelectModel}

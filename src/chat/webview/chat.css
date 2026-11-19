@@ -1891,6 +1891,61 @@ body {
 	cursor: default;
 }
 
+.queued-messages {
+	flex: 0 0 auto;
+	margin: 6px 10px 0;
+	padding: 4px 8px;
+	border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	border-radius: 6px;
+	background: var(--vscode-editorWidget-background, var(--vscode-input-background));
+	font-size: 12px;
+}
+
+.queued-messages-head {
+	padding: 1px 0 3px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.queued-message {
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+	padding: 2px 0;
+}
+
+.queued-message-text {
+	display: -webkit-box;
+	flex: 1 1 auto;
+	min-width: 0;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.queued-message-files {
+	flex: 0 0 auto;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.queued-message-remove {
+	flex: 0 0 auto;
+	padding: 0 4px;
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-family: inherit;
+	font-size: inherit;
+	cursor: pointer;
+}
+
+.queued-message-remove:hover {
+	color: var(--vscode-errorForeground);
+}
+
 .changes-panel {
 	flex: 0 0 auto;
 	margin: 6px 10px 0;
@@ -2180,6 +2235,7 @@ body {
 .attach-button:focus-visible,
 .attachment-chip-open:focus-visible,
 .attachment-chip-remove:focus-visible,
+.queued-message-remove:focus-visible,
 .approval-allow:focus-visible,
 .approval-deny:focus-visible,
 .changes-toggle:focus-visible,

@@ -17,6 +17,7 @@ import type {
 	ChatMessage,
 	ChatPart,
 	ChatProviderQuota,
+	ChatQueuedMessage,
 	ChatRunState,
 	ChatSessionActivity,
 	ChatSessionActivityState,
@@ -125,6 +126,8 @@ interface SessionRuntime {
 	approvals: Map<string, { request: ChatApprovalRequest; settle: (allowed: boolean) => void }>;
 	/** A turn ended while this chat was not shown. */
 	finished: boolean;
+	/** Messages sent while the chat worked; each goes out after the current tool round. */
+	queued: ChatQueuedMessage[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -197,6 +200,22 @@ function sameAttachmentIds(left: readonly ChatAttachment[], right: readonly Chat
 	return left.every(attachment => ids.has(attachment.id));
 }
 
+/** The queued attachments in order, without repeats, or undefined when there are none. */
+function mergeQueuedAttachments(messages: readonly ChatQueuedMessage[]): ChatAttachment[] | undefined {
+	const ids = new Set<string>();
+	const merged: ChatAttachment[] = [];
+	for (const message of messages) {
+		for (const attachment of message.attachments ?? []) {
+			if (ids.has(attachment.id)) {
+				continue;
+			}
+			ids.add(attachment.id);
+			merged.push(attachment);
+		}
+	}
+	return merged.length > 0 ? merged : undefined;
+}
+
 function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 	if (!isRecord(value) || typeof value.type !== "string") {
 		return undefined;
@@ -210,6 +229,7 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			const attachments = asAttachmentList(value.attachments, SEND_ATTACHMENT_LIMIT, true);
 			return attachments ? { type: "send", text: value.text, attachments } : { type: "send", text: value.text };
 		}
+		case "removeQueued": return typeof value.id === "string" ? { type: "removeQueued", id: value.id } : undefined;
 		case "pickAttachments": return { type: "pickAttachments" };
 		case "addAttachments":
 			return Array.isArray(value.uris) && value.uris.length <= ADD_ATTACHMENT_LIMIT && value.uris.every(uri => typeof uri === "string")
@@ -489,7 +509,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 
 	/** A chat that still works stays in memory; an idle untouched one would only clutter the history. */
 	private async _leave(runtime: SessionRuntime): Promise<void> {
-		if (runtime.running || runtime.busy || runtime.approvals.size > 0) {
+		if (runtime.running || runtime.busy || runtime.approvals.size > 0 || runtime.queued.length > 0) {
 			return;
 		}
 		const sessionId = runtime.meta.id;
@@ -530,6 +550,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				running.timer = undefined;
 			}
 			runtime.running = undefined;
+			runtime.queued = [];
 		}
 		this._modelChangeSubscription.dispose();
 		this._quotaSubscription?.dispose();
@@ -553,6 +574,15 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "send":
 				await this._send(message.text, message.attachments);
 				return;
+			case "removeQueued": {
+				const runtime = this._active();
+				const queued = runtime?.queued.filter(entry => entry.id !== message.id);
+				if (runtime && queued && queued.length !== runtime.queued.length) {
+					runtime.queued = queued;
+					this._emit(runtime, { type: "queued", queued: [...runtime.queued] });
+				}
+				return;
+			}
 			case "pickAttachments": {
 				const picked = await this._deps.attachments?.pick() ?? [];
 				if (picked.length) {
@@ -641,7 +671,17 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 		await this._ensureSession();
 		const runtime = this._active();
-		if (!runtime || runtime.busy) {
+		if (!runtime) {
+			return;
+		}
+		await this._sendTo(runtime, text, attachments);
+	}
+
+	/** A message sent while the chat works waits for the current tool round instead of starting a turn. */
+	private async _sendTo(runtime: SessionRuntime, text: string, attachments?: ChatAttachment[]): Promise<void> {
+		if (runtime.busy || runtime.running) {
+			runtime.queued.push({ id: randomUUID(), text, ...(attachments?.length ? { attachments } : {}) });
+			this._emit(runtime, { type: "queued", queued: [...runtime.queued] });
 			return;
 		}
 		runtime.busy = true;
@@ -649,7 +689,25 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			await this._sendTurn(runtime, text, attachments);
 		} finally {
 			runtime.busy = false;
+			this._deliverQueued(runtime);
 		}
+	}
+
+	/** Sends what was queued during the turn just gone; the chat may be working in the background. */
+	private _deliverQueued(runtime: SessionRuntime): void {
+		if (this._disposed || runtime.busy || runtime.running || runtime.queued.length === 0) {
+			return;
+		}
+		if (this._runtimes.get(runtime.meta.id) !== runtime) {
+			return;
+		}
+		const taken = runtime.queued;
+		runtime.queued = [];
+		this._emit(runtime, { type: "queued", queued: [] });
+		const text = taken.map(message => message.text).join("\n\n");
+		void this._sendTo(runtime, text, mergeQueuedAttachments(taken)).catch(error => {
+			this._log("chat.queue.deliver_failed", { message: errorMessage(error) });
+		});
 	}
 
 	private async _resolveChanges(action: "keep" | "undo", ids: readonly string[] | undefined): Promise<void> {
@@ -672,6 +730,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			await this._refreshChanges(runtime.meta.id);
 		} finally {
 			runtime.busy = false;
+			this._deliverQueued(runtime);
 		}
 	}
 
@@ -742,6 +801,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			}
 		} finally {
 			runtime.busy = false;
+			this._deliverQueued(runtime);
 		}
 	}
 
@@ -961,6 +1021,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				system,
 				initialParts,
 				modelOptions: thinking ? { reasoningEffort: thinking } : undefined,
+				shouldYield: () => runtime.queued.length > 0,
 			});
 		} catch (error) {
 			this._flushDelta(running);
@@ -1191,15 +1252,28 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	}
 
 	private _stop(): void {
-		const running = this._active()?.running;
-		if (!running) {
+		const runtime = this._active();
+		if (!runtime) {
 			return;
 		}
-		if (running.timer) {
-			clearTimeout(running.timer);
-			running.timer = undefined;
+		const running = runtime.running;
+		if (running) {
+			if (running.timer) {
+				clearTimeout(running.timer);
+				running.timer = undefined;
+			}
+			running.cts.cancel();
 		}
-		running.cts.cancel();
+		if (runtime.queued.length > 0) {
+			const taken = runtime.queued;
+			runtime.queued = [];
+			this._emit(runtime, { type: "queued", queued: [] });
+			this._emit(runtime, {
+				type: "restoreDraft",
+				text: taken.map(message => message.text).join("\n\n"),
+				attachments: mergeQueuedAttachments(taken) ?? [],
+			});
+		}
 	}
 
 	/** Shows an approval card in the chat's webviews; Stop or a closed controller counts as a denial. */
@@ -1445,6 +1519,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			completion: Promise.resolve(),
 			approvals: new Map(),
 			finished: false,
+			queued: [],
 		};
 		this._runtimes.set(meta.id, runtime);
 		return runtime;
@@ -1493,6 +1568,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			selectedThinking: this._thinkingFor(this._selectedModelId),
 			quota: this._quota(),
 			activity: this._activity(),
+			queued: [...runtime.queued],
 		};
 	}
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.21.24 (development patch) - 2026-11-19
+
+- Added: you can write to the bridge chat while the agent works. Send queues
+  the message above the input and the agent reads it after the tool calls it is
+  running now; several queued messages go out together and can be removed
+  before that. Stop stays a separate button and puts queued messages back into
+  the input.
+
 ## 1.21.23 (development patch) - 2026-11-19
 
 - Changed: the bridge chat's changed-files list updates after every tool call

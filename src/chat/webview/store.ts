@@ -6,6 +6,7 @@ import {
 	type ChatMessage,
 	type ChatModelGroup,
 	type ChatProviderQuota,
+	type ChatQueuedMessage,
 	type ChatRunState,
 	type ChatSessionActivity,
 	type ChatSessionMeta,
@@ -38,6 +39,8 @@ const HOST_MESSAGE_TYPES = new Set([
 	"subagent",
 	"activity",
 	"attachmentsAdded",
+	"queued",
+	"restoreDraft",
 ]);
 
 const MAX_PENDING_ATTACHMENTS = 20;
@@ -64,6 +67,23 @@ function mergeAttachments(current: readonly ChatAttachment[], added: readonly Ch
 	return next;
 }
 
+/** Appends attachments with unseen ids in order, up to the cap. */
+function mergeAttachmentsById(current: readonly ChatAttachment[], added: readonly ChatAttachment[]): ChatAttachment[] {
+	const ids = new Set(current.map(attachment => attachment.id));
+	const next = current.slice(0, MAX_PENDING_ATTACHMENTS);
+	for (const attachment of added) {
+		if (next.length >= MAX_PENDING_ATTACHMENTS) {
+			break;
+		}
+		if (ids.has(attachment.id)) {
+			continue;
+		}
+		ids.add(attachment.id);
+		next.push(attachment);
+	}
+	return next;
+}
+
 /** Webview-side chat state shared by the Preact tree; every host update bumps one message version. */
 export class ChatStore {
 	session: ChatSessionMeta | undefined;
@@ -81,6 +101,10 @@ export class ChatStore {
 	selectedThinking: string | undefined;
 	quota: ChatProviderQuota[] = [];
 	activity: ChatSessionActivity[] = [];
+	/** Messages sent while the agent works; they go out after the current tool round. */
+	queued: ChatQueuedMessage[] = [];
+	/** Text the composer should take over, e.g. what Stop took back from the queue. */
+	draftRequest: { text: string; seq: number } | undefined;
 	/** Attachments shown in the composer; they are sent with the next message and survive a chat switch. */
 	pendingAttachments: ChatAttachment[] = [];
 	/** The user message being edited; the composer shows and changes its attachments. */
@@ -97,6 +121,7 @@ export class ChatStore {
 	private readonly pendingPartTexts = new Set<string>();
 	private readonly listeners = new Set<() => void>();
 	private versionSeq = 0;
+	private draftSeq = 0;
 
 	subscribe = (listener: () => void): (() => void) => {
 		this.listeners.add(listener);
@@ -252,6 +277,7 @@ export class ChatStore {
 				this.changes = update.changes;
 				this.selectedModelId = update.selectedModelId;
 				this.run = update.run;
+				this.queued = update.queued ?? [];
 				this.editing = undefined;
 				this.liveSubagentRuns.clear();
 				this.rebuildIndexes();
@@ -271,6 +297,14 @@ export class ChatStore {
 				return;
 			case "activity":
 				this.activity = update.activity;
+				return;
+			case "queued":
+				this.queued = update.queued;
+				return;
+			case "restoreDraft":
+				this.pendingAttachments = mergeAttachmentsById(this.pendingAttachments, update.attachments);
+				this.draftSeq += 1;
+				this.draftRequest = { text: update.text, seq: this.draftSeq };
 				return;
 			case "session":
 				this.session = update.session;

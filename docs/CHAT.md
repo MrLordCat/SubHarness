@@ -11,6 +11,10 @@ tab show the same chat.
 ## Writing a message
 
 - **Enter** sends, **Shift+Enter** adds a line.
+- You can write while the agent works. **Send** queues the message above the
+  input, and the agent reads it after the tool calls it is running now. Several
+  queued messages go out together; **×** removes one. **Stop** ends the answer
+  and puts the queued messages back into the input.
 - The model picker groups models by provider and has a search box.
 - **Thinking** appears for models with reasoning levels. The choice is
   remembered per model.

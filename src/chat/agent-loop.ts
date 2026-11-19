@@ -29,6 +29,8 @@ export interface AgentTurnRequest {
 	system?: string;
 	/** Parts the turn's assistant message already holds, e.g. a compaction made before the first request. */
 	initialParts?: readonly ChatPart[];
+	/** True when the user queued a message; the turn ends after the current tool round. */
+	shouldYield?: () => boolean;
 }
 
 export const MAX_TOOL_RESULT_CHARS = 200_000;
@@ -109,7 +111,7 @@ function thinkingText(part: vscode.LanguageModelResponsePart): string {
 	return "";
 }
 
-export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds: number; stopReason: "done" | "maxRounds" }> {
+export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds: number; stopReason: "done" | "maxRounds" | "yielded" }> {
 	const maxRounds = request.maxRounds ?? DEFAULT_MAX_ROUNDS;
 	const parts: ChatPart[] = [...(request.initialParts ?? [])];
 	const assistant: ChatMessage = { id: "agent-message", role: "assistant", turn: request.turn, createdAt: Date.now(), parts };
@@ -201,6 +203,9 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 		}
 		if (request.token.isCancellationRequested) {
 			throw new vscode.CancellationError();
+		}
+		if (request.shouldYield?.()) {
+			return { rounds: round, stopReason: "yielded" };
 		}
 	}
 	const notice: ChatStructuredPart = { kind: "notice", level: "warning", text: `The turn stopped after ${maxRounds} tool rounds.` };

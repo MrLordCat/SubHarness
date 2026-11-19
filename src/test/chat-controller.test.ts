@@ -542,6 +542,150 @@ suite("chat controller", () => {
 		assert.strictEqual(current.webview.ofType("run").at(-1)?.run.running, false);
 	});
 
+	test("a message sent while a turn runs waits for the round and starts the next turn", async () => {
+		const gate = deferred();
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new vscode.LanguageModelToolCallPart("call-1", "llamacpp_probe", {}));
+				await gate.promise;
+			},
+			progress => progress.report(new vscode.LanguageModelTextPart("answer to the queued message")),
+			progress => progress.report(new vscode.LanguageModelTextPart("unexpected extra answer")),
+		]);
+		const current = createHarness(root, backend, fakeTools(() => ({ text: "tool body", isError: false })).executor);
+		harness = current;
+		current.webview.receive({ type: "send", text: "first" });
+		await waitFor(() => current.webview.ofType("partAdded").some(message => message.part.kind === "toolCall"), "tool call");
+		current.webview.receive({ type: "send", text: "follow up" });
+		await waitFor(() => current.webview.ofType("queued").some(message => message.queued.length === 1), "queued message");
+		assert.deepStrictEqual(current.webview.ofType("queued").at(-1)?.queued.map(message => message.text), ["follow up"]);
+		assert.strictEqual(current.webview.ofType("messageAdded").filter(message => message.message.role === "user").length, 1);
+		assert.strictEqual(backend.requests.length, 1);
+
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "both turns");
+		assert.strictEqual(backend.requests.length, 2);
+		const users = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user");
+		assert.deepStrictEqual(users.map(message => message.parts), [
+			[{ kind: "text", text: "first" }],
+			[{ kind: "text", text: "follow up" }],
+		]);
+		const lastRequest = backend.requests.at(-1);
+		assert.ok(lastRequest);
+		assert.strictEqual(lastRequest.messages.length, 4);
+		assert.strictEqual(messageText(lastRequest.messages[3]), "follow up");
+	});
+
+	test("two queued messages are delivered as one user message", async () => {
+		const gate = deferred();
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new vscode.LanguageModelToolCallPart("call-1", "llamacpp_probe", {}));
+				await gate.promise;
+			},
+			progress => progress.report(new vscode.LanguageModelTextPart("combined answer")),
+		]);
+		const current = createHarness(root, backend, fakeTools(() => ({ text: "tool body", isError: false })).executor);
+		harness = current;
+		current.webview.receive({ type: "send", text: "first" });
+		await waitFor(() => current.webview.ofType("partAdded").some(message => message.part.kind === "toolCall"), "tool call");
+		current.webview.receive({ type: "send", text: "one" });
+		current.webview.receive({ type: "send", text: "two" });
+		await waitFor(() => current.webview.ofType("queued").some(message => message.queued.length === 2), "two queued messages");
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "both turns");
+
+		const users = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user");
+		assert.deepStrictEqual(users.map(message => message.parts), [
+			[{ kind: "text", text: "first" }],
+			[{ kind: "text", text: "one\n\ntwo" }],
+		]);
+		const lastRequest = backend.requests.at(-1);
+		assert.ok(lastRequest);
+		assert.strictEqual(lastRequest.messages.length, 4);
+		assert.strictEqual(messageText(lastRequest.messages[3]), "one\n\ntwo");
+	});
+
+	test("a removed queued message is not delivered", async () => {
+		const gate = deferred();
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new vscode.LanguageModelToolCallPart("call-1", "llamacpp_probe", {}));
+				await gate.promise;
+			},
+			progress => progress.report(new vscode.LanguageModelTextPart("done without the queued text")),
+		]);
+		const current = createHarness(root, backend, fakeTools(() => ({ text: "tool body", isError: false })).executor);
+		harness = current;
+		current.webview.receive({ type: "send", text: "first" });
+		await waitFor(() => current.webview.ofType("partAdded").some(message => message.part.kind === "toolCall"), "tool call");
+		current.webview.receive({ type: "send", text: "never mind" });
+		await waitFor(() => current.webview.ofType("queued").some(message => message.queued.length === 1), "queued message");
+		const queued = current.webview.ofType("queued").at(-1)?.queued[0];
+		assert.ok(queued);
+		current.webview.receive({ type: "removeQueued", id: queued.id });
+		await waitFor(() => current.webview.ofType("queued").at(-1)?.queued.length === 0, "empty queue");
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+
+		assert.strictEqual(backend.requests.length, 2);
+		const users = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user");
+		assert.deepStrictEqual(users.map(message => message.parts), [[{ kind: "text", text: "first" }]]);
+	});
+
+	test("stop takes queued messages back into the draft and cancels the turn", async () => {
+		const backend = new FakeBackend([
+			async (progress, token) => {
+				progress.report(new vscode.LanguageModelTextPart("Working"));
+				await new Promise<void>(resolve => token.onCancellationRequested(() => resolve()));
+				throw new vscode.CancellationError();
+			},
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "send", text: "first" });
+		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "run start");
+		current.webview.receive({ type: "send", text: "queued text", attachments: [ATTACHMENT] });
+		await waitFor(() => current.webview.ofType("queued").some(message => message.queued.length === 1), "queued message");
+		current.webview.receive({ type: "stop" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "run stop");
+
+		assert.deepStrictEqual(current.webview.ofType("queued").at(-1)?.queued, []);
+		const restore = current.webview.ofType("restoreDraft");
+		assert.strictEqual(restore.length, 1);
+		assert.strictEqual(restore[0].text, "queued text");
+		assert.deepStrictEqual(restore[0].attachments, [ATTACHMENT]);
+		assert.strictEqual(backend.requests.length, 1);
+		const users = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user");
+		assert.deepStrictEqual(users.map(message => message.parts), [[{ kind: "text", text: "first" }]]);
+	});
+
+	test("init carries the queued messages", async () => {
+		const gate = deferred();
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new vscode.LanguageModelToolCallPart("call-1", "llamacpp_probe", {}));
+				await gate.promise;
+			},
+			progress => progress.report(new vscode.LanguageModelTextPart("answer")),
+		]);
+		const current = createHarness(root, backend, fakeTools(() => ({ text: "tool body", isError: false })).executor);
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		current.webview.receive({ type: "send", text: "first" });
+		await waitFor(() => current.webview.ofType("partAdded").some(message => message.part.kind === "toolCall"), "tool call");
+		current.webview.receive({ type: "send", text: "queued text" });
+		await waitFor(() => current.webview.ofType("queued").some(message => message.queued.length === 1), "queued message");
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		assert.deepStrictEqual(current.webview.ofType("init")[1].queued?.map(message => message.text), ["queued text"]);
+
+		current.webview.receive({ type: "stop" });
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "run stop");
+	});
+
 	test("a running turn keeps tool results full and the finished message gets a preview", async () => {
 		const full = "x".repeat(WEBVIEW_TOOL_RESULT_PREVIEW_CHARS + 500);
 		const gate = deferred();

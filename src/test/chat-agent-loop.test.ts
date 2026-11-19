@@ -232,6 +232,55 @@ suite("chat agent loop", () => {
 		assert.strictEqual(body.value, "file body");
 	});
 
+	test("yields after the round's tools when the user queued a message", async () => {
+		const fake = fakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-1", "read", { path: "a.txt" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("Unexpected next round.")),
+		]);
+		const { sink, events, parts } = recorder();
+		let queued = false;
+		const result = await runAgentTurn({
+			backend: fake.provider,
+			model,
+			history: [chatMessage("user", [{ kind: "text", text: "Go" }])],
+			conversationId: "chat-yield",
+			turn: 1,
+			tools: tools(async () => {
+				queued = true;
+				return { text: "file body", isError: false };
+			}),
+			sink,
+			token: none,
+			shouldYield: () => queued,
+		});
+		assert.deepStrictEqual(result, { rounds: 1, stopReason: "yielded" });
+		assert.strictEqual(fake.requests.length, 1);
+		assert.deepStrictEqual(events, ["part:toolCall", "part:toolResult:call-1:ok"]);
+		const resultPart = parts.find(part => part.kind === "toolResult");
+		if (!resultPart || resultPart.kind !== "toolResult") {
+			throw new Error("expected a tool result");
+		}
+		assert.strictEqual(resultPart.text, "file body");
+	});
+
+	test("does not yield before the first request", async () => {
+		const fake = fakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("Answered."))]);
+		const { sink } = recorder();
+		const result = await runAgentTurn({
+			backend: fake.provider,
+			model,
+			history: [chatMessage("user", [{ kind: "text", text: "Go" }])],
+			conversationId: "chat-yield-first",
+			turn: 1,
+			tools: tools(async () => ({ text: "", isError: false })),
+			sink,
+			token: none,
+			shouldYield: () => true,
+		});
+		assert.deepStrictEqual(result, { rounds: 1, stopReason: "done" });
+		assert.strictEqual(fake.requests.length, 1);
+	});
+
 	test("sums usage over rounds and replaces incremental reports within a round", async () => {
 		const fake = fakeBackend([
 			progress => {

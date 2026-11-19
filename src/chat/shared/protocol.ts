@@ -78,6 +78,13 @@ export interface ChatAttachment {
 	languageId?: string;
 }
 
+/** A message sent while the agent works; it is delivered after the current tool round. */
+export interface ChatQueuedMessage {
+	id: string;
+	text: string;
+	attachments?: ChatAttachment[];
+}
+
 export interface ChatMessage {
 	id: string;
 	role: "user" | "assistant";
@@ -221,6 +228,7 @@ export type HostMessage =
 		selectedThinking?: string;
 		quota: ChatProviderQuota[];
 		activity: ChatSessionActivity[];
+		queued?: ChatQueuedMessage[];
 	}
 	| { type: "changes"; changes: ChatChangeSet }
 	| { type: "models"; models: ChatModelGroup[]; selectedModelId?: string; selectedThinking?: string }
@@ -247,12 +255,18 @@ export type HostMessage =
 	/** Chats other than the shown one that run, wait for an approval or finished unseen. */
 	| { type: "activity"; activity: ChatSessionActivity[] }
 	/** Attachments to show in the composer; they are sent with the next message. */
-	| { type: "attachmentsAdded"; attachments: ChatAttachment[] };
+	| { type: "attachmentsAdded"; attachments: ChatAttachment[] }
+	/** The shown chat's queue changed. */
+	| { type: "queued"; queued: ChatQueuedMessage[] }
+	/** Puts messages taken back from the queue into the composer, e.g. after Stop. */
+	| { type: "restoreDraft"; text: string; attachments: ChatAttachment[] };
 
 /** Webview → host. */
 export type WebviewMessage =
 	| { type: "ready" }
 	| { type: "send"; text: string; attachments?: ChatAttachment[] }
+	/** Removes a queued message before it is delivered. */
+	| { type: "removeQueued"; id: string }
 	/** Opens the attachment picker; the picked files come back as "attachmentsAdded". */
 	| { type: "pickAttachments" }
 	/** Files dropped on the composer. */

@@ -22,6 +22,8 @@ interface ComposerProps {
 	initialText?: string;
 	/** Focus the textarea on mount and put the caret at the end. */
 	autoFocus?: boolean;
+	/** Text the composer takes over when seq changes, e.g. what Stop took back from the queue. */
+	draft?: { text: string; seq: number };
 	/** When given, Escape cancels, a Cancel button appears and Stop is never shown. */
 	onCancel?: () => void;
 	/** Rendered below the input row, e.g. the edit hint. */
@@ -61,6 +63,7 @@ export function Composer({
 	attachments,
 	initialText,
 	autoFocus,
+	draft,
 	onCancel,
 	footer,
 	placeholder,
@@ -79,6 +82,10 @@ export function Composer({
 	const [text, setText] = useState(initialText ?? "");
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const focusDraft = useRef(false);
+	const draftSeq = draft?.seq;
+	// A draft that arrived before this composer mounted was already taken over by another one.
+	const appliedDraftSeq = useRef(draftSeq);
 
 	useEffect(() => {
 		if (!autoFocus) {
@@ -93,6 +100,37 @@ export function Composer({
 	}, [autoFocus]);
 
 	useEffect(() => {
+		if (draftSeq === undefined || draftSeq === appliedDraftSeq.current) {
+			return;
+		}
+		appliedDraftSeq.current = draftSeq;
+		const next = [draft?.text ?? "", text].filter(part => part.trim()).join("\n\n");
+		if (next === text) {
+			const textarea = textareaRef.current;
+			if (textarea) {
+				textarea.focus();
+				textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+			}
+			return;
+		}
+		focusDraft.current = true;
+		setText(next);
+	}, [draftSeq]);
+
+	useEffect(() => {
+		if (!focusDraft.current) {
+			return;
+		}
+		focusDraft.current = false;
+		const textarea = textareaRef.current;
+		if (!textarea) {
+			return;
+		}
+		textarea.focus();
+		textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+	}, [text]);
+
+	useEffect(() => {
 		const textarea = textareaRef.current;
 		if (!textarea) {
 			return;
@@ -103,7 +141,7 @@ export function Composer({
 		textarea.style.height = `${Math.min(textarea.scrollHeight + textarea.offsetHeight - textarea.clientHeight, limit)}px`;
 	}, [text]);
 
-	const canSend = text.trim().length > 0 && !run.running;
+	const canSend = text.trim().length > 0 && (!run.running || !onCancel);
 	const selectedGroup = models.find(group => group.models.some(model => model.id === selectedModelId));
 	const selectedModel = selectedGroup?.models.find(model => model.id === selectedModelId);
 	const submit = () => {
@@ -113,6 +151,20 @@ export function Composer({
 		onSend(text);
 		setText("");
 	};
+	const sendButton = (
+		<button
+			type="button"
+			class="send-button"
+			aria-label="Send"
+			title={run.running ? "Send (Enter); the agent reads it after the current tool call" : "Send (Enter)"}
+			disabled={!canSend}
+			onClick={submit}
+		>
+			<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+				<path d="M8 13V3.5M3.75 7.5 8 3.25l4.25 4.25" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+			</svg>
+		</button>
+	);
 
 	const onKeyDown = (event: KeyboardEvent) => {
 		if (event.key === "Escape" && onCancel) {
@@ -123,7 +175,7 @@ export function Composer({
 		if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
 			return;
 		}
-		if (run.running) {
+		if (run.running && onCancel) {
 			return;
 		}
 		event.preventDefault();
@@ -208,7 +260,7 @@ export function Composer({
 					ref={textareaRef}
 					class="composer-input"
 					rows={1}
-					placeholder={placeholder ?? "Ask anything…"}
+					placeholder={placeholder ?? (run.running && !onCancel ? "Add a message for the running agent…" : "Ask anything…")}
 					value={text}
 					onInput={event => setText(event.currentTarget.value)}
 					onKeyDown={onKeyDown}
@@ -237,21 +289,20 @@ export function Composer({
 						{cache ? <span class={`cache-indicator cache-${cache.level}`} title={cache.title}>{cache.text}</span> : null}
 						{context ? <span class="context-indicator" title="Prompt tokens / context window">{context}</span> : null}
 						{run.running && !onCancel ? (
-							<button type="button" class="send-button send-button-stop" aria-label="Stop" title="Stop" onClick={onStop}>
-								<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-									<rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor" />
-								</svg>
-							</button>
+							<>
+								<button type="button" class="send-button send-button-stop" aria-label="Stop" title="Stop" onClick={onStop}>
+									<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+										<rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor" />
+									</svg>
+								</button>
+								{sendButton}
+							</>
 						) : (
 							<>
 								{onCancel ? (
 									<button type="button" class="composer-cancel" onClick={onCancel}>Cancel</button>
 								) : null}
-								<button type="button" class="send-button" aria-label="Send" title="Send (Enter)" disabled={!canSend} onClick={submit}>
-									<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-										<path d="M8 13V3.5M3.75 7.5 8 3.25l4.25 4.25" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
-									</svg>
-								</button>
+								{sendButton}
 							</>
 						)}
 					</div>
