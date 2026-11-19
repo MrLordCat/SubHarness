@@ -247,8 +247,9 @@ export type WebviewMessage =
 	/**
 	 * Replaces an earlier user message: it and everything after it are dropped, then the text is sent as a new turn.
 	 * undoChanges also restores the files the agent changed since that message.
+	 * attachments: the attachments to send with the edited text; absent keeps the original ones.
 	 */
-	| { type: "editMessage"; messageId: string; text: string; undoChanges?: boolean }
+	| { type: "editMessage"; messageId: string; text: string; undoChanges?: boolean; attachments?: ChatAttachment[] }
 	/** Without ids the whole change set is kept or undone. */
 	| { type: "keepChanges"; ids?: string[] }
 	| { type: "undoChanges"; ids?: string[] }

@@ -1,5 +1,5 @@
 import * as assert from "node:assert";
-import { formatAge, formatReset, parseUriList, sessionGroup } from "../chat/webview/format";
+import { describeToolCall, formatAge, formatReset, parseUriList, sessionGroup } from "../chat/webview/format";
 
 function time(date: Date): string {
 	return date.toLocaleString([], { hour: "2-digit", minute: "2-digit" });
@@ -90,5 +90,59 @@ suite("Chat webview drag and drop", () => {
 	test("returns an empty list for empty input", () => {
 		assert.deepStrictEqual(parseUriList(""), []);
 		assert.deepStrictEqual(parseUriList(" \r\n\t\n"), []);
+	});
+});
+
+suite("Chat webview tool call descriptions", () => {
+	test("describes a read with its line range", () => {
+		assert.deepStrictEqual(
+			describeToolCall("read_file", { filePath: "src/chat/webview/message.tsx", startLine: 10, endLine: 20 }),
+			{ title: "Read message.tsx", detail: "lines 10–20" },
+		);
+		assert.deepStrictEqual(describeToolCall("read_file", { filePath: "C:\\work\\a\\store.ts" }), { title: "Read store.ts" });
+	});
+
+	test("describes directory and file searches", () => {
+		assert.deepStrictEqual(describeToolCall("list_dir", { path: "src/chat" }), { title: "Listed src/chat" });
+		assert.deepStrictEqual(describeToolCall("list_dir", {}), { title: "Listed workspace" });
+		assert.deepStrictEqual(describeToolCall("file_search", { query: "**/*.ts" }), { title: "Searched files for **/*.ts" });
+		assert.deepStrictEqual(
+			describeToolCall("grep_search", { query: "tool-row", includePattern: "src/**/*.css" }),
+			{ title: "Searched for \"tool-row\"", detail: "src/**/*.css" },
+		);
+		assert.deepStrictEqual(describeToolCall("grep_search", { query: "x" }), { title: "Searched for \"x\"" });
+	});
+
+	test("describes writes, problems and terminal tools", () => {
+		assert.deepStrictEqual(describeToolCall("create_file", { filePath: "src/new.ts" }), { title: "Created new.ts" });
+		assert.deepStrictEqual(describeToolCall("replace_string_in_file", { filePath: "a\\b\\message.tsx" }), { title: "Edited message.tsx" });
+		assert.deepStrictEqual(
+			describeToolCall("get_errors", { filePaths: ["src/a.ts", "src/b.tsx"] }),
+			{ title: "Checked problems", detail: "a.ts, b.tsx" },
+		);
+		assert.deepStrictEqual(describeToolCall("get_errors", {}), { title: "Checked problems" });
+		assert.deepStrictEqual(describeToolCall("run_in_terminal", { command: "npm test\n&& echo done" }), { title: "Ran npm test" });
+		assert.deepStrictEqual(describeToolCall("read_terminal", { terminalId: "1" }), { title: "Read terminal output" });
+		assert.deepStrictEqual(describeToolCall("send_to_terminal", { terminalId: "1", text: "y" }), { title: "Sent input to the terminal" });
+		assert.deepStrictEqual(describeToolCall("kill_terminal", { terminalId: "1" }), { title: "Closed a terminal" });
+	});
+
+	test("cuts a long command at 120 characters", () => {
+		const command = `node ${"x".repeat(200)}`;
+		assert.deepStrictEqual(describeToolCall("run_in_terminal", { command }), { title: `Ran ${command.slice(0, 119)}…` });
+	});
+
+	test("falls back to the tool name and a one-line input summary", () => {
+		assert.deepStrictEqual(describeToolCall("mystery_tool", { a: 1 }), { title: "mystery_tool", detail: "{\"a\":1}" });
+	});
+
+	test("survives malformed input", () => {
+		const circular: Record<string, unknown> = {};
+		circular.self = circular;
+		assert.deepStrictEqual(describeToolCall("read_file", null), { title: "read_file", detail: "null" });
+		assert.deepStrictEqual(describeToolCall("file_search", { query: 42 }), { title: "file_search", detail: "{\"query\":42}" });
+		assert.deepStrictEqual(describeToolCall("get_errors", { filePaths: "src/a.ts" }), { title: "Checked problems" });
+		assert.doesNotThrow(() => describeToolCall("mystery_tool", circular));
+		assert.strictEqual(describeToolCall("mystery_tool", circular).title, "mystery_tool");
 	});
 });

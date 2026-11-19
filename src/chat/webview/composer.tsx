@@ -1,4 +1,4 @@
-import type { TargetedDragEvent } from "preact";
+import type { ComponentChildren, TargetedDragEvent } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { attachmentLabel, attachmentTitle } from "../shared/attachment-label";
 import type { ChatAttachment, ChatModelGroup, ChatProviderQuota, ChatRunState, ChatToolGroup } from "../shared/protocol";
@@ -16,7 +16,18 @@ interface ComposerProps {
 	selectedThinking: string | undefined;
 	quota: ChatProviderQuota[];
 	context: string | undefined;
-	pendingAttachments: ChatAttachment[];
+	attachments: ChatAttachment[];
+	/** Text the textarea starts with; later changes come from typing. */
+	initialText?: string;
+	/** Focus the textarea on mount and put the caret at the end. */
+	autoFocus?: boolean;
+	/** When given, Escape cancels, a Cancel button appears and Stop is never shown. */
+	onCancel?: () => void;
+	/** Rendered below the input row, e.g. the edit hint. */
+	footer?: ComponentChildren;
+	placeholder?: string;
+	/** Extra class on the root, e.g. "composer-edit". */
+	class?: string;
 	onSend: (text: string) => void;
 	onStop: () => void;
 	onSelectModel: (modelId: string) => void;
@@ -45,7 +56,13 @@ export function Composer({
 	selectedThinking,
 	quota,
 	context,
-	pendingAttachments,
+	attachments,
+	initialText,
+	autoFocus,
+	onCancel,
+	footer,
+	placeholder,
+	class: extraClass,
 	onSend,
 	onStop,
 	onSelectModel,
@@ -57,9 +74,21 @@ export function Composer({
 	onOpenAttachment,
 	onRemoveAttachment,
 }: ComposerProps) {
-	const [text, setText] = useState("");
+	const [text, setText] = useState(initialText ?? "");
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+	useEffect(() => {
+		if (!autoFocus) {
+			return;
+		}
+		const textarea = textareaRef.current;
+		if (!textarea) {
+			return;
+		}
+		textarea.focus();
+		textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+	}, [autoFocus]);
 
 	useEffect(() => {
 		const textarea = textareaRef.current;
@@ -84,6 +113,11 @@ export function Composer({
 	};
 
 	const onKeyDown = (event: KeyboardEvent) => {
+		if (event.key === "Escape" && onCancel) {
+			event.preventDefault();
+			onCancel();
+			return;
+		}
 		if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
 			return;
 		}
@@ -135,15 +169,15 @@ export function Composer({
 
 	return (
 		<div
-			class={dragOver ? "composer composer-dragover" : "composer"}
+			class={`composer${extraClass ? ` ${extraClass}` : ""}${dragOver ? " composer-dragover" : ""}`}
 			onDragEnter={onDragEnter}
 			onDragOver={onDragOver}
 			onDragLeave={onDragLeave}
 			onDrop={onDrop}
 		>
-			{pendingAttachments.length > 0 ? (
+			{attachments.length > 0 ? (
 				<div class="attachment-chips">
-					{pendingAttachments.map(attachment => (
+					{attachments.map(attachment => (
 						<span class="attachment-chip" key={attachment.id}>
 							<button
 								type="button"
@@ -171,34 +205,44 @@ export function Composer({
 				ref={textareaRef}
 				class="composer-input"
 				rows={1}
-				placeholder="Ask anything…"
+				placeholder={placeholder ?? "Ask anything…"}
 				value={text}
 				onInput={event => setText(event.currentTarget.value)}
 				onKeyDown={onKeyDown}
 			/>
 			<div class="composer-row">
-				<button
-					type="button"
-					class="attach-button"
-					aria-label="Add context"
-					title="Attach files or the editor selection; Shift+drag files here to attach them"
-					onClick={onPickAttachments}
-				>
-					📎
-				</button>
-				<ModelPicker models={models} selectedModelId={selectedModelId} onSelectModel={onSelectModel} />
-				{selectedModel?.thinking
-					? <ThinkingPicker thinking={selectedModel.thinking} selected={selectedThinking} onSelect={onSelectThinking} />
-					: null}
-				<ToolPicker tools={tools} onSetToolsEnabled={onSetToolsEnabled} />
-				<QuotaIndicator quota={quota} provider={selectedGroup?.provider} onRefresh={onRefreshQuota} />
-				{context ? <span class="context-indicator" title="Prompt tokens / context window">{context}</span> : null}
-				{run.running ? (
-					<button type="button" class="send-button" onClick={onStop}>Stop</button>
-				) : (
-					<button type="button" class="send-button" disabled={!canSend} onClick={submit}>Send</button>
-				)}
+				<div class="composer-tools">
+					<button
+						type="button"
+						class="attach-button"
+						aria-label="Add context"
+						title="Attach files or the editor selection; Shift+drag files here to attach them"
+						onClick={onPickAttachments}
+					>
+						📎
+					</button>
+					<ModelPicker models={models} selectedModelId={selectedModelId} onSelectModel={onSelectModel} />
+					{selectedModel?.thinking
+						? <ThinkingPicker thinking={selectedModel.thinking} selected={selectedThinking} onSelect={onSelectThinking} />
+						: null}
+					<ToolPicker tools={tools} onSetToolsEnabled={onSetToolsEnabled} />
+					<QuotaIndicator quota={quota} provider={selectedGroup?.provider} onRefresh={onRefreshQuota} />
+				</div>
+				<div class="composer-actions">
+					{context ? <span class="context-indicator" title="Prompt tokens / context window">{context}</span> : null}
+					{run.running && !onCancel ? (
+						<button type="button" class="send-button" onClick={onStop}>Stop</button>
+					) : (
+						<>
+							{onCancel ? (
+								<button type="button" class="composer-cancel" onClick={onCancel}>Cancel</button>
+							) : null}
+							<button type="button" class="send-button" disabled={!canSend} onClick={submit}>Send</button>
+						</>
+					)}
+				</div>
 			</div>
+			{footer}
 		</div>
 	);
 }

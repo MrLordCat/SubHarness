@@ -192,6 +192,13 @@ const STORED_ATTACHMENT: ChatAttachment = {
 	languageId: "typescript",
 };
 
+const FILE_ATTACHMENT: ChatAttachment = {
+	id: "att-2",
+	kind: "file",
+	path: "src/b.ts",
+	uri: "file:///src/b.ts",
+};
+
 class FakeWebview {
 	readonly messages: HostMessage[] = [];
 	private readonly _emitter = new vscode.EventEmitter<unknown>();
@@ -1711,6 +1718,94 @@ suite("chat controller", () => {
 		assert.strictEqual(messageText(backend.requests[1].messages.at(-1)!), `${block}\n<userRequest>\nSecond\n</userRequest>`);
 		const resent = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user").at(-1);
 		assert.deepStrictEqual(resent?.attachments, [STORED_ATTACHMENT]);
+	});
+
+	test("editing with the same attachments keeps the rendered block", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart("First.")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Second.")),
+		]);
+		const fake = new FakeAttachments();
+		fake.contents = [{ attachment: ATTACHMENT, text: "const a = 1;" }];
+		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "First", attachments: [ATTACHMENT] });
+		await waitFor(() => finished() === 1, "first turn");
+		const user = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
+		assert.ok(user);
+
+		current.webview.receive({ type: "editMessage", messageId: user.id, text: "Second", attachments: [STORED_ATTACHMENT] });
+		await waitFor(() => finished() === 2 && backend.requests.length === 2, "edited turn");
+		assert.strictEqual(fake.reads.length, 1, "the same attachments are not read again");
+		const block = renderAttachments([{ attachment: ATTACHMENT, text: "const a = 1;" }]);
+		assert.strictEqual(messageText(backend.requests[1].messages.at(-1)!), `${block}\n<userRequest>\nSecond\n</userRequest>`);
+		const resent = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user").at(-1);
+		assert.deepStrictEqual(resent?.attachments, [STORED_ATTACHMENT]);
+		await current.store.flush();
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		const persisted = (await new ChatSessionStore(root).load(sessionId)).filter(message => message.role === "user").at(-1);
+		assert.strictEqual(persisted?.attachmentContext, block);
+	});
+
+	test("removing an attachment from an edited message renders without it", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart("First.")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Second.")),
+		]);
+		const fake = new FakeAttachments();
+		fake.contents = [
+			{ attachment: ATTACHMENT, text: "const a = 1;" },
+			{ attachment: FILE_ATTACHMENT, text: "export const b = 2;" },
+		];
+		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "First", attachments: [ATTACHMENT, FILE_ATTACHMENT] });
+		await waitFor(() => finished() === 1, "first turn");
+		const user = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
+		assert.ok(user);
+		fake.contents = [{ attachment: ATTACHMENT, text: "const a = 1;" }];
+
+		current.webview.receive({ type: "editMessage", messageId: user.id, text: "Second", attachments: [STORED_ATTACHMENT] });
+		await waitFor(() => finished() === 2 && backend.requests.length === 2, "edited turn");
+		assert.strictEqual(fake.reads.length, 2, "the remaining attachment is read again");
+		const block = renderAttachments([{ attachment: ATTACHMENT, text: "const a = 1;" }]);
+		assert.strictEqual(messageText(backend.requests[1].messages.at(-1)!), `${block}\n<userRequest>\nSecond\n</userRequest>`);
+		const resent = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user").at(-1);
+		assert.deepStrictEqual(resent?.attachments, [STORED_ATTACHMENT]);
+	});
+
+	test("adding an attachment to an edited message reads it", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart("First.")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Second.")),
+		]);
+		const fake = new FakeAttachments();
+		fake.contents = [{ attachment: ATTACHMENT, text: "const a = 1;" }];
+		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "First", attachments: [ATTACHMENT] });
+		await waitFor(() => finished() === 1, "first turn");
+		const user = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
+		assert.ok(user);
+		fake.contents = [
+			{ attachment: ATTACHMENT, text: "const a = 1;" },
+			{ attachment: FILE_ATTACHMENT, text: "export const b = 2;" },
+		];
+
+		current.webview.receive({ type: "editMessage", messageId: user.id, text: "Second", attachments: [STORED_ATTACHMENT, FILE_ATTACHMENT] });
+		await waitFor(() => finished() === 2 && backend.requests.length === 2, "edited turn");
+		assert.deepStrictEqual(fake.reads[1], [STORED_ATTACHMENT, FILE_ATTACHMENT]);
+		const block = renderAttachments([
+			{ attachment: ATTACHMENT, text: "const a = 1;" },
+			{ attachment: FILE_ATTACHMENT, text: "export const b = 2;" },
+		]);
+		assert.strictEqual(messageText(backend.requests[1].messages.at(-1)!), `${block}\n<userRequest>\nSecond\n</userRequest>`);
+		const resent = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user").at(-1);
+		assert.deepStrictEqual(resent?.attachments, [STORED_ATTACHMENT, FILE_ATTACHMENT]);
 	});
 
 	test("drops invalid attachments but still sends the text", async () => {

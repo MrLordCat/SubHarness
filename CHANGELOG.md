@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.21.18 (development patch) - 2026-11-19
+
+- Changed: click a sent message in the bridge chat to edit it. The editor in
+  its place is the full input: model, thinking level, tools, limits and
+  attachments (📎, chips, Shift+drop) work as for a new message. Escape or
+  Cancel closes it. Removing or adding attachments sends the new set;
+  unchanged attachments are sent exactly as before.
+- Fixed: scrolling up slowly near the end of a chat snapped back to the bottom,
+  and scrolling through older messages jumped while their real heights were
+  measured. Any upward scroll now releases the bottom, and the view stays put
+  when messages above it change size.
+- Changed: easier to read chats. Tool calls are one-line rows such as
+  "Read message.tsx lines 210-260" or "Ran npm test", with a status mark;
+  click a row to see its input and output. A subagent is one collapsed card
+  showing its model, task and current step; expand it for the prompt, the
+  steps and the report. Collapsed thinking shows its latest line. Calmer
+  spacing and typography, notices with a level mark, and Send always on the
+  right of the input.
+
 ## 1.21.17 (development patch) - 2026-11-19
 
 - Added: attachments in the bridge chat. The 📎 button picks the editor

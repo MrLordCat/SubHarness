@@ -185,6 +185,16 @@ function storedAttachment(attachment: ChatAttachment): ChatAttachment {
 	};
 }
 
+/** The same attachments, in any order, so an edit keeps the rendered block it already sent. */
+function sameAttachmentIds(left: readonly ChatAttachment[], right: readonly ChatAttachment[] | undefined): boolean {
+	const current = right ?? [];
+	if (left.length !== current.length) {
+		return false;
+	}
+	const ids = new Set(current.map(attachment => attachment.id));
+	return left.every(attachment => ids.has(attachment.id));
+}
+
 function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 	if (!isRecord(value) || typeof value.type !== "string") {
 		return undefined;
@@ -207,10 +217,22 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			const attachment = asAttachment(value.attachment, true);
 			return attachment ? { type: "openAttachment", attachment } : undefined;
 		}
-		case "editMessage":
-			return typeof value.messageId === "string" && typeof value.text === "string"
-				? { type: "editMessage", messageId: value.messageId, text: value.text, undoChanges: value.undoChanges === true }
-				: undefined;
+		case "editMessage": {
+			if (typeof value.messageId !== "string" || typeof value.text !== "string") {
+				return undefined;
+			}
+			const provided = Array.isArray(value.attachments) ? value.attachments : undefined;
+			const attachments = provided === undefined
+				? undefined
+				: provided.slice(0, SEND_ATTACHMENT_LIMIT).flatMap(item => asAttachment(item, true) ?? []);
+			return {
+				type: "editMessage",
+				messageId: value.messageId,
+				text: value.text,
+				undoChanges: value.undoChanges === true,
+				...(attachments ? { attachments } : {}),
+			};
+		}
 		case "keepChanges":
 		case "undoChanges": {
 			if (value.ids === undefined) {
@@ -539,7 +561,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				await this._deps.attachments?.open(message.attachment);
 				return;
 			case "editMessage":
-				await this._edit(message.messageId, message.text, message.undoChanges === true);
+				await this._edit(message.messageId, message.text, message.undoChanges === true, message.attachments);
 				return;
 			case "keepChanges":
 			case "undoChanges":
@@ -659,7 +681,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	}
 
 	/** Drops the edited user message and everything after it, then sends the new text as a fresh turn. */
-	private async _edit(messageId: string, text: string, undoChanges: boolean): Promise<void> {
+	private async _edit(messageId: string, text: string, undoChanges: boolean, attachments?: ChatAttachment[]): Promise<void> {
 		if (!text.trim()) {
 			return;
 		}
@@ -697,7 +719,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				runtime.meta = updated;
 			}
 			this._emit(runtime, { type: "truncated", messageId });
-			await this._sendTurn(runtime, text, undefined, { attachments: edited.attachments, attachmentContext: edited.attachmentContext });
+			if (attachments === undefined || sameAttachmentIds(attachments, edited.attachments)) {
+				await this._sendTurn(runtime, text, undefined, { attachments: edited.attachments, attachmentContext: edited.attachmentContext });
+			} else {
+				await this._sendTurn(runtime, text, attachments);
+			}
 		} finally {
 			runtime.busy = false;
 		}

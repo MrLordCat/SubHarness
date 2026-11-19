@@ -1,4 +1,4 @@
-import type { ChatProviderQuota } from "../shared/protocol";
+import type { ChatModelGroup, ChatProviderQuota, ChatUsage } from "../shared/protocol";
 
 /** 312000 → "312k", 1_200_000 → "1.2M"; used wherever token counts are shown. */
 export function formatTokens(value: number): string {
@@ -11,9 +11,139 @@ export function formatTokens(value: number): string {
 	return `${Math.round(value)}`;
 }
 
+/** Prompt tokens of the last reply over the selected model's window; absent until both are known. */
+export function contextIndicator(latestUsage: ChatUsage | undefined, models: ChatModelGroup[], selectedModelId: string | undefined): string | undefined {
+	const promptTokens = latestUsage?.promptTokens;
+	if (promptTokens === undefined) {
+		return undefined;
+	}
+	const model = models.flatMap(group => group.models).find(candidate => candidate.id === selectedModelId);
+	if (!model || model.maxInputTokens <= 0) {
+		return undefined;
+	}
+	return `${formatTokens(promptTokens)} / ${formatTokens(model.maxInputTokens)}`;
+}
+
 function formatScaled(value: number): string {
 	const text = value >= 100 ? `${Math.round(value)}` : value.toFixed(1);
 	return text.endsWith(".0") ? text.slice(0, -2) : text;
+}
+
+/** A compact one-line rendering of a tool input, used for titles and unknown shapes. */
+export function summarizeInput(input: unknown): string {
+	let text: string;
+	try {
+		text = typeof input === "string" ? input : JSON.stringify(input) ?? String(input);
+	} catch {
+		text = String(input);
+	}
+	const singleLine = text.replace(/\s+/g, " ").trim();
+	return singleLine.length > 160 ? `${singleLine.slice(0, 159)}…` : singleLine;
+}
+
+export interface ToolCallDescription {
+	title: string;
+	detail?: string;
+}
+
+/** First line of a terminal command, cut at 120 characters. */
+export function toolCommand(input: unknown): string | undefined {
+	const command = textField(inputRecord(input), "command");
+	if (command === undefined) {
+		return undefined;
+	}
+	const line = command.split(/\r\n|\r|\n/)[0].trim();
+	return line.length > 120 ? `${line.slice(0, 119)}…` : line;
+}
+
+/** Readable one-line description of a tool call; unknown shapes fall back to the raw summary. */
+export function describeToolCall(name: string, input: unknown): ToolCallDescription {
+	try {
+		const record = inputRecord(input);
+		switch (name) {
+			case "read_file": {
+				const file = textField(record, "filePath");
+				if (file === undefined) {
+					return fallbackDescription(name, input);
+				}
+				const start = numberField(record, "startLine");
+				const end = numberField(record, "endLine");
+				const detail = start !== undefined && end !== undefined ? `lines ${start}–${end}` : undefined;
+				return detail === undefined ? { title: `Read ${baseName(file)}` } : { title: `Read ${baseName(file)}`, detail };
+			}
+			case "list_dir": {
+				const path = textField(record, "path");
+				return { title: `Listed ${path ?? "workspace"}` };
+			}
+			case "file_search": {
+				const query = textField(record, "query");
+				return query === undefined ? fallbackDescription(name, input) : { title: `Searched files for ${query}` };
+			}
+			case "grep_search": {
+				const query = textField(record, "query");
+				if (query === undefined) {
+					return fallbackDescription(name, input);
+				}
+				const include = textField(record, "includePattern");
+				return include === undefined
+					? { title: `Searched for "${query}"` }
+					: { title: `Searched for "${query}"`, detail: include };
+			}
+			case "create_file": {
+				const file = textField(record, "filePath");
+				return file === undefined ? fallbackDescription(name, input) : { title: `Created ${baseName(file)}` };
+			}
+			case "replace_string_in_file": {
+				const file = textField(record, "filePath");
+				return file === undefined ? fallbackDescription(name, input) : { title: `Edited ${baseName(file)}` };
+			}
+			case "get_errors": {
+				const files = record.filePaths;
+				if (!Array.isArray(files) || files.length === 0) {
+					return { title: "Checked problems" };
+				}
+				const names = files.filter((file): file is string => typeof file === "string" && file.length > 0).map(baseName);
+				return names.length > 0 ? { title: "Checked problems", detail: names.join(", ") } : { title: "Checked problems" };
+			}
+			case "run_in_terminal": {
+				const command = toolCommand(input);
+				return command === undefined ? fallbackDescription(name, input) : { title: `Ran ${command}` };
+			}
+			case "read_terminal":
+				return { title: "Read terminal output" };
+			case "send_to_terminal":
+				return { title: "Sent input to the terminal" };
+			case "kill_terminal":
+				return { title: "Closed a terminal" };
+			default:
+				return { title: name, detail: summarizeInput(input) };
+		}
+	} catch {
+		return { title: name };
+	}
+}
+
+function fallbackDescription(name: string, input: unknown): ToolCallDescription {
+	return { title: name, detail: summarizeInput(input) };
+}
+
+function inputRecord(input: unknown): Record<string, unknown> {
+	return typeof input === "object" && input !== null && !Array.isArray(input) ? input as Record<string, unknown> : {};
+}
+
+function textField(record: Record<string, unknown>, key: string): string | undefined {
+	const value = record[key];
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function numberField(record: Record<string, unknown>, key: string): number | undefined {
+	const value = record[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function baseName(file: string): string {
+	const parts = file.replace(/\\/g, "/").split("/");
+	return parts[parts.length - 1] || file;
 }
 
 /** The entries of a text/uri-list payload: comments and blank lines dropped, unique in order. */

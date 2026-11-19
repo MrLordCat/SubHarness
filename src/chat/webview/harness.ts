@@ -159,7 +159,7 @@ const LIVE_SUBAGENT_CALL_ID = "call-subagent-live";
 const LIVE_SUBAGENT_STARTED_AT = Date.now() - 12_000;
 const LIVE_SUBAGENT_STEPS: ChatSubagentStep[] = [
 	{ kind: "text", text: "Reading the store and the message list." },
-	{ kind: "tool", name: "read_file", summary: "{\"path\":\"src/chat/webview/store.ts\"}" },
+	{ kind: "tool", name: "read_file", summary: "{\"filePath\":\"src/chat/webview/store.ts\",\"startLine\":1,\"endLine\":80}" },
 	{ kind: "tool", name: "grep_search", summary: "{\"query\":\"subagent\"}" },
 	{ kind: "tool", name: "get_errors", summary: "{\"filePaths\":[\"src/chat/webview/message.tsx\"]}" },
 ];
@@ -310,7 +310,7 @@ function handleWebviewMessage(message: WebviewMessage): void {
 			emit({ type: "tools", tools: TOOL_GROUPS });
 			break;
 		case "editMessage":
-			handleEdit(message.messageId, message.text, message.undoChanges);
+			handleEdit(message.messageId, message.text, message.undoChanges, message.attachments);
 			break;
 		case "keepChanges":
 			handleKeepChanges(message.ids);
@@ -737,7 +737,7 @@ function handleApprove(id: string, allow: boolean): void {
 	emit({ type: "run", run: { running: false } });
 }
 
-function handleEdit(messageId: string, text: string, undoChanges: boolean | undefined): void {
+function handleEdit(messageId: string, text: string, undoChanges: boolean | undefined, attachments?: readonly ChatAttachment[]): void {
 	const index = messages.findIndex(candidate => candidate.id === messageId);
 	const target = index >= 0 ? messages[index] : undefined;
 	const editsFirstUser = target?.role === "user" && messages.find(candidate => candidate.role === "user")?.id === messageId;
@@ -754,7 +754,7 @@ function handleEdit(messageId: string, text: string, undoChanges: boolean | unde
 			emit({ type: "changes", changes: currentChanges });
 		}
 	}
-	handleSend(text);
+	handleSend(text, attachments);
 	if (editsFirstUser) {
 		activeSession().title = titleFromText(text);
 		emit({ type: "session", session: sessionMeta() });
@@ -935,8 +935,8 @@ function addFinishedSubagent(message: ChatMessage): void {
 			status: "done",
 			steps: [
 				{ kind: "text", text: "Checking how the store keeps live runs." },
-				{ kind: "tool", name: "read_file", summary: "{\"path\":\"src/chat/webview/store.ts\"}" },
-				{ kind: "tool", name: "grep_search", summary: "{\"query\":\"subagent\"}" },
+				{ kind: "tool", name: "read_file", summary: "{\"filePath\":\"src/chat/webview/store.ts\",\"startLine\":90,\"endLine\":130}" },
+				{ kind: "tool", name: "grep_search", summary: "{\"query\":\"subagent\",\"includePattern\":\"src/chat/webview/*.tsx\"}" },
 				{ kind: "tool", name: "run_in_terminal", summary: "{\"command\":\"npm run compile\"}", isError: true },
 				{ kind: "text", text: "The store drops a live run when its `subagent` part arrives." },
 				{ kind: "notice", level: "info", text: "Finished in 5 s." },
@@ -1017,7 +1017,14 @@ function assistantParts(index: number, random: () => number): ChatPart[] {
 	const parts: ChatPart[] = [];
 	const variant = index % 8;
 	if (variant === 1 || variant === 6) {
-		parts.push({ kind: "thinking", text: "Looking at the request, then at the rendered message heights.\nOnly the changed message should re-render." });
+		parts.push({
+			kind: "thinking",
+			text: [
+				"Looking at the request, then at the rendered message heights.",
+				"The heights come from one ResizeObserver per visible message.",
+				"Only the changed message should re-render, so the list stays cheap.",
+			].join("\n"),
+		});
 	}
 	if (variant === 2 || variant === 5) {
 		const callId = `call-${index}`;
@@ -1032,6 +1039,9 @@ function assistantParts(index: number, random: () => number): ChatPart[] {
 		parts.push({ kind: "toolResult", callId, text, isError: preview && index % 40 === 5, preview, truncated: preview });
 	}
 	parts.push({ kind: "text", text: assistantMarkdown(index, random) });
+	if (variant === 3) {
+		addToolCallGroup(parts, index);
+	}
 	if (variant === 4) {
 		parts.push({ kind: "notice", level: index % 16 === 4 ? "warning" : "info", text: "The harness generated this message for performance testing." });
 	}
@@ -1039,6 +1049,44 @@ function assistantParts(index: number, random: () => number): ChatPart[] {
 		parts.push({ kind: "toolResult", callId: `orphan-${index}`, text: "Compiled with 0 errors.", isError: false });
 	}
 	return parts;
+}
+
+/** Four consecutive calls: a read with lines, a grep, a failing command and an edit. */
+function addToolCallGroup(parts: ChatPart[], index: number): void {
+	const group = `group-${index}`;
+	const calls: Array<{ name: string; input: unknown; text: string; isError?: boolean }> = [
+		{
+			name: "read_file",
+			input: { filePath: "src/chat/webview/message.tsx", startLine: 210, endLine: 260 },
+			text: "File: src/chat/webview/message.tsx (lines 210-260 of 640)\n…",
+		},
+		{
+			name: "grep_search",
+			input: { query: "tool-row", includePattern: "src/chat/webview/*.css" },
+			text: "src/chat/webview/chat.css:440: .tool-row {",
+		},
+		{
+			name: "run_in_terminal",
+			input: { command: "npm run compile" },
+			text: "exitCode: 1\nError: the tool call is a fixture",
+			isError: true,
+		},
+		{
+			name: "replace_string_in_file",
+			input: { filePath: "src/chat/webview/message.tsx", oldString: "old row", newString: "new row" },
+			text: "Edited src/chat/webview/message.tsx: replaced 1 occurrence (lines 411-413).",
+		},
+	];
+	calls.forEach((call, position) => {
+		const callId = `${group}-${position}`;
+		parts.push({ kind: "toolCall", callId, name: call.name, input: call.input });
+		parts.push({
+			kind: "toolResult",
+			callId,
+			text: call.text,
+			...(call.isError ? { isError: true } : {}),
+		});
+	});
 }
 
 function assistantMarkdown(index: number, random: () => number): string {

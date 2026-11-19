@@ -1,26 +1,14 @@
 import { useCallback, useLayoutEffect, useState } from "preact/hooks";
-import type { ChatAttachment, ChatModelGroup, ChatUsage } from "../shared/protocol";
 import { ActivityBadge } from "./activity-badge";
 import { postMessage } from "./api";
 import { ApprovalCard } from "./approval-card";
 import { ChangesPanel } from "./changes-panel";
 import { ChatHistory } from "./chat-history";
 import { Composer } from "./composer";
-import { formatTokens } from "./format";
+import { useComposerActions } from "./composer-actions";
+import { contextIndicator } from "./format";
 import { MessageList } from "./message-list";
 import type { ChatStore } from "./store";
-
-function contextIndicator(latestUsage: ChatUsage | undefined, models: ChatModelGroup[], selectedModelId: string | undefined): string | undefined {
-	const promptTokens = latestUsage?.promptTokens;
-	if (promptTokens === undefined) {
-		return undefined;
-	}
-	const model = models.flatMap(group => group.models).find(candidate => candidate.id === selectedModelId);
-	if (!model || model.maxInputTokens <= 0) {
-		return undefined;
-	}
-	return `${formatTokens(promptTokens)} / ${formatTokens(model.maxInputTokens)}`;
-}
 
 export function App({ store }: { store: ChatStore }) {
 	const [, setRevision] = useState(0);
@@ -32,26 +20,17 @@ export function App({ store }: { store: ChatStore }) {
 		const attachments = store.takeAttachments();
 		postMessage(attachments.length > 0 ? { type: "send", text, attachments } : { type: "send", text });
 	}, [store]);
-	const onStop = useCallback(() => postMessage({ type: "stop" }), []);
-	const onPickAttachments = useCallback(() => postMessage({ type: "pickAttachments" }), []);
-	const onAddAttachments = useCallback((uris: string[]) => postMessage({ type: "addAttachments", uris }), []);
-	const onOpenAttachment = useCallback((attachment: ChatAttachment) => postMessage({ type: "openAttachment", attachment }), []);
-	const onRemoveAttachment = useCallback((id: string) => store.removeAttachment(id), [store]);
-	const onSelectModel = useCallback((modelId: string) => postMessage({ type: "selectModel", modelId }), []);
-	const onSelectThinking = useCallback((value: string) => postMessage({ type: "selectThinking", value }), []);
-	const onRefreshQuota = useCallback(() => postMessage({ type: "refreshQuota" }), []);
-	const onEditMessage = useCallback(
-		(messageId: string, text: string, undoChanges: boolean) => {
-			postMessage(undoChanges
-				? { type: "editMessage", messageId, text, undoChanges: true }
-				: { type: "editMessage", messageId, text });
-		},
-		[],
-	);
-	const onSetToolsEnabled = useCallback((names: string[], enabled: boolean) => {
-		store.setToolsEnabled(names, enabled);
-		postMessage({ type: "setToolsEnabled", names, enabled });
-	}, [store]);
+	const {
+		onStop,
+		onSelectModel,
+		onSelectThinking,
+		onRefreshQuota,
+		onSetToolsEnabled,
+		onPickAttachments,
+		onAddAttachments,
+		onOpenAttachment,
+		onRemoveAttachment,
+	} = useComposerActions(store);
 	const onApprove = useCallback((id: string, allow: boolean) => postMessage({ type: "approve", id, allow }), []);
 	const onLoadToolResult = useCallback(
 		(messageId: string, callId: string) => postMessage({ type: "loadToolResult", messageId, callId }),
@@ -89,7 +68,7 @@ export function App({ store }: { store: ChatStore }) {
 				<MessageList
 					store={store}
 					running={store.run.running}
-					onEditMessage={onEditMessage}
+					context={context}
 					onLoadToolResult={onLoadToolResult}
 				/>
 			)}
@@ -112,7 +91,7 @@ export function App({ store }: { store: ChatStore }) {
 				selectedThinking={store.selectedThinking}
 				quota={store.quota}
 				context={context}
-				pendingAttachments={store.pendingAttachments}
+				attachments={store.pendingAttachments}
 				onSend={onSend}
 				onStop={onStop}
 				onSelectModel={onSelectModel}

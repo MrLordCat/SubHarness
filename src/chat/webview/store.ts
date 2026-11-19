@@ -44,6 +44,24 @@ function attachmentKey(attachment: ChatAttachment): string {
 	return `${attachment.uri}:${attachment.startLine ?? ""}:${attachment.endLine ?? ""}`;
 }
 
+/** Appends unseen attachments in order, up to the cap; the same array length when nothing was added. */
+function mergeAttachments(current: readonly ChatAttachment[], added: readonly ChatAttachment[]): ChatAttachment[] {
+	const keys = new Set(current.map(attachmentKey));
+	const next = current.slice(0, MAX_PENDING_ATTACHMENTS);
+	for (const attachment of added) {
+		if (next.length >= MAX_PENDING_ATTACHMENTS) {
+			break;
+		}
+		const key = attachmentKey(attachment);
+		if (keys.has(key)) {
+			continue;
+		}
+		keys.add(key);
+		next.push(attachment);
+	}
+	return next;
+}
+
 /** Webview-side chat state shared by the Preact tree; every host update bumps one message version. */
 export class ChatStore {
 	session: ChatSessionMeta | undefined;
@@ -63,6 +81,8 @@ export class ChatStore {
 	activity: ChatSessionActivity[] = [];
 	/** Attachments shown in the composer; they are sent with the next message and survive a chat switch. */
 	pendingAttachments: ChatAttachment[] = [];
+	/** The user message being edited; the composer shows and changes its attachments. */
+	editing: { messageId: string; attachments: ChatAttachment[] } | undefined;
 	selectedModelId: string | undefined;
 	run: ChatRunState = { running: false };
 	latestUsage: ChatUsage | undefined;
@@ -140,6 +160,37 @@ export class ChatStore {
 		this.listeners.forEach(listener => listener());
 	};
 
+	/** Opens the editor on a user message, with the attachments it was sent with. */
+	startEdit = (messageId: string): void => {
+		const message = this.messageById.get(messageId);
+		if (!message || message.role !== "user") {
+			return;
+		}
+		this.editing = { messageId, attachments: [...message.attachments ?? []] };
+		this.listeners.forEach(listener => listener());
+	};
+
+	cancelEdit = (): void => {
+		if (!this.editing) {
+			return;
+		}
+		this.editing = undefined;
+		this.listeners.forEach(listener => listener());
+	};
+
+	removeEditAttachment = (id: string): void => {
+		const editing = this.editing;
+		if (!editing) {
+			return;
+		}
+		const next = editing.attachments.filter(attachment => attachment.id !== id);
+		if (next.length === editing.attachments.length) {
+			return;
+		}
+		this.editing = { ...editing, attachments: next };
+		this.listeners.forEach(listener => listener());
+	};
+
 	/** Hands the pending attachments to the message that is being sent. */
 	takeAttachments = (): ChatAttachment[] => {
 		const taken = this.pendingAttachments;
@@ -174,6 +225,7 @@ export class ChatStore {
 				this.changes = update.changes;
 				this.selectedModelId = update.selectedModelId;
 				this.run = update.run;
+				this.editing = undefined;
 				this.liveSubagentRuns.clear();
 				this.rebuildIndexes();
 				return;
@@ -214,11 +266,17 @@ export class ChatStore {
 			case "approvalResolved":
 				this.approvals = this.approvals.filter(request => request.id !== update.id);
 				return;
-			case "truncated":
+			case "truncated": {
+				const removed = this.indexOf(update.messageId);
+				const edited = this.editing ? this.indexOf(this.editing.messageId) : undefined;
+				if (removed !== undefined && (edited === undefined || edited >= removed)) {
+					this.editing = undefined;
+				}
 				applyHostUpdate(this.messages, update);
 				this.liveSubagentRuns.clear();
 				this.rebuildIndexes();
 				return;
+			}
 			case "run":
 				this.run = update.run;
 				return;
@@ -262,20 +320,14 @@ export class ChatStore {
 	}
 
 	private addPendingAttachments(attachments: readonly ChatAttachment[]): void {
-		const keys = new Set(this.pendingAttachments.map(attachmentKey));
-		const next = this.pendingAttachments.slice(0, MAX_PENDING_ATTACHMENTS);
-		for (const attachment of attachments) {
-			if (next.length >= MAX_PENDING_ATTACHMENTS) {
-				break;
-			}
-			const key = attachmentKey(attachment);
-			if (keys.has(key)) {
-				continue;
-			}
-			keys.add(key);
-			next.push(attachment);
+		const target = this.editing ? this.editing.attachments : this.pendingAttachments;
+		const next = mergeAttachments(target, attachments);
+		if (next.length === target.length) {
+			return;
 		}
-		if (next.length !== this.pendingAttachments.length) {
+		if (this.editing) {
+			this.editing = { ...this.editing, attachments: next };
+		} else {
 			this.pendingAttachments = next;
 		}
 	}

@@ -1,15 +1,20 @@
-import { Component } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { Component, type ComponentChildren } from "preact";
+import { useEffect, useState } from "preact/hooks";
 import { attachmentLabel, attachmentTitle } from "../shared/attachment-label";
 import type { ChatLimitInfo, ChatMessage, ChatPart, ChatSubagentRun, ChatSubagentStep } from "../shared/protocol";
 import { SUBAGENT_TOOL_NAME } from "../tools/subagent-tool";
 import { postMessage } from "./api";
+import { EditComposer } from "./edit-composer";
 import { OPEN_MODEL_PICKER_EVENT } from "./events";
-import { formatReset, formatTokens } from "./format";
+import { describeToolCall, formatReset, formatTokens, summarizeInput, toolCommand } from "./format";
 import { Markdown } from "./markdown";
+import type { ChatStore } from "./store";
 
 type ToolResultPart = Extract<ChatPart, { kind: "toolResult" }>;
+type ToolCallPart = Extract<ChatPart, { kind: "toolCall" }>;
 type CompactionPart = Extract<ChatPart, { kind: "compaction" }>;
+type ToolRowState = "ok" | "error" | "pending";
+type SubagentStatus = ChatSubagentRun["status"] | "pending";
 
 export interface MessageItemProps {
 	message: ChatMessage;
@@ -20,9 +25,10 @@ export interface MessageItemProps {
 	compactionBoundary: boolean;
 	/** Files the agent changed at or after this message's turn; used when editing. */
 	changedFilesSinceTurn: number;
+	/** The same context indicator the main composer shows. */
+	context: string | undefined;
+	store: ChatStore;
 	onEdit: (messageId: string) => void;
-	onCancelEdit: () => void;
-	onEditMessage: (messageId: string, text: string, undoChanges: boolean) => void;
 	onLoadToolResult: (messageId: string, callId: string) => void;
 	/** Live state of a running subagent; the finished run is a "subagent" part of the message. */
 	liveSubagentRun: (callId: string) => ChatSubagentRun | undefined;
@@ -36,7 +42,8 @@ class MessageItemMemo extends Component<MessageItemProps> {
 			|| next.running !== this.props.running
 			|| next.editing !== this.props.editing
 			|| next.compactionBoundary !== this.props.compactionBoundary
-			|| (next.editing && next.changedFilesSinceTurn !== this.props.changedFilesSinceTurn);
+			|| next.store !== this.props.store
+			|| (next.editing && (next.changedFilesSinceTurn !== this.props.changedFilesSinceTurn || next.context !== this.props.context));
 	}
 
 	render(props: MessageItemProps) {
@@ -46,7 +53,7 @@ class MessageItemMemo extends Component<MessageItemProps> {
 
 export const MessageItem = MessageItemMemo;
 
-function MessageView({ message, running, editing, compactionBoundary, changedFilesSinceTurn, onEdit, onCancelEdit, onEditMessage, onLoadToolResult, liveSubagentRun }: Omit<MessageItemProps, "version">) {
+function MessageView({ message, running, editing, compactionBoundary, changedFilesSinceTurn, context, store, onEdit, onLoadToolResult, liveSubagentRun }: Omit<MessageItemProps, "version">) {
 	const divider = compactionBoundary
 		? <div class="compaction-divider">Earlier messages are summarized for the model</div>
 		: null;
@@ -59,26 +66,48 @@ function MessageView({ message, running, editing, compactionBoundary, changedFil
 				<>
 					{divider}
 					<div class="msg msg-user msg-editing">
-						<UserEdit
-							messageId={message.id}
-							text={text}
+						<EditComposer
+							store={store}
+							message={message}
 							changedFilesSinceTurn={changedFilesSinceTurn}
-							onSubmit={onEditMessage}
-							onCancel={onCancelEdit}
+							context={context}
 						/>
 					</div>
 				</>
 			);
 		}
+		const editable = !running;
+		const preview = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+		const startEdit = () => {
+			if (!editable || window.getSelection()?.toString()) {
+				return;
+			}
+			onEdit(message.id);
+		};
+		const onBubbleKeyDown = (event: KeyboardEvent) => {
+			if (event.key !== "Enter" && event.key !== " ") {
+				return;
+			}
+			event.preventDefault();
+			startEdit();
+		};
 		return (
 			<>
 				{divider}
 				<div class="msg msg-user">
-					{running ? null : (
-						<button type="button" class="msg-edit-button" onClick={() => onEdit(message.id)}>Edit</button>
-					)}
 					<div class="user-body">
-						<div class="user-bubble">{text}</div>
+						<div
+							class="user-bubble"
+							role={editable ? "button" : undefined}
+							tabIndex={editable ? 0 : undefined}
+							title={editable ? "Click to edit" : undefined}
+							aria-label={editable ? `Edit message: ${preview}` : undefined}
+							onClick={startEdit}
+							onKeyDown={onBubbleKeyDown}
+						>
+							{editable ? <span class="user-edit-glyph" aria-hidden="true">✎</span> : null}
+							{text}
+						</div>
 						{message.attachments && message.attachments.length > 0 ? (
 							<div class="message-attachments">
 								{message.attachments.map(attachment => (
@@ -87,7 +116,10 @@ function MessageView({ message, running, editing, compactionBoundary, changedFil
 											type="button"
 											class="attachment-chip-open"
 											title={attachmentTitle(attachment)}
-											onClick={() => postMessage({ type: "openAttachment", attachment })}
+											onClick={event => {
+												event.stopPropagation();
+												postMessage({ type: "openAttachment", attachment });
+											}}
 										>
 											{attachment.kind === "selection" ? "✂" : "📄"}
 											<span class="attachment-chip-label">{attachmentLabel(attachment)}</span>
@@ -119,37 +151,49 @@ function MessageView({ message, running, editing, compactionBoundary, changedFil
 		<>
 			{divider}
 			<div class="msg msg-assistant">
-				{message.parts.map((part, index) => {
+				{groupParts(message.parts).map(unit => {
+					if (unit.kind === "tools") {
+						const rows = unit.parts.map(part => (
+							<ToolCallCard
+								key={part.callId}
+								name={part.name}
+								input={part.input}
+								result={results.get(part.callId)}
+								running={running}
+								messageId={message.id}
+								onLoadToolResult={onLoadToolResult}
+							/>
+						));
+						return unit.parts.length > 1
+							? <div class="tool-group" key={`group-${unit.index}`}>{rows}</div>
+							: rows[0] ?? null;
+					}
+					const part = unit.part;
+					const index = unit.index;
 					switch (part.kind) {
 						case "text":
 							return <Markdown key={index} text={part.text} />;
-						case "thinking":
+						case "thinking": {
+							const progress = lastTextLine(part.text);
 							return (
 								<details key={index} class="msg-thinking">
-									<summary>Thinking</summary>
+									<summary>
+										<span class="thinking-label">Thinking</span>
+										{progress ? <span class="thinking-progress" title={progress}>{progress}</span> : null}
+									</summary>
 									<pre>{part.text}</pre>
 								</details>
 							);
+						}
 						case "toolCall":
-							if (part.name === SUBAGENT_TOOL_NAME) {
-								return (
-									<SubagentCard
-										key={index}
-										input={part.input}
-										result={results.get(part.callId)}
-										part={subagentRuns.get(part.callId)}
-										liveRun={liveSubagentRun(part.callId)}
-										messageId={message.id}
-										onLoadToolResult={onLoadToolResult}
-									/>
-								);
-							}
 							return (
-								<ToolCallCard
-									key={index}
-									name={part.name}
+								<SubagentCard
+									key={part.callId}
 									input={part.input}
 									result={results.get(part.callId)}
+									part={subagentRuns.get(part.callId)}
+									liveRun={liveSubagentRun(part.callId)}
+									running={running}
 									messageId={message.id}
 									onLoadToolResult={onLoadToolResult}
 								/>
@@ -171,6 +215,50 @@ function MessageView({ message, running, editing, compactionBoundary, changedFil
 			</div>
 		</>
 	);
+}
+
+type PartUnit =
+	| { kind: "part"; index: number; part: ChatPart }
+	| { kind: "tools"; index: number; parts: ToolCallPart[] };
+
+/** Consecutive tool calls share one list; the subagent card stays a card of its own. */
+function groupParts(parts: ChatPart[]): PartUnit[] {
+	const units: PartUnit[] = [];
+	let group: ToolCallPart[] | undefined;
+	for (let index = 0; index < parts.length; index += 1) {
+		const part = parts[index];
+		if (part.kind === "toolCall" && part.name !== SUBAGENT_TOOL_NAME) {
+			group ??= [];
+			group.push(part);
+			continue;
+		}
+		if (group) {
+			units.push({ kind: "tools", index: index - group.length, parts: group });
+			group = undefined;
+		}
+		units.push({ kind: "part", index, part });
+	}
+	if (group) {
+		units.push({ kind: "tools", index: parts.length - group.length, parts: group });
+	}
+	return units;
+}
+
+function firstTextLine(text: string): string {
+	const lines = text.split(/\r\n|\r|\n/);
+	return lines.length > 0 ? lines[0].trim() : "";
+}
+
+function lastTextLine(text: string): string {
+	const lines = text.split(/\r\n|\r|\n/).map(line => line.trim()).filter(line => line.length > 0);
+	return lines.length > 0 ? lines[lines.length - 1] : "";
+}
+
+function markdownFirstLine(text: string | undefined): string {
+	if (!text) {
+		return "";
+	}
+	return firstTextLine(text).replace(/^[#*\-`>\s]+/, "").replace(/[*`#\s]+$/, "").trim();
 }
 
 function CompactionCard({ part }: { part: CompactionPart }) {
@@ -218,21 +306,11 @@ function LimitCard({ level, text, limit }: LimitCardProps) {
 	);
 }
 
-function summarizeInput(input: unknown): string {
-	let text: string;
-	try {
-		text = typeof input === "string" ? input : JSON.stringify(input) ?? String(input);
-	} catch {
-		text = String(input);
-	}
-	const singleLine = text.replace(/\s+/g, " ").trim();
-	return singleLine.length > 160 ? `${singleLine.slice(0, 159)}…` : singleLine;
-}
-
 interface ToolCallProps {
 	name: string;
 	input: unknown;
 	result: ToolResultPart | undefined;
+	running: boolean;
 	messageId: string;
 	onLoadToolResult: (messageId: string, callId: string) => void;
 }
@@ -243,34 +321,90 @@ interface ToolResultProps {
 	onLoadToolResult: (messageId: string, callId: string) => void;
 }
 
-function ToolCallCard({ name, input, result, messageId, onLoadToolResult }: ToolCallProps) {
-	const summary = summarizeInput(input);
+interface ToolRowProps {
+	state: ToolRowState;
+	running: boolean;
+	title: ComponentChildren;
+	detail?: string;
+	summary: string;
+	children: ComponentChildren;
+}
+
+function ToolRow({ state, running, title, detail, summary, children }: ToolRowProps) {
+	const [open, setOpen] = useState(false);
 	return (
-		<div class={`tool-card${result?.isError ? " tool-error" : ""}`}>
-			<div class="tool-head">
-				<span class="tool-name">{name}</span>
-				<span class="tool-summary" title={summary}>{summary}</span>
-			</div>
-			{result ? <ToolResultDetails part={result} messageId={messageId} onLoadToolResult={onLoadToolResult} /> : null}
+		<div class={`tool-row tool-row-${state}`}>
+			<button
+				type="button"
+				class="tool-row-toggle"
+				aria-expanded={open}
+				title={summary}
+				onClick={() => setOpen(value => !value)}
+			>
+				<span class="tool-row-glyph" aria-hidden="true">{toolGlyph(state, running)}</span>
+				<span class="tool-row-title">{title}</span>
+				{detail ? <span class="tool-row-detail">{detail}</span> : null}
+				<span class="tool-row-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
+			</button>
+			{open ? <div class="tool-row-body">{children}</div> : null}
 		</div>
+	);
+}
+
+function toolGlyph(state: ToolRowState, running: boolean): ComponentChildren {
+	if (state === "ok") {
+		return "✓";
+	}
+	if (state === "error") {
+		return "✗";
+	}
+	return running ? <span class="tool-spinner" /> : "–";
+}
+
+function prettyInput(input: unknown): string {
+	try {
+		return typeof input === "string" ? input : JSON.stringify(input, null, 2) ?? String(input);
+	} catch {
+		return String(input);
+	}
+}
+
+function ToolCallCard({ name, input, result, running, messageId, onLoadToolResult }: ToolCallProps) {
+	const described = describeToolCall(name, input);
+	const state: ToolRowState = result ? (result.isError ? "error" : "ok") : "pending";
+	const detail = state === "error" ? firstTextLine(result?.text ?? "") : described.detail;
+	const command = name === "run_in_terminal" ? toolCommand(input) : undefined;
+	const title = command === undefined
+		? described.title
+		: <span>Ran <span class="tool-row-command">{command}</span></span>;
+	return (
+		<ToolRow state={state} running={running} title={title} detail={detail || undefined} summary={summarizeInput(input)}>
+			<div class="tool-row-label">Input</div>
+			<pre class="tool-input">{prettyInput(input)}</pre>
+			{result ? <ToolResultDetails part={result} messageId={messageId} onLoadToolResult={onLoadToolResult} openByDefault /> : null}
+		</ToolRow>
 	);
 }
 
 function ToolResultCard({ part, messageId, onLoadToolResult }: ToolResultProps) {
+	const first = firstTextLine(part.text);
 	return (
-		<div class={`tool-card tool-result-card${part.isError ? " tool-error" : ""}`}>
-			<div class="tool-head">
-				<span class="tool-name">{part.isError ? "Tool error" : "Tool result"}</span>
-			</div>
-			<ToolResultDetails part={part} messageId={messageId} onLoadToolResult={onLoadToolResult} />
-		</div>
+		<ToolRow
+			state={part.isError ? "error" : "ok"}
+			running={false}
+			title="Tool output"
+			detail={part.isError ? first : undefined}
+			summary={first || "Tool output"}
+		>
+			<ToolResultDetails part={part} messageId={messageId} onLoadToolResult={onLoadToolResult} openByDefault />
+		</ToolRow>
 	);
 }
 
-function ToolResultDetails({ part, messageId, onLoadToolResult, report }: ToolResultProps & { report?: boolean }) {
+function ToolResultDetails({ part, messageId, onLoadToolResult, report, openByDefault }: ToolResultProps & { report?: boolean; openByDefault?: boolean }) {
 	const markdown = report === true && !part.isError;
 	return (
-		<details class={`tool-result${part.isError ? " tool-result-error" : ""}`} open={markdown}>
+		<details class={`tool-result${part.isError ? " tool-result-error" : ""}`} open={markdown || openByDefault === true}>
 			<summary>{part.isError ? "Error output" : markdown ? "Report" : "Output"}{part.preview ? " (preview)" : ""}</summary>
 			{markdown ? <div class="tool-report"><Markdown text={part.text} /></div> : <pre class="tool-output">{part.text}</pre>}
 			{part.preview ? (
@@ -289,6 +423,7 @@ function ToolResultDetails({ part, messageId, onLoadToolResult, report }: ToolRe
 interface SubagentInput {
 	description: string;
 	model: string;
+	prompt: string;
 }
 
 function readSubagentInput(input: unknown): SubagentInput {
@@ -296,6 +431,7 @@ function readSubagentInput(input: unknown): SubagentInput {
 	return {
 		description: typeof record.description === "string" ? record.description : "",
 		model: typeof record.model === "string" ? record.model : "",
+		prompt: typeof record.prompt === "string" ? record.prompt : "",
 	};
 }
 
@@ -312,26 +448,84 @@ function formatDuration(ms: number): string {
 	return seconds > 0 ? `${minutes} min ${seconds} s` : `${minutes} min`;
 }
 
-function subagentStatusText(run: ChatSubagentRun): string {
-	const steps = `${run.steps.length} ${run.steps.length === 1 ? "step" : "steps"}`;
-	const elapsed = run.durationMs ?? Math.max(0, Date.now() - run.startedAt);
-	switch (run.status) {
-		case "running": return `Working… ${steps} · ${formatDuration(elapsed)}`;
-		case "done": return `Done · ${steps} · ${formatDuration(elapsed)}`;
-		case "failed": return `Failed · ${steps} · ${formatDuration(elapsed)}`;
-		case "stopped": return `Stopped · ${steps} · ${formatDuration(elapsed)}`;
+/** Repaints the running duration once a second while the card is active. */
+function useNow(active: boolean): number {
+	const [now, setNow] = useState(() => Date.now());
+	useEffect(() => {
+		if (!active) {
+			return undefined;
+		}
+		setNow(Date.now());
+		const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+		return () => window.clearInterval(timer);
+	}, [active]);
+	return now;
+}
+
+function parseJsonObject(text: string): unknown {
+	try {
+		const value: unknown = JSON.parse(text);
+		return typeof value === "object" && value !== null ? value : undefined;
+	} catch {
+		return undefined;
 	}
+}
+
+function stepToolText(step: Extract<ChatSubagentStep, { kind: "tool" }>): string {
+	const input = parseJsonObject(step.summary);
+	if (input !== undefined) {
+		const described = describeToolCall(step.name, input);
+		return described.detail ? `${described.title} · ${described.detail}` : described.title;
+	}
+	return `${step.name}: ${step.summary}`;
+}
+
+function subagentFailureText(run: ChatSubagentRun, result: ToolResultPart | undefined): string {
+	if (result?.isError) {
+		return firstTextLine(result.text);
+	}
+	for (let index = run.steps.length - 1; index >= 0; index -= 1) {
+		const step = run.steps[index];
+		if (step.kind === "notice") {
+			return firstTextLine(step.text);
+		}
+	}
+	return result ? firstTextLine(result.text) : "";
+}
+
+/** The always-visible second line: what the subagent is doing or how it ended. */
+function subagentProgress(run: ChatSubagentRun | undefined, result: ToolResultPart | undefined): string {
+	if (!run) {
+		return result?.isError ? firstTextLine(result.text) || "Failed" : "Starting…";
+	}
+	if (run.status === "running") {
+		const step = run.steps[run.steps.length - 1];
+		if (!step) {
+			return "Starting…";
+		}
+		return step.kind === "tool" ? stepToolText(step) : firstTextLine(step.text) || "Working…";
+	}
+	if (run.status === "done") {
+		return markdownFirstLine(result?.text) || "Done";
+	}
+	if (run.status === "failed") {
+		return subagentFailureText(run, result) || "Failed";
+	}
+	return "Stopped";
 }
 
 function SubagentStepView({ step }: { step: ChatSubagentStep }) {
 	switch (step.kind) {
-		case "tool":
+		case "tool": {
+			const input = parseJsonObject(step.summary);
+			const described = input === undefined ? undefined : describeToolCall(step.name, input);
 			return (
-				<div class={`subagent-step subagent-step-tool${step.isError ? " tool-error" : ""}`}>
-					<span class="subagent-step-name">{step.name}</span>
-					<span class="subagent-step-summary" title={step.summary}>{step.summary}</span>
+				<div class={`subagent-step subagent-step-tool${step.isError ? " tool-error" : ""}`} title={step.summary}>
+					<span class="subagent-step-name">{described?.title ?? step.name}</span>
+					<span class="subagent-step-summary">{described ? described.detail ?? "" : step.summary}</span>
 				</div>
 			);
+		}
 		case "text":
 			return (
 				<div class="subagent-step subagent-step-text">
@@ -343,122 +537,85 @@ function SubagentStepView({ step }: { step: ChatSubagentStep }) {
 	}
 }
 
+function subagentStatus(run: ChatSubagentRun | undefined, result: ToolResultPart | undefined): SubagentStatus {
+	if (run) {
+		return run.status;
+	}
+	if (result) {
+		return result.isError ? "failed" : "done";
+	}
+	return "pending";
+}
+
+function subagentGlyph(status: SubagentStatus): ComponentChildren {
+	switch (status) {
+		case "running": return <span class="tool-spinner" />;
+		case "done": return "✓";
+		case "failed": return "✗";
+		case "stopped": return "■";
+		default: return "–";
+	}
+}
+
 interface SubagentCardProps {
 	input: unknown;
 	result: ToolResultPart | undefined;
 	/** The finished run, from the message's "subagent" part. */
 	part: ChatSubagentRun | undefined;
 	liveRun: ChatSubagentRun | undefined;
+	running: boolean;
 	messageId: string;
 	onLoadToolResult: (messageId: string, callId: string) => void;
 }
 
-function SubagentCard({ input, result, part, liveRun, messageId, onLoadToolResult }: SubagentCardProps) {
+function SubagentCard({ input, result, part, liveRun, running, messageId, onLoadToolResult }: SubagentCardProps) {
+	const [open, setOpen] = useState(false);
 	const parsed = readSubagentInput(input);
 	const run = part ?? liveRun;
+	const status = subagentStatus(run, result);
+	const now = useNow(status === "running");
 	const description = run?.description || parsed.description;
 	const model = run?.modelName || parsed.model;
-	const failed = run?.status === "failed" || result?.isError === true;
+	const elapsed = run ? run.durationMs ?? Math.max(0, now - run.startedAt) : 0;
+	const steps = run ? `${run.steps.length} ${run.steps.length === 1 ? "step" : "steps"}` : "0 steps";
+	const meta = run ? `${steps} · ${formatDuration(elapsed)}` : running ? "Starting…" : "No run yet";
+	const progress = subagentProgress(run, result);
 	return (
-		<div class={`tool-card subagent-card${run ? ` subagent-${run.status}` : ""}${failed ? " tool-error" : ""}`}>
-			<div class="tool-head subagent-head">
-				<span class="tool-name">Subagent</span>
+		<div class={`subagent-card subagent-${status}`}>
+			<button type="button" class="subagent-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+				<span class="subagent-glyph" aria-hidden="true">{subagentGlyph(status)}</span>
+				<span class="subagent-label">Subagent</span>
 				{model ? <span class="subagent-model">{model}</span> : null}
-				{description ? <span class="tool-summary" title={description}>{description}</span> : null}
-			</div>
-			{run ? <div class="subagent-status">{subagentStatusText(run)}</div> : null}
-			{run && run.steps.length > 0 ? (
-				<details class="subagent-steps">
-					<summary>Steps</summary>
-					<div class="subagent-step-list">
-						{run.steps.map((step, index) => <SubagentStepView key={index} step={step} />)}
+				{description ? <span class="subagent-desc" title={description}>{description}</span> : null}
+				<span class="subagent-meta">{meta}</span>
+				<span class="subagent-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
+			</button>
+			<div class="subagent-sub" title={progress}>{progress}</div>
+			{open ? (
+				<div class="subagent-body">
+					{parsed.prompt ? (
+						<div class="subagent-section">
+							<div class="subagent-section-title">Prompt</div>
+							<div class="subagent-prompt"><Markdown text={parsed.prompt} /></div>
+						</div>
+					) : null}
+					<div class="subagent-section">
+						<div class="subagent-section-title">Steps</div>
+						{run && run.steps.length > 0 ? (
+							<div class="subagent-step-list">
+								{run.steps.map((step, index) => <SubagentStepView key={index} step={step} />)}
+							</div>
+						) : <div class="subagent-empty">No steps yet</div>}
 					</div>
-				</details>
+					<div class="subagent-section">
+						<div class="subagent-section-title">Report</div>
+						{result
+							? <ToolResultDetails part={result} messageId={messageId} onLoadToolResult={onLoadToolResult} report />
+							: <div class="subagent-empty">No report yet</div>}
+					</div>
+				</div>
 			) : null}
-			{result ? <ToolResultDetails part={result} messageId={messageId} onLoadToolResult={onLoadToolResult} report /> : null}
 		</div>
 	);
 }
 
-interface UserEditProps {
-	messageId: string;
-	text: string;
-	changedFilesSinceTurn: number;
-	onSubmit: (messageId: string, text: string, undoChanges: boolean) => void;
-	onCancel: () => void;
-}
-
-function UserEdit({ messageId, text, changedFilesSinceTurn, onSubmit, onCancel }: UserEditProps) {
-	const [draft, setDraft] = useState(text);
-	const [undoChanges, setUndoChanges] = useState(changedFilesSinceTurn > 0);
-	const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-	useEffect(() => {
-		const textarea = textareaRef.current;
-		if (!textarea) {
-			return;
-		}
-		textarea.focus();
-		textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-	}, []);
-
-	useEffect(() => {
-		const textarea = textareaRef.current;
-		if (!textarea) {
-			return;
-		}
-		textarea.style.height = "auto";
-		const limit = Math.max(80, Math.round(document.documentElement.clientHeight * 0.4));
-		textarea.style.height = `${Math.min(textarea.scrollHeight + textarea.offsetHeight - textarea.clientHeight, limit)}px`;
-	}, [draft]);
-
-	const submit = () => {
-		// The field may be newer than the last render, e.g. Enter right after a paste.
-		const trimmed = (textareaRef.current?.value ?? draft).trim();
-		if (trimmed.length > 0) {
-			onSubmit(messageId, trimmed, changedFilesSinceTurn > 0 && undoChanges);
-		}
-	};
-
-	const onKeyDown = (event: KeyboardEvent) => {
-		if (event.key === "Escape") {
-			event.preventDefault();
-			onCancel();
-			return;
-		}
-		if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
-			return;
-		}
-		event.preventDefault();
-		submit();
-	};
-
-	return (
-		<div class="msg-edit">
-			<textarea
-				ref={textareaRef}
-				class="composer-input msg-edit-input"
-				rows={1}
-				aria-label="Edit message"
-				value={draft}
-				onInput={event => setDraft(event.currentTarget.value)}
-				onKeyDown={onKeyDown}
-			/>
-			{changedFilesSinceTurn > 0 ? (
-				<label class="msg-edit-undo">
-					<input
-						type="checkbox"
-						checked={undoChanges}
-						onChange={event => setUndoChanges(event.currentTarget.checked)}
-					/>
-					{`Also undo changes to ${changedFilesSinceTurn === 1 ? "1 file" : `${changedFilesSinceTurn} files`} made since this message`}
-				</label>
-			) : null}
-			<div class="msg-edit-actions">
-				<button type="button" class="send-button msg-edit-send" disabled={draft.trim().length === 0} onClick={submit}>Send</button>
-				<button type="button" class="msg-edit-cancel" onClick={onCancel}>Cancel</button>
-			</div>
-			<div class="msg-edit-hint">Sending replaces this message and every message after it.</div>
-		</div>
-	);
-}
