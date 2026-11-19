@@ -75,12 +75,52 @@ export interface ChatSessionMeta {
 	messageCount: number;
 }
 
+export type ChatSessionActivityState = "running" | "approval" | "finished";
+
+export interface ChatSessionActivity {
+	id: string;
+	title: string;
+	state: ChatSessionActivityState;
+}
+
 export interface ChatModelEntry {
 	id: string;
 	/** Name without the provider suffix, unique inside its group. */
 	name: string;
 	maxInputTokens: number;
 	detail?: string;
+	/** Reasoning levels the model accepts, from its configurationSchema. */
+	thinking?: ChatThinkingOptions;
+}
+
+export interface ChatThinkingLevel {
+	value: string;
+	label: string;
+	description?: string;
+}
+
+export interface ChatThinkingOptions {
+	levels: ChatThinkingLevel[];
+	/** The level the provider uses when the chat sends none. */
+	default?: string;
+}
+
+/** A subscription window such as "5h" or "Week". */
+export interface ChatQuotaWindow {
+	label: string;
+	/** Used share, 0-100. */
+	percent: number;
+	/** Epoch milliseconds. */
+	resetsAt?: number;
+}
+
+/** What is left with one provider: subscription windows or an account balance. */
+export interface ChatProviderQuota {
+	/** Matches a model group's provider label, e.g. "Codex". */
+	provider: string;
+	plan?: string;
+	windows: ChatQuotaWindow[];
+	balance?: string;
 }
 
 export interface ChatModelGroup {
@@ -146,10 +186,19 @@ export type HostMessage =
 	| {
 		type: "init"; session: ChatSessionMeta; messages: ChatMessage[]; models: ChatModelGroup[]; selectedModelId?: string; run: ChatRunState;
 		tools: ChatToolGroup[]; approvals: ChatApprovalRequest[]; changes: ChatChangeSet;
+		/** Chosen reasoning level of the selected model; absent means the model's default. */
+		selectedThinking?: string;
+		quota: ChatProviderQuota[];
+		activity: ChatSessionActivity[];
 	}
 	| { type: "changes"; changes: ChatChangeSet }
-	| { type: "models"; models: ChatModelGroup[]; selectedModelId?: string }
+	| { type: "models"; models: ChatModelGroup[]; selectedModelId?: string; selectedThinking?: string }
+	| { type: "quota"; quota: ChatProviderQuota[] }
 	| { type: "session"; session: ChatSessionMeta }
+	/** Chats for the history list, newest first; empty chats other than the active one are left out. */
+	| { type: "sessions"; sessions: ChatSessionMeta[]; activeId: string }
+	/** Opens the chat list, e.g. from the view title button. */
+	| { type: "showSessions" }
 	| { type: "tools"; tools: ChatToolGroup[] }
 	| { type: "messageAdded"; message: ChatMessage }
 	| { type: "partAdded"; messageId: string; part: ChatStructuredPart }
@@ -162,7 +211,9 @@ export type HostMessage =
 	| { type: "approvalResolved"; id: string; allowed: boolean }
 	| { type: "toolResultFull"; messageId: string; callId: string; text: string }
 	/** Live state of a running subagent; the finished run arrives as a "subagent" part. */
-	| { type: "subagent"; messageId: string; run: ChatSubagentRun };
+	| { type: "subagent"; messageId: string; run: ChatSubagentRun }
+	/** Chats other than the shown one that run, wait for an approval or finished unseen. */
+	| { type: "activity"; activity: ChatSessionActivity[] };
 
 /** Webview → host. */
 export type WebviewMessage =
@@ -179,9 +230,16 @@ export type WebviewMessage =
 	| { type: "openChange"; id: string }
 	| { type: "stop" }
 	| { type: "selectModel"; modelId: string }
+	/** Reasoning level for the selected model; remembered per model. */
+	| { type: "selectThinking"; value: string }
+	/** Asks the providers for fresh limits and balances, e.g. when the quota popup opens. */
+	| { type: "refreshQuota" }
 	| { type: "setToolsEnabled"; names: string[]; enabled: boolean }
 	| { type: "approve"; id: string; allow: boolean }
 	| { type: "newChat" }
+	| { type: "listSessions" }
+	| { type: "openSession"; sessionId: string }
+	| { type: "deleteSession"; sessionId: string }
 	| { type: "loadToolResult"; messageId: string; callId: string };
 
 /** Tool results longer than this reach the webview as a preview; the full text is loaded on request. */

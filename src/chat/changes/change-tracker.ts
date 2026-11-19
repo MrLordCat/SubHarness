@@ -41,12 +41,14 @@ interface SessionChanges {
 
 export interface ChatChangeTrackerLike {
 	beginTurn(): Promise<TurnSnapshot | undefined>;
-	endTurn(sessionId: string, turn: number, begin: TurnSnapshot): Promise<void>;
+	endTurn(sessionId: string, turn: number, begin: TurnSnapshot, claimed?: readonly string[]): Promise<void>;
 	changeSet(sessionId: string): Promise<ChatChangeSet>;
 	keep(sessionId: string, ids?: readonly string[]): Promise<void>;
 	undo(sessionId: string, ids?: readonly string[]): Promise<void>;
 	undoSinceTurn(sessionId: string, turn: number): Promise<void>;
 	forgetTurnsFrom(sessionId: string, turn: number): Promise<void>;
+	/** Drops the Keep/Undo state of a deleted chat; the files stay as they are. */
+	forgetSession?(sessionId: string): Promise<void>;
 	/** Content of a file before the agent's pending change, for the diff editor; undefined when the agent created it. */
 	original(sessionId: string, id: string): Promise<{ root: string; path: string; before?: Buffer; exists: boolean } | undefined>;
 }
@@ -62,6 +64,12 @@ function rootKey(root: string): string {
 
 function sameFile(left: FileChange, right: { root: string; path: string }): boolean {
 	return left.root === right.root && left.path === right.path;
+}
+
+/** Absolute path with Windows case folded away, for comparing claimed and changed files. */
+function comparablePath(file: string): string {
+	const resolved = path.resolve(file);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function fileId(change: { root: string; path: string }): string {
@@ -116,49 +124,87 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 	private readonly _disabled = new Map<string, string>();
 	private readonly _sessions = new Map<string, SessionChanges>();
 	private readonly _numstat = new Map<string, { additions: number; deletions: number } | undefined>();
+	private readonly _open = new Set<TurnSnapshot>();
+	private readonly _overlapped = new WeakSet<TurnSnapshot>();
 	private _gitPath: Promise<string | undefined> | undefined;
 	private _queue: Promise<unknown> = Promise.resolve();
+	private _gitQueue: Promise<unknown> = Promise.resolve();
 
 	constructor(options: ChatChangeTrackerOptions) {
 		this._options = options;
 	}
 
 	async beginTurn(): Promise<TurnSnapshot | undefined> {
-		const snapshot = new Map<string, string>();
-		for (const folder of this._options.folders()) {
-			const repo = await this._repo(folder.fsPath);
-			if (!repo) {
-				continue;
-			}
-			try {
-				snapshot.set(folder.fsPath, await repo.snapshot());
-			} catch (error) {
-				this._disable(folder.fsPath, error);
-			}
-		}
-		return snapshot.size > 0 ? snapshot : undefined;
-	}
-
-	async endTurn(sessionId: string, turn: number, begin: TurnSnapshot): Promise<void> {
-		const files: FileChange[] = [];
-		for (const [root, before] of begin) {
-			const repo = this._repos.get(root);
-			if (!repo || this._disabled.has(root)) {
-				continue;
-			}
-			try {
-				const after = await repo.snapshot();
-				if (after === before) {
+		return this._enqueueGit(async () => {
+			const snapshot = new Map<string, string>();
+			for (const folder of this._options.folders()) {
+				const repo = await this._repo(folder.fsPath);
+				if (!repo) {
 					continue;
 				}
-				for (const change of await repo.diff(before, after)) {
-					files.push({ root, path: change.path, before: change.before, after: change.after });
+				try {
+					snapshot.set(folder.fsPath, await repo.snapshot());
+				} catch (error) {
+					this._disable(folder.fsPath, error);
 				}
-			} catch (error) {
-				this._disable(root, error);
 			}
+			if (snapshot.size === 0) {
+				return undefined;
+			}
+			if (this._open.size > 0) {
+				for (const open of this._open) {
+					this._overlapped.add(open);
+				}
+				this._overlapped.add(snapshot);
+			}
+			this._open.add(snapshot);
+			return snapshot;
+		});
+	}
+
+	async endTurn(sessionId: string, turn: number, begin: TurnSnapshot, claimed?: readonly string[]): Promise<void> {
+		const overlapped = this._overlapped.has(begin);
+		this._open.delete(begin);
+		let files = await this._enqueueGit(async () => {
+			const changed: FileChange[] = [];
+			for (const [root, before] of begin) {
+				const repo = this._repos.get(root);
+				if (!repo || this._disabled.has(root)) {
+					continue;
+				}
+				try {
+					const after = await repo.snapshot();
+					if (after === before) {
+						continue;
+					}
+					for (const change of await repo.diff(before, after)) {
+						changed.push({ root, path: change.path, before: change.before, after: change.after });
+					}
+				} catch (error) {
+					this._disable(root, error);
+				}
+			}
+			return changed;
+		});
+		let dropped = 0;
+		if (overlapped) {
+			const allowed = new Set((claimed ?? []).map(comparablePath));
+			const kept = files.filter(file => allowed.has(comparablePath(path.join(file.root, ...file.path.split("/")))));
+			dropped = files.length - kept.length;
+			files = kept;
+		}
+		const notice = dropped > 0
+			? `Another chat was working at the same time, so ${plural(dropped, "file")} changed by other means ${dropped === 1 ? "is" : "are"} not listed here.`
+			: undefined;
+		if (notice) {
+			this._options.log?.("chat.changes.overlap", { sessionId, kept: files.length, dropped });
 		}
 		if (files.length === 0) {
+			if (notice) {
+				await this._update(sessionId, data => {
+					data.notice = notice;
+				});
+			}
 			return;
 		}
 		await this._update(sessionId, data => {
@@ -175,7 +221,7 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 				}
 			}
 			data.pending = data.pending.filter(file => file.before !== file.after);
-			data.notice = undefined;
+			data.notice = notice;
 		});
 	}
 
@@ -262,6 +308,13 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 	async forgetTurnsFrom(sessionId: string, turn: number): Promise<void> {
 		await this._update(sessionId, data => {
 			data.turns = data.turns.filter(record => record.turn < turn);
+		});
+	}
+
+	async forgetSession(sessionId: string): Promise<void> {
+		await this._enqueue(async () => {
+			this._sessions.delete(sessionId);
+			await fs.rm(this._file(sessionId), { force: true });
 		});
 	}
 
@@ -393,6 +446,12 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 	private _enqueue<T>(operation: () => Promise<T>): Promise<T> {
 		const result = this._queue.then(operation, operation);
 		this._queue = result.catch(() => undefined);
+		return result;
+	}
+
+	private _enqueueGit<T>(operation: () => Promise<T>): Promise<T> {
+		const result = this._gitQueue.then(operation, operation);
+		this._gitQueue = result.catch(() => undefined);
 		return result;
 	}
 

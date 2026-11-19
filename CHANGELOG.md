@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.21.16 (development patch) - 2026-11-19
+
+- Added: bridge chats keep working in the background. Opening another chat
+  or starting a new one no longer stops the running turn, and several chats
+  can run at the same time. A badge in the chat header counts the chats that
+  are running, waiting for an approval or finished unseen; the chat list marks
+  them too. When a background chat needs an approval, a notification offers to
+  open it. Stop only stops the chat you are looking at.
+- Changed: Keep/Undo stays per chat while chats run in parallel. When another
+  chat worked at the same time, a chat lists only the files its own edit tools
+  wrote and says how many other changed files it left out, so Undo in one chat
+  cannot revert another chat's work.
+
+## 1.21.15 (development patch) - 2026-11-19
+
+- Added: a chat history in the bridge chat. Click the chat title, or the
+  history button in the view title, to search earlier chats grouped by day,
+  switch to one, start a new chat or delete a chat after a confirmation. The
+  arrow keys, Enter and Delete work in the list. A chat keeps its model when
+  you return to it. Files the agent changed stay as they are when their chat
+  is deleted.
+- Changed: leaving a chat that never got a message removes it, so New Chat no
+  longer fills the history with empty chats. Switching chats stops a running
+  turn and tells the provider the old chat was left.
+
+## 1.21.14 (development patch) - 2026-11-19
+
+- Added: a thinking picker in the bridge chat composer for models that offer
+  reasoning levels (Codex, Claude, DeepSeek and others). The choice is saved
+  and sent with every turn.
+- Added: a limits chip in the composer. It shows the most used Codex or Claude
+  window, or the DeepSeek balance, for the selected provider. Click it to see
+  every provider's windows with reset times. It refreshes when opened and
+  after each turn.
+- Changed: the composer controls wrap onto a second line in a narrow chat
+  instead of squeezing the model name, and pickers stay inside the window.
+
 ## 1.21.13 (development patch) - 2026-11-19
 
 - Fixed: after a tool was renamed or removed, DeepSeek and other API models

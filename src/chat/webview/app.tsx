@@ -1,8 +1,10 @@
 import { useCallback, useLayoutEffect, useState } from "preact/hooks";
 import type { ChatModelGroup, ChatUsage } from "../shared/protocol";
+import { ActivityBadge } from "./activity-badge";
 import { postMessage } from "./api";
 import { ApprovalCard } from "./approval-card";
 import { ChangesPanel } from "./changes-panel";
+import { ChatHistory } from "./chat-history";
 import { Composer } from "./composer";
 import { formatTokens } from "./format";
 import { MessageList } from "./message-list";
@@ -22,12 +24,15 @@ function contextIndicator(latestUsage: ChatUsage | undefined, models: ChatModelG
 
 export function App({ store }: { store: ChatStore }) {
 	const [, setRevision] = useState(0);
+	const [badgeOpens, setBadgeOpens] = useState(0);
 	// Layout effect: subscribe before the host's init message can be delivered.
 	useLayoutEffect(() => store.subscribe(() => setRevision(revision => revision + 1)), [store]);
 
 	const onSend = useCallback((text: string) => postMessage({ type: "send", text }), []);
 	const onStop = useCallback(() => postMessage({ type: "stop" }), []);
 	const onSelectModel = useCallback((modelId: string) => postMessage({ type: "selectModel", modelId }), []);
+	const onSelectThinking = useCallback((value: string) => postMessage({ type: "selectThinking", value }), []);
+	const onRefreshQuota = useCallback(() => postMessage({ type: "refreshQuota" }), []);
 	const onEditMessage = useCallback(
 		(messageId: string, text: string, undoChanges: boolean) => {
 			postMessage(undoChanges
@@ -45,6 +50,11 @@ export function App({ store }: { store: ChatStore }) {
 		(messageId: string, callId: string) => postMessage({ type: "loadToolResult", messageId, callId }),
 		[],
 	);
+	const onListSessions = useCallback(() => postMessage({ type: "listSessions" }), []);
+	const onOpenSession = useCallback((sessionId: string) => postMessage({ type: "openSession", sessionId }), []);
+	const onDeleteSession = useCallback((sessionId: string) => postMessage({ type: "deleteSession", sessionId }), []);
+	const onShowActivity = useCallback(() => setBadgeOpens(count => count + 1), []);
+	const onNewChat = useCallback(() => postMessage({ type: "newChat" }), []);
 
 	const title = store.session?.title ?? "Chat";
 	const context = contextIndicator(store.latestUsage, store.models, store.selectedModelId);
@@ -52,7 +62,19 @@ export function App({ store }: { store: ChatStore }) {
 	return (
 		<div class="chat-root">
 			<header class="chat-header">
-				<div class="chat-title" title={title}>{title}</div>
+				<ChatHistory
+					title={title}
+					sessions={store.sessions}
+					activeId={store.activeSessionId}
+					activity={store.activity}
+					activeRunning={store.run.running}
+					openRequest={store.showSessionsRequest + badgeOpens}
+					onList={onListSessions}
+					onOpen={onOpenSession}
+					onDelete={onDeleteSession}
+					onNewChat={onNewChat}
+				/>
+				<ActivityBadge activity={store.activity} onClick={onShowActivity} />
 			</header>
 			{store.messages.length === 0 ? (
 				<div class="chat-empty">Ask anything. Enter sends, Shift+Enter adds a line.</div>
@@ -80,10 +102,14 @@ export function App({ store }: { store: ChatStore }) {
 				models={store.models}
 				tools={store.tools}
 				selectedModelId={store.selectedModelId}
+				selectedThinking={store.selectedThinking}
+				quota={store.quota}
 				context={context}
 				onSend={onSend}
 				onStop={onStop}
 				onSelectModel={onSelectModel}
+				onSelectThinking={onSelectThinking}
+				onRefreshQuota={onRefreshQuota}
 				onSetToolsEnabled={onSetToolsEnabled}
 			/>
 		</div>

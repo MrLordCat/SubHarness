@@ -5,9 +5,12 @@ import {
 	type ChatMessage,
 	type ChatModelGroup,
 	type ChatPart,
+	type ChatProviderQuota,
+	type ChatSessionActivity,
 	type ChatSessionMeta,
 	type ChatSubagentRun,
 	type ChatSubagentStep,
+	type ChatThinkingOptions,
 	type ChatToolGroup,
 	type HostMessage,
 	type WebviewMessage,
@@ -22,6 +25,8 @@ interface HarnessVsCodeApi {
 interface HarnessStats {
 	readonly messageCount: number;
 	readonly lastStreamMs: number;
+	showSessions(): void;
+	setActivity(activity: ChatSessionActivity[]): void;
 }
 
 declare global {
@@ -31,14 +36,32 @@ declare global {
 	}
 }
 
+const CODEX_THINKING: ChatThinkingOptions = {
+	levels: [
+		{ value: "low", label: "Low", description: "Fast answers with little deliberation." },
+		{ value: "medium", label: "Medium", description: "Balanced speed and reasoning." },
+		{ value: "high", label: "High", description: "More deliberation before answering." },
+		{ value: "xhigh", label: "Extra high", description: "Deepest reasoning, slowest replies." },
+	],
+	default: "medium",
+};
+
+const DEEPSEEK_THINKING: ChatThinkingOptions = {
+	levels: [
+		{ value: "high", label: "High", description: "Thinks through the problem first." },
+		{ value: "max", label: "Max", description: "Longest reasoning budget." },
+	],
+	default: "high",
+};
+
 const MODEL_GROUPS: ChatModelGroup[] = [
 	{
 		provider: "Codex",
 		models: [
-			{ id: "gpt-5.5-codex", name: "GPT-5.5", maxInputTokens: 400_000 },
-			{ id: "gpt-5.5-mini-codex", name: "GPT-5.5 mini", maxInputTokens: 200_000 },
-			{ id: "gpt-5-codex", name: "GPT-5", maxInputTokens: 400_000 },
-			{ id: "gpt-5.1-codex-max", name: "GPT-5.1 Codex Max", maxInputTokens: 1_000_000 },
+			{ id: "gpt-5.5-codex", name: "GPT-5.5", maxInputTokens: 400_000, thinking: CODEX_THINKING },
+			{ id: "gpt-5.5-mini-codex", name: "GPT-5.5 mini", maxInputTokens: 200_000, thinking: CODEX_THINKING },
+			{ id: "gpt-5-codex", name: "GPT-5", maxInputTokens: 400_000, thinking: CODEX_THINKING },
+			{ id: "gpt-5.1-codex-max", name: "GPT-5.1 Codex Max", maxInputTokens: 1_000_000, thinking: CODEX_THINKING },
 		],
 	},
 	{
@@ -60,12 +83,36 @@ const MODEL_GROUPS: ChatModelGroup[] = [
 	{
 		provider: "DeepSeek",
 		models: [
-			{ id: "deepseek-flash", name: "DeepSeek Flash", maxInputTokens: 128_000 },
-			{ id: "deepseek-pro", name: "DeepSeek Pro", maxInputTokens: 128_000 },
+			{ id: "deepseek-flash", name: "DeepSeek Flash", maxInputTokens: 128_000, thinking: DEEPSEEK_THINKING },
+			{ id: "deepseek-pro", name: "DeepSeek Pro", maxInputTokens: 128_000, thinking: DEEPSEEK_THINKING },
 			{ id: "deepseek-coder", name: "DeepSeek Coder", maxInputTokens: 64_000 },
 		],
 	},
 ];
+
+function createQuota(): ChatProviderQuota[] {
+	const now = Date.now();
+	return [
+		{
+			provider: "Codex",
+			plan: "Pro",
+			windows: [
+				{ label: "5h", percent: 42, resetsAt: now + 2 * 3_600_000 + 15 * 60_000 },
+				{ label: "Week", percent: 12, resetsAt: now + 3 * 86_400_000 },
+			],
+		},
+		{
+			provider: "Claude",
+			plan: "Max",
+			windows: [{ label: "5h", percent: 91, resetsAt: now + 45 * 60_000 }],
+		},
+		{
+			provider: "DeepSeek",
+			windows: [],
+			balance: "$12.30",
+		},
+	];
+}
 
 const TOOL_GROUPS: ChatToolGroup[] = [
 	{
@@ -119,18 +166,62 @@ let liveSubagentMessageId: string | undefined;
 let liveSubagentStarted = false;
 let liveSubagentTimer: number | undefined;
 
-const messages = createMessages(initialCount);
+let messages = createMessages(initialCount);
 const SESSION_ID = "harness-session";
 const SESSION_CREATED_AT = Date.now() - messages.length * 1000;
-let sessionTitle = `Harness session — ${messages.length} messages`;
+let activeSessionId = SESSION_ID;
+let nextSessionId = 0;
 let selectedModelId = "gpt-5.5-codex";
+const thinkingByModel: Record<string, string> = {};
+let quota = createQuota();
 let nextId = 0;
 let turn = Math.ceil(messages.length / 2);
 let streamTimer: number | undefined;
 let streamStarted = 0;
 let lastStreamMs = 0;
 let approvalSeq = 0;
+let activity: ChatSessionActivity[] = [
+	{ id: "harness-terminal", title: "Fix flaky terminal test", state: "running" },
+	{ id: "harness-picker", title: "Refactor model picker", state: "approval" },
+	{ id: "harness-quota", title: "Investigate quota refresh", state: "finished" },
+];
+const activityTimers = new Map<string, number>();
 let pendingApproval: { id: string; assistantId: string; callId: string } | undefined;
+
+interface HarnessSession {
+	id: string;
+	title: string;
+	createdAt: number;
+	updatedAt: number;
+	messages: ChatMessage[];
+}
+
+function minutesAgo(minutes: number): number {
+	return Date.now() - minutes * 60_000;
+}
+
+function daysAgo(days: number): number {
+	const date = new Date();
+	date.setDate(date.getDate() - days);
+	return date.getTime();
+}
+
+const fakeSessions: HarnessSession[] = [
+	{
+		id: SESSION_ID,
+		title: `Harness session — ${messages.length} messages`,
+		createdAt: SESSION_CREATED_AT,
+		updatedAt: Date.now(),
+		messages,
+	},
+	{ id: "harness-terminal", title: "Fix flaky terminal test", createdAt: minutesAgo(60), updatedAt: minutesAgo(10), messages: createMessages(8) },
+	{ id: "harness-empty", title: "Empty chat", createdAt: minutesAgo(20), updatedAt: minutesAgo(15), messages: [] },
+	{ id: "harness-picker", title: "Refactor model picker", createdAt: minutesAgo(300), updatedAt: minutesAgo(180), messages: createMessages(6) },
+	{ id: "harness-quota", title: "Investigate quota refresh", createdAt: daysAgo(2), updatedAt: daysAgo(1), messages: createMessages(10) },
+	{ id: "harness-compaction", title: "Add compaction summary", createdAt: daysAgo(4), updatedAt: daysAgo(3), messages: createMessages(12) },
+	{ id: "harness-old", title: "Old experiment", createdAt: daysAgo(30), updatedAt: daysAgo(20), messages: createMessages(5) },
+];
+liveSubagentMessageId = messages[13]?.role === "assistant" ? messages[13].id : undefined;
 
 const HARNESS_CHANGED_FILES: ChatChangedFile[] = [
 	{ id: "change-added", path: "src/chat/webview/changes-panel.tsx", status: "added", additions: 128 },
@@ -153,8 +244,15 @@ window.__harness = {
 	get messageCount(): number {
 		return messages.length;
 	},
+	setActivity(list: ChatSessionActivity[]): void {
+		activity = list.map(entry => ({ ...entry }));
+		emitActivity();
+	},
 	get lastStreamMs(): number {
 		return lastStreamMs;
+	},
+	showSessions(): void {
+		emit({ type: "showSessions" });
 	},
 };
 
@@ -185,7 +283,17 @@ function handleWebviewMessage(message: WebviewMessage): void {
 			break;
 		case "selectModel":
 			selectedModelId = message.modelId;
-			emit({ type: "models", models: MODEL_GROUPS, selectedModelId });
+			emit({ type: "models", models: MODEL_GROUPS, selectedModelId, selectedThinking: thinkingFor(selectedModelId) });
+			break;
+		case "selectThinking":
+			if (offerThinking(selectedModelId, message.value)) {
+				thinkingByModel[selectedModelId] = message.value;
+				emit({ type: "models", models: MODEL_GROUPS, selectedModelId, selectedThinking: message.value });
+			}
+			break;
+		case "refreshQuota":
+			quota = refreshedQuota(quota);
+			emit({ type: "quota", quota });
 			break;
 		case "setToolsEnabled":
 			applyToolsEnabled(message.names, message.enabled);
@@ -210,8 +318,98 @@ function handleWebviewMessage(message: WebviewMessage): void {
 			handleLoadToolResult(message.messageId, message.callId);
 			break;
 		case "newChat":
+			createHarnessChat();
+			break;
+		case "listSessions":
+			emitSessions();
+			break;
+		case "openSession":
+			openHarnessSession(message.sessionId);
+			break;
+		case "deleteSession":
+			deleteHarnessSession(message.sessionId);
 			break;
 	}
+}
+
+function createHarnessChat(): void {
+	parkVisibleStream();
+	pendingApproval = undefined;
+	messages = [];
+	const id = `harness-chat-${nextSessionId++}`;
+	activeSessionId = id;
+	fakeSessions.unshift({ id, title: "New chat", createdAt: Date.now(), updatedAt: Date.now(), messages });
+	emitInit();
+	emitSessions();
+}
+
+function openHarnessSession(sessionId: string): void {
+	if (sessionId === activeSessionId) {
+		return;
+	}
+	const index = fakeSessions.findIndex(session => session.id === sessionId);
+	const target = fakeSessions[index];
+	if (!target) {
+		return;
+	}
+	parkVisibleStream();
+	pendingApproval = undefined;
+	const entry = takeActivity(target.id);
+	activeSessionId = target.id;
+	target.updatedAt = Date.now();
+	target.messages = createMessages(4 + index);
+	messages = target.messages;
+	emitInit();
+	emitSessions();
+	if (entry) {
+		emitActivity();
+	}
+	if (entry?.state === "running") {
+		startCurrentStream();
+	} else if (entry?.state === "approval") {
+		startApproval(currentAssistantMessage());
+	}
+}
+
+function deleteHarnessSession(sessionId: string): void {
+	const index = fakeSessions.findIndex(session => session.id === sessionId);
+	if (index < 0) {
+		return;
+	}
+	const wasActive = fakeSessions[index].id === activeSessionId;
+	fakeSessions.splice(index, 1);
+	const removedActivity = takeActivity(sessionId);
+	if (wasActive) {
+		const next = [...fakeSessions].sort((left, right) => right.updatedAt - left.updatedAt)[0];
+		if (next) {
+			activeSessionId = next.id;
+			messages = next.messages;
+			emitInit();
+		}
+	}
+	emitSessions();
+	if (removedActivity) {
+		emitActivity();
+	}
+}
+
+function activeSession(): HarnessSession {
+	return fakeSessions.find(session => session.id === activeSessionId) ?? fakeSessions[0];
+}
+
+function emitSessions(): void {
+	const sessions = fakeSessions
+		.map(session => ({
+			id: session.id,
+			title: session.title,
+			createdAt: session.createdAt,
+			updatedAt: session.id === activeSessionId ? Date.now() : session.updatedAt,
+			modelId: selectedModelId,
+			messageCount: session.messages.length,
+		}))
+		.filter(session => session.messageCount > 0 || session.id === activeSessionId)
+		.sort((left, right) => right.updatedAt - left.updatedAt);
+	emit({ type: "sessions", sessions, activeId: activeSessionId });
 }
 
 function emitInit(): void {
@@ -221,12 +419,113 @@ function emitInit(): void {
 		messages,
 		models: MODEL_GROUPS,
 		selectedModelId,
+		selectedThinking: thinkingFor(selectedModelId),
 		run: { running: false },
 		tools: TOOL_GROUPS,
 		approvals: [],
 		changes: currentChanges,
+		quota,
+		activity: activity.map(entry => ({ ...entry })),
 	});
 	startLiveSubagent();
+}
+
+function emitActivity(): void {
+	emit({ type: "activity", activity: activity.map(entry => ({ ...entry })) });
+}
+
+function setActivityEntry(entry: ChatSessionActivity): void {
+	const index = activity.findIndex(candidate => candidate.id === entry.id);
+	if (index >= 0) {
+		activity = activity.map((candidate, position) => position === index ? entry : candidate);
+	} else {
+		activity = [...activity, entry];
+	}
+}
+
+function clearActivityTimer(sessionId: string): void {
+	const timer = activityTimers.get(sessionId);
+	if (timer !== undefined) {
+		window.clearTimeout(timer);
+		activityTimers.delete(sessionId);
+	}
+}
+
+function takeActivity(sessionId: string): ChatSessionActivity | undefined {
+	const index = activity.findIndex(candidate => candidate.id === sessionId);
+	if (index < 0) {
+		return undefined;
+	}
+	clearActivityTimer(sessionId);
+	const [entry] = activity.splice(index, 1);
+	return entry;
+}
+
+function parkVisibleStream(): void {
+	if (streamTimer === undefined) {
+		return;
+	}
+	stopStream();
+	const active = activeSession();
+	setActivityEntry({ id: active.id, title: active.title, state: "running" });
+	emitActivity();
+	clearActivityTimer(active.id);
+	activityTimers.set(active.id, window.setTimeout(() => {
+		activityTimers.delete(active.id);
+		const entry = activity.find(candidate => candidate.id === active.id);
+		if (entry?.state === "running") {
+			entry.state = "finished";
+			emitActivity();
+		}
+	}, 3_000));
+}
+
+function currentAssistantMessage(): ChatMessage {
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (message?.role === "assistant") {
+			return message;
+		}
+	}
+	const lastUser = [...messages].reverse().find(message => message.role === "user");
+	const assistant: ChatMessage = {
+		id: `sent-assistant-${nextId++}`,
+		role: "assistant",
+		turn: lastUser?.turn ?? Math.max(1, turn),
+		createdAt: Date.now(),
+		modelId: selectedModelId,
+		parts: [],
+	};
+	messages.push(assistant);
+	emit({ type: "messageAdded", message: assistant });
+	return assistant;
+}
+
+function startCurrentStream(): void {
+	const assistant = currentAssistantMessage();
+	emit({ type: "run", run: { running: true, detail: "Streaming reply…" } });
+	startStream(assistant.id);
+}
+
+function modelById(modelId: string) {
+	return MODEL_GROUPS.flatMap(group => group.models).find(model => model.id === modelId);
+}
+
+function offerThinking(modelId: string, value: string): boolean {
+	return modelById(modelId)?.thinking?.levels.some(level => level.value === value) === true;
+}
+
+function thinkingFor(modelId: string): string | undefined {
+	const stored = thinkingByModel[modelId];
+	return stored !== undefined && offerThinking(modelId, stored) ? stored : undefined;
+}
+
+/** A refresh that visibly moves the numbers, so the chip reacts. */
+function refreshedQuota(current: ChatProviderQuota[]): ChatProviderQuota[] {
+	return current.map(entry => entry.windows.length === 0 ? { ...entry } : {
+		...entry,
+		windows: entry.windows.map(window => ({ ...window, percent: Math.min(100, window.percent + 1) })),
+	});
 }
 
 function startLiveSubagent(): void {
@@ -260,10 +559,11 @@ function startLiveSubagent(): void {
 }
 
 function sessionMeta(): ChatSessionMeta {
+	const active = activeSession();
 	return {
-		id: SESSION_ID,
-		title: sessionTitle,
-		createdAt: SESSION_CREATED_AT,
+		id: active.id,
+		title: active.title,
+		createdAt: active.createdAt,
 		updatedAt: Date.now(),
 		modelId: selectedModelId,
 		messageCount: messages.length,
@@ -371,7 +671,7 @@ function handleEdit(messageId: string, text: string, undoChanges: boolean | unde
 	}
 	handleSend(text);
 	if (editsFirstUser) {
-		sessionTitle = titleFromText(text);
+		activeSession().title = titleFromText(text);
 		emit({ type: "session", session: sessionMeta() });
 	}
 }

@@ -4,24 +4,54 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { ChatChangeTrackerLike, TurnSnapshot } from "../chat/changes/change-tracker";
-import { ChatController, type ChatControllerDeps } from "../chat/chat-controller";
+import { ChatController, type ChatControllerDeps, type ChatQuotaSource } from "../chat/chat-controller";
 import type { ChatCompactionPlan } from "../chat/compaction";
 import { compactionSummaryText } from "../chat/lm-messages";
 import { ChatSessionStore } from "../chat/session-store";
 import { groupModels } from "../chat/shared/model-groups";
-import { applyHostUpdate, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatChangeSet, type ChatMessage, type ChatToolGroup, type HostMessage } from "../chat/shared/protocol";
+import { applyHostUpdate, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatChangeSet, type ChatMessage, type ChatProviderQuota, type ChatToolGroup, type HostMessage } from "../chat/shared/protocol";
 import { createChatToolSource, DENIED_TOOL_RESULT, type ChatToolSource } from "../chat/tool-executor";
 import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
 import type { ChatTool } from "../chat/tools/types";
 
+function withThinking(
+	model: vscode.LanguageModelChatInformation,
+	values: string[],
+	labels: string[],
+	descriptions: string[],
+	defaultValue: string,
+): vscode.LanguageModelChatInformation {
+	return Object.assign(model, {
+		configurationSchema: {
+			type: "object",
+			properties: {
+				reasoningEffort: { type: "string", title: "Reasoning effort", enum: values, enumItemLabels: labels, enumDescriptions: descriptions, default: defaultValue },
+			},
+		},
+	});
+}
+
 const MODELS: vscode.LanguageModelChatInformation[] = [
-	{ id: "codex::fast", name: "Fast (Codex)", family: "codex", version: "1", maxInputTokens: 100_000, maxOutputTokens: 4_000, capabilities: { toolCalling: true } },
-	{ id: "claude::smart", name: "Smart (Claude)", family: "claude", version: "1", maxInputTokens: 200_000, maxOutputTokens: 8_000, capabilities: { toolCalling: true } },
+	withThinking(
+		{ id: "codex::fast", name: "Fast (Codex)", family: "codex", version: "1", maxInputTokens: 100_000, maxOutputTokens: 4_000, capabilities: { toolCalling: true } },
+		["low", "medium", "high", "xhigh"],
+		["Low", "Medium", "High", "Extra high"],
+		["Quick answer.", "Balanced.", "More deliberation.", "Deepest reasoning."],
+		"medium",
+	),
+	withThinking(
+		{ id: "claude::smart", name: "Smart (Claude)", family: "claude", version: "1", maxInputTokens: 200_000, maxOutputTokens: 8_000, capabilities: { toolCalling: true } },
+		["low", "high"],
+		["Low", "High"],
+		["Quick answer.", "Deepest reasoning."],
+		"low",
+	),
 ];
 
 const NEVER_FIRES: vscode.Event<void> = () => new vscode.Disposable(() => undefined);
 const ACTIVE_SESSION_KEY = "llamacpp.chat.activeSession";
 const LAST_MODEL_KEY = "llamacpp.chat.lastModel";
+const THINKING_KEY = "llamacpp.chat.thinking";
 
 type Round = (progress: vscode.Progress<vscode.LanguageModelResponsePart>, token: vscode.CancellationToken) => void | Promise<void>;
 
@@ -74,6 +104,43 @@ class FakeMemento implements vscode.Memento {
 	keys(): readonly string[] {
 		return [...this._values.keys()];
 	}
+}
+
+interface FakeQuota {
+	source: ChatQuotaSource;
+	readonly refreshes: number;
+	current: ChatProviderQuota[];
+	set(next: ChatProviderQuota[]): void;
+	fire(): void;
+	dispose(): void;
+}
+
+function fakeQuota(initial: ChatProviderQuota[]): FakeQuota {
+	const emitter = new vscode.EventEmitter<void>();
+	let refreshes = 0;
+	const fake: FakeQuota = {
+		current: initial,
+		get refreshes(): number {
+			return refreshes;
+		},
+		source: {
+			snapshot: () => fake.current,
+			refresh: async () => {
+				refreshes += 1;
+			},
+			onDidChange: emitter.event,
+		},
+		set(next) {
+			fake.current = next;
+		},
+		fire() {
+			emitter.fire();
+		},
+		dispose() {
+			emitter.dispose();
+		},
+	};
+	return fake;
 }
 
 class FakeWebview {
@@ -186,6 +253,13 @@ class FakeTracker implements ChatChangeTrackerLike {
 	}
 }
 
+class FakeForgettingTracker extends FakeTracker {
+	readonly forgotten: string[] = [];
+	async forgetSession(sessionId: string): Promise<void> {
+		this.forgotten.push(sessionId);
+	}
+}
+
 /** A writer and a read-only reader that log their runs into the shared call list. */
 function loggingTools(calls: string[]): ChatToolSource {
 	return {
@@ -203,7 +277,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "confirm" | "notify">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -231,10 +305,37 @@ async function waitFor(condition: () => boolean, what: string): Promise<void> {
 	}
 }
 
+async function waitForAsync(condition: () => Promise<boolean>, what: string): Promise<void> {
+	const deadline = Date.now() + 5_000;
+	while (!(await condition())) {
+		if (Date.now() > deadline) {
+			throw new Error(`Timed out waiting for ${what}`);
+		}
+		await new Promise<void>(resolve => setTimeout(resolve, 10));
+	}
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let release = (): void => undefined;
+	const promise = new Promise<void>(resolve => {
+		release = resolve;
+	});
+	return { promise, resolve: () => release() };
+}
+
 function messageText(message: vscode.LanguageModelChatRequestMessage): string {
 	return message.content
 		.filter((part): part is vscode.LanguageModelTextPart => part instanceof vscode.LanguageModelTextPart)
 		.map(part => part.value)
+		.join("");
+}
+
+function assistantText(messages: readonly ChatMessage[]): string {
+	return messages
+		.filter(message => message.role === "assistant")
+		.flatMap(message => message.parts)
+		.filter(part => part.kind === "text")
+		.map(part => part.kind === "text" ? part.text : "")
 		.join("");
 }
 
@@ -264,9 +365,12 @@ suite("chat controller", () => {
 		const init = current.webview.ofType("init")[0];
 		assert.deepStrictEqual(init.models, groupModels(MODELS));
 		assert.strictEqual(init.selectedModelId, "codex::fast");
+		assert.strictEqual(init.selectedThinking, undefined);
+		assert.deepStrictEqual(init.quota, []);
 		assert.strictEqual(init.session.modelId, "codex::fast");
 		assert.deepStrictEqual(init.messages, []);
 		assert.deepStrictEqual(init.run, { running: false });
+		assert.deepStrictEqual(init.activity, []);
 		assert.strictEqual(backend.modelInfoRequests, 1);
 		assert.strictEqual(current.state.get<string>(ACTIVE_SESSION_KEY), init.session.id);
 	});
@@ -419,6 +523,108 @@ suite("chat controller", () => {
 		assert.strictEqual(current.webview.ofType("models").length, 1);
 	});
 
+	test("remembers a reasoning level per model and sends it with the next request", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart("first answer")),
+			progress => progress.report(new vscode.LanguageModelTextPart("second answer")),
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const init = current.webview.ofType("init")[0];
+		assert.ok(init.models.flatMap(group => group.models).every(model => model.thinking !== undefined));
+
+		current.webview.receive({ type: "send", text: "first" });
+		await waitFor(() => finished() === 1, "first turn");
+		assert.strictEqual(backend.requests.at(-1)?.options.modelOptions?.reasoningEffort, undefined);
+
+		current.webview.receive({ type: "selectThinking", value: "high" });
+		await waitFor(() => current.webview.ofType("models").some(message => message.selectedThinking === "high"), "thinking selection");
+		assert.deepStrictEqual(current.state.get<Record<string, unknown>>(THINKING_KEY), { "codex::fast": "high" });
+
+		current.webview.receive({ type: "selectThinking", value: "ultra" });
+		await new Promise<void>(resolve => setTimeout(resolve, 30));
+		assert.strictEqual(current.webview.ofType("models").length, 1);
+		assert.deepStrictEqual(current.state.get<Record<string, unknown>>(THINKING_KEY), { "codex::fast": "high" });
+
+		current.webview.receive({ type: "send", text: "second" });
+		await waitFor(() => finished() === 2, "second turn");
+		assert.strictEqual(backend.requests.at(-1)?.options.modelOptions?.reasoningEffort, "high");
+	});
+
+	test("reports each model's own stored reasoning level when the selection changes", async () => {
+		const current = createHarness(root, new FakeBackend());
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const lastModels = () => current.webview.ofType("models").at(-1);
+
+		current.webview.receive({ type: "selectThinking", value: "high" });
+		await waitFor(() => lastModels()?.selectedThinking === "high", "codex level");
+
+		current.webview.receive({ type: "selectModel", modelId: "claude::smart" });
+		await waitFor(() => lastModels()?.selectedModelId === "claude::smart", "claude selection");
+		assert.strictEqual(lastModels()?.selectedThinking, undefined);
+
+		current.webview.receive({ type: "selectThinking", value: "low" });
+		await waitFor(() => lastModels()?.selectedThinking === "low", "claude level");
+
+		current.webview.receive({ type: "selectModel", modelId: "codex::fast" });
+		await waitFor(() => lastModels()?.selectedModelId === "codex::fast", "codex selection again");
+		assert.strictEqual(lastModels()?.selectedThinking, "high");
+	});
+
+	test("carries the quota snapshot in init and refreshes it at most once every 30 seconds", async () => {
+		const initial: ChatProviderQuota[] = [
+			{ provider: "Codex", plan: "Pro", windows: [{ label: "5h", percent: 42 }, { label: "Week", percent: 12 }] },
+			{ provider: "DeepSeek", windows: [], balance: "$12.30" },
+		];
+		const quota = fakeQuota(initial.map(entry => ({ ...entry, windows: entry.windows.map(window => ({ ...window })) })));
+		try {
+			const current = createHarness(root, new FakeBackend(), undefined, undefined, { quota: quota.source });
+			harness = current;
+			current.webview.receive({ type: "ready" });
+			await waitFor(() => current.webview.ofType("init").length === 1, "init");
+			assert.deepStrictEqual(current.webview.ofType("init")[0].quota, initial);
+
+			current.webview.receive({ type: "refreshQuota" });
+			await waitFor(() => current.webview.ofType("quota").length === 1, "first quota broadcast");
+			current.webview.receive({ type: "refreshQuota" });
+			await waitFor(() => current.webview.ofType("quota").length === 2, "second quota broadcast");
+			assert.strictEqual(quota.refreshes, 1);
+			assert.deepStrictEqual(current.webview.ofType("quota").map(message => message.quota), [initial, initial]);
+		} finally {
+			quota.dispose();
+		}
+	});
+
+	test("broadcasts a changed quota once per burst and skips an unchanged snapshot", async () => {
+		const initial: ChatProviderQuota[] = [{ provider: "Codex", windows: [{ label: "5h", percent: 42 }] }];
+		const changed: ChatProviderQuota[] = [{ provider: "Codex", windows: [{ label: "5h", percent: 75 }] }];
+		const quota = fakeQuota(initial);
+		try {
+			const current = createHarness(root, new FakeBackend(), undefined, undefined, { quota: quota.source });
+			harness = current;
+			current.webview.receive({ type: "ready" });
+			await waitFor(() => current.webview.ofType("init").length === 1, "init");
+
+			quota.set(changed);
+			quota.fire();
+			quota.fire();
+			quota.fire();
+			await waitFor(() => current.webview.ofType("quota").length === 1, "coalesced quota broadcast");
+			assert.deepStrictEqual(current.webview.ofType("quota")[0].quota, changed);
+
+			quota.fire();
+			await new Promise<void>(resolve => setTimeout(resolve, 2_300));
+			assert.strictEqual(current.webview.ofType("quota").length, 1);
+		} finally {
+			quota.dispose();
+		}
+	});
+
 	test("newChat creates another session and sends init", async () => {
 		const current = createHarness(root, new FakeBackend());
 		harness = current;
@@ -434,7 +640,8 @@ suite("chat controller", () => {
 		assert.strictEqual(second.session.modelId, "codex::fast");
 		assert.deepStrictEqual(second.messages, []);
 		assert.deepStrictEqual(second.run, { running: false });
-		assert.strictEqual((await current.store.list()).length, 2);
+		await waitForAsync(async () => (await current.store.get(first)) === undefined, "the empty first chat to be deleted");
+		assert.strictEqual((await current.store.list()).length, 1);
 	});
 
 	test("newChat abandons the previous session", async () => {
@@ -463,6 +670,460 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "newChat" });
 		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
 		assert.strictEqual(current.webview.ofType("init").length, 2);
+	});
+
+	test("listSessions sends the chats newest first without empty ones", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart("one")),
+			progress => progress.report(new vscode.LanguageModelTextPart("two")),
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		const finishedTurns = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const first = current.webview.ofType("init")[0].session.id;
+		current.webview.receive({ type: "send", text: "first chat" });
+		await waitFor(() => finishedTurns() === 1, "first turn");
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		const second = current.webview.ofType("init")[1].session.id;
+		current.webview.receive({ type: "send", text: "second chat" });
+		await waitFor(() => finishedTurns() === 2, "second turn");
+		await current.store.create("codex::fast");
+
+		current.webview.receive({ type: "listSessions" });
+		await waitFor(() => current.webview.ofType("sessions").length === 1, "sessions message");
+		const listed = current.webview.ofType("sessions")[0];
+		assert.deepStrictEqual(listed.sessions.map(meta => meta.id), [second, first]);
+		assert.strictEqual(listed.activeId, second);
+	});
+
+	test("openSession switches to another chat and abandons the previous one", async () => {
+		const abandoned: string[] = [];
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart("one")),
+			progress => progress.report(new vscode.LanguageModelTextPart("two")),
+		]);
+		const current = createHarness(root, backend, undefined, undefined, {
+			abandonConversation: async conversationId => { abandoned.push(conversationId); },
+		});
+		harness = current;
+		const finishedTurns = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const first = current.webview.ofType("init")[0].session.id;
+		current.webview.receive({ type: "send", text: "in A" });
+		await waitFor(() => finishedTurns() === 1, "first turn");
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		const second = current.webview.ofType("init")[1].session.id;
+		current.webview.receive({ type: "send", text: "in B" });
+		await waitFor(() => finishedTurns() === 2, "second turn");
+
+		current.webview.receive({ type: "openSession", sessionId: first });
+		await waitFor(() => current.webview.ofType("init").length === 3, "third init");
+		const opened = current.webview.ofType("init")[2];
+		assert.strictEqual(opened.session.id, first);
+		assert.deepStrictEqual(opened.messages.map(message => message.role), ["user", "assistant"]);
+		assert.strictEqual(current.state.get<string>(ACTIVE_SESSION_KEY), first);
+		await waitForAsync(async () => abandoned.at(-1) === second, "the previous chat to be abandoned");
+		assert.strictEqual((await current.store.get(second))?.messageCount, 2);
+	});
+
+	test("openSession of the active chat does nothing", async () => {
+		const current = createHarness(root, new FakeBackend());
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const active = current.webview.ofType("init")[0].session.id;
+
+		current.webview.receive({ type: "openSession", sessionId: active });
+		await new Promise<void>(resolve => setTimeout(resolve, 50));
+		assert.strictEqual(current.webview.ofType("init").length, 1);
+	});
+
+	test("openSession of an unknown chat re-sends the list", async () => {
+		const current = createHarness(root, new FakeBackend());
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const active = current.webview.ofType("init")[0].session.id;
+
+		current.webview.receive({ type: "openSession", sessionId: "missing-chat" });
+		await waitFor(() => current.webview.ofType("sessions").length === 1, "sessions message");
+		assert.strictEqual(current.webview.ofType("sessions")[0].activeId, active);
+		assert.strictEqual(current.webview.ofType("init").length, 1);
+	});
+
+	test("leaving an empty chat deletes it", async () => {
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("answer"))]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const first = current.webview.ofType("init")[0].session.id;
+
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		await waitForAsync(async () => (await current.store.get(first)) === undefined, "the empty first chat to be deleted");
+
+		const second = current.webview.ofType("init")[1].session.id;
+		current.webview.receive({ type: "send", text: "keep me" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn");
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 3, "third init");
+		await new Promise<void>(resolve => setTimeout(resolve, 50));
+		assert.strictEqual((await current.store.get(second))?.messageCount, 2);
+	});
+
+	test("deleteSession asks first and keeps the chat when declined", async () => {
+		const answers: Array<{ message: string; action: string }> = [];
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("answer"))]);
+		const current = createHarness(root, backend, undefined, undefined, {
+			confirm: async (message, action) => {
+				answers.push({ message, action });
+				return false;
+			},
+		});
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const id = current.webview.ofType("init")[0].session.id;
+		current.webview.receive({ type: "send", text: "Keep this one" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn");
+		await current.store.flush();
+		const meta = await current.store.get(id);
+		assert.ok(meta);
+
+		current.webview.receive({ type: "deleteSession", sessionId: id });
+		await waitFor(() => answers.length === 1, "confirmation");
+		assert.strictEqual(answers[0].action, "Delete");
+		assert.ok(answers[0].message.includes(meta.title));
+		assert.ok(await current.store.get(id));
+		assert.strictEqual(current.webview.ofType("sessions").length, 0);
+	});
+
+	test("deleteSession removes another chat, forgets its changes and abandons it", async () => {
+		const abandoned: string[] = [];
+		const tracker = new FakeForgettingTracker([]);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart("one")),
+			progress => progress.report(new vscode.LanguageModelTextPart("two")),
+		]);
+		const current = createHarness(root, backend, undefined, tracker, {
+			abandonConversation: async conversationId => { abandoned.push(conversationId); },
+			confirm: async () => true,
+		});
+		harness = current;
+		const finishedTurns = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const first = current.webview.ofType("init")[0].session.id;
+		current.webview.receive({ type: "send", text: "in A" });
+		await waitFor(() => finishedTurns() === 1, "first turn");
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		const second = current.webview.ofType("init")[1].session.id;
+		current.webview.receive({ type: "send", text: "in B" });
+		await waitFor(() => finishedTurns() === 2, "second turn");
+
+		current.webview.receive({ type: "deleteSession", sessionId: first });
+		await waitFor(() => current.webview.ofType("sessions").length === 1, "sessions message");
+		assert.strictEqual(await current.store.get(first), undefined);
+		assert.deepStrictEqual(tracker.forgotten, [first]);
+		assert.strictEqual(abandoned.at(-1), first);
+		const listed = current.webview.ofType("sessions")[0];
+		assert.deepStrictEqual(listed.sessions.map(meta => meta.id), [second]);
+		assert.strictEqual(listed.activeId, second);
+	});
+
+	test("deleting the active chat opens the newest remaining one", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart("one")),
+			progress => progress.report(new vscode.LanguageModelTextPart("two")),
+		]);
+		const current = createHarness(root, backend, undefined, undefined, { confirm: async () => true });
+		harness = current;
+		const finishedTurns = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const first = current.webview.ofType("init")[0].session.id;
+		current.webview.receive({ type: "send", text: "in A" });
+		await waitFor(() => finishedTurns() === 1, "first turn");
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		const second = current.webview.ofType("init")[1].session.id;
+		current.webview.receive({ type: "send", text: "in B" });
+		await waitFor(() => finishedTurns() === 2, "second turn");
+
+		current.webview.receive({ type: "deleteSession", sessionId: second });
+		await waitFor(() => current.webview.ofType("init").length === 3, "third init");
+		const opened = current.webview.ofType("init")[2];
+		assert.strictEqual(opened.session.id, first);
+		assert.deepStrictEqual(opened.messages.map(message => message.role), ["user", "assistant"]);
+
+		current.webview.receive({ type: "deleteSession", sessionId: first });
+		await waitFor(() => current.webview.ofType("init").length === 4, "fourth init");
+		const fresh = current.webview.ofType("init")[3];
+		assert.notStrictEqual(fresh.session.id, first);
+		assert.notStrictEqual(fresh.session.id, second);
+		assert.deepStrictEqual(fresh.messages, []);
+	});
+
+	test("a running chat keeps going after newChat and its updates stay hidden", async () => {
+		const gate = deferred();
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new vscode.LanguageModelTextPart("Hello "));
+				await gate.promise;
+				progress.report(new vscode.LanguageModelTextPart("world"));
+			},
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		current.webview.receive({ type: "send", text: "Long story" });
+		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "run start");
+		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
+		const assistant = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "assistant");
+		assert.ok(first && assistant);
+
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		const switchedAt = current.webview.messages.length;
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("activity").some(message => message.activity.some(entry => entry.id === first && entry.state === "finished")), "finished activity");
+		await current.store.flush();
+		assert.strictEqual(assistantText(await new ChatSessionStore(root).load(first)), "Hello world");
+
+		const late = current.webview.messages.slice(switchedAt).filter(message => message.type === "textDelta" || message.type === "partAdded" || message.type === "run");
+		assert.deepStrictEqual(late, []);
+		assert.deepStrictEqual(current.webview.ofType("activity").at(-1)?.activity.map(entry => [entry.id, entry.state]), [[first, "finished"]]);
+	});
+
+	test("two chats run turns at the same time", async () => {
+		const gate = deferred();
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new vscode.LanguageModelTextPart("Hello "));
+				await gate.promise;
+				progress.report(new vscode.LanguageModelTextPart("world"));
+			},
+			progress => progress.report(new vscode.LanguageModelTextPart("B answer")),
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		current.webview.receive({ type: "send", text: "A question" });
+		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "A start");
+		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(first);
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		const second = current.webview.ofType("init")[1].session.id;
+
+		current.webview.receive({ type: "send", text: "B question" });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 1, "B finished");
+		assert.deepStrictEqual(current.webview.ofType("run").map(message => message.run.running), [true, true, false]);
+		assert.ok(current.webview.ofType("activity").some(message => message.activity.some(entry => entry.id === first && entry.state === "running")));
+
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("activity").some(message => message.activity.some(entry => entry.id === first && entry.state === "finished")), "A finished");
+		await current.store.flush();
+		assert.strictEqual(assistantText(await new ChatSessionStore(root).load(first)), "Hello world");
+		assert.strictEqual(assistantText(await new ChatSessionStore(root).load(second)), "B answer");
+	});
+
+	test("returning to a running chat shows the text so far and keeps streaming", async () => {
+		const gate = deferred();
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new vscode.LanguageModelTextPart("Hello "));
+				await gate.promise;
+				progress.report(new vscode.LanguageModelTextPart("world"));
+			},
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		current.webview.receive({ type: "send", text: "Long story" });
+		await waitFor(() => current.webview.ofType("textDelta").some(message => message.text.includes("Hello")), "first delta");
+		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(first);
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		current.webview.receive({ type: "openSession", sessionId: first });
+		await waitFor(() => current.webview.ofType("init").length === 3, "third init");
+		const opened = current.webview.ofType("init")[2];
+		assert.strictEqual(opened.run.running, true);
+		const assistant = opened.messages.find(message => message.role === "assistant");
+		assert.ok(assistant);
+		assert.strictEqual(assistantText(opened.messages), "Hello ");
+		const afterInit = current.webview.messages.length;
+
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("textDelta").some(message => message.messageId === assistant.id && message.text.includes("world")), "second delta");
+		const late = current.webview.messages.slice(afterInit).filter(message => message.type === "textDelta");
+		assert.ok(late.every(message => !message.text.includes("Hello")));
+	});
+
+	test("a background approval shows in activity, notifies, and can be approved after switching back", async () => {
+		const catalog = guardedCatalog();
+		const gate = deferred();
+		const notifications: Array<{ message: string; action: string }> = [];
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new vscode.LanguageModelTextPart("Checking."));
+				await gate.promise;
+				progress.report(new vscode.LanguageModelToolCallPart("call-g", "guarded", { force: true }));
+			},
+			progress => progress.report(new vscode.LanguageModelTextPart("pushed")),
+		]);
+		const current = createHarness(root, backend, catalog.source, undefined, {
+			notify: async (message, action) => {
+				notifications.push({ message, action });
+				return false;
+			},
+		});
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		current.webview.receive({ type: "send", text: "push it" });
+		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "run start");
+		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(first);
+		const title = (await current.store.get(first))?.title ?? "";
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("activity").some(message => message.activity.some(entry => entry.id === first && entry.state === "approval")), "approval activity");
+		assert.strictEqual(notifications.length, 1);
+		assert.strictEqual(notifications[0].action, "Open Chat");
+		assert.ok(notifications[0].message.includes(title));
+
+		current.webview.receive({ type: "openSession", sessionId: first });
+		await waitFor(() => current.webview.ofType("init").length === 3, "third init");
+		const opened = current.webview.ofType("init")[2];
+		assert.strictEqual(opened.approvals.length, 1);
+		current.webview.receive({ type: "approve", id: opened.approvals[0].id, allow: true });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 1, "turn end");
+		assert.deepStrictEqual(catalog.runs, [{ force: true }]);
+		assert.deepStrictEqual(current.webview.ofType("activity").at(-1)?.activity, []);
+	});
+
+	test("stop only stops the shown chat", async () => {
+		const gate = deferred();
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new vscode.LanguageModelTextPart("A working"));
+				await gate.promise;
+				progress.report(new vscode.LanguageModelTextPart("A done"));
+			},
+			async (progress, token) => {
+				progress.report(new vscode.LanguageModelTextPart("B working"));
+				await new Promise<void>(resolve => token.onCancellationRequested(() => resolve()));
+				throw new vscode.CancellationError();
+			},
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		current.webview.receive({ type: "send", text: "A question" });
+		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "A start");
+		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(first);
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		current.webview.receive({ type: "send", text: "B question" });
+		await waitFor(() => current.webview.ofType("run").filter(message => message.run.running).length === 2, "B start");
+
+		current.webview.receive({ type: "stop" });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 1, "B stopped");
+		const notice = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "notice");
+		assert.deepStrictEqual(notice, { kind: "notice", level: "info", text: "Stopped." });
+		assert.ok(current.webview.ofType("activity").some(message => message.activity.some(entry => entry.id === first && entry.state === "running")));
+
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("activity").some(message => message.activity.some(entry => entry.id === first && entry.state === "finished")), "A finished");
+		await current.store.flush();
+		assert.strictEqual(assistantText(await new ChatSessionStore(root).load(first)), "A workingA done");
+	});
+
+	test("deleting a running background chat cancels it", async () => {
+		let cancelled = false;
+		const backend = new FakeBackend([
+			async (progress, token) => {
+				progress.report(new vscode.LanguageModelTextPart("A working"));
+				await new Promise<void>(resolve => token.onCancellationRequested(() => {
+					cancelled = true;
+					resolve();
+				}));
+				throw new vscode.CancellationError();
+			},
+		]);
+		const current = createHarness(root, backend, undefined, undefined, { confirm: async () => true });
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		current.webview.receive({ type: "send", text: "A question" });
+		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "A start");
+		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(first);
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		const second = current.webview.ofType("init")[1].session.id;
+
+		current.webview.receive({ type: "deleteSession", sessionId: first });
+		await waitForAsync(async () => (await current.store.get(first)) === undefined, "the chat to be deleted");
+		await waitFor(() => current.webview.ofType("activity").some(message => message.activity.every(entry => entry.id !== first)), "activity without the deleted chat");
+		assert.strictEqual(cancelled, true);
+		assert.strictEqual(current.state.get<string>(ACTIVE_SESSION_KEY), second);
+	});
+
+	test("opening a finished background chat clears it from activity", async () => {
+		const gate = deferred();
+		const backend = new FakeBackend([
+			async progress => {
+				progress.report(new vscode.LanguageModelTextPart("Hello "));
+				await gate.promise;
+				progress.report(new vscode.LanguageModelTextPart("world"));
+			},
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		current.webview.receive({ type: "send", text: "Long story" });
+		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "run start");
+		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(first);
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("activity").some(message => message.activity.some(entry => entry.id === first && entry.state === "finished")), "finished activity");
+
+		current.webview.receive({ type: "openSession", sessionId: first });
+		await waitFor(() => current.webview.ofType("init").length === 3, "third init");
+		await waitFor(() => current.webview.ofType("activity").some(message => message.activity.every(entry => entry.id !== first)), "activity without the opened chat");
+	});
+
+	test("rejects session ids that are not store ids", async () => {
+		const current = createHarness(root, new FakeBackend());
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+
+		current.webview.receive({ type: "openSession", sessionId: "../x" });
+		current.webview.receive({ type: "deleteSession", sessionId: "../x" });
+		await new Promise<void>(resolve => setTimeout(resolve, 50));
+		assert.strictEqual(current.webview.ofType("init").length, 1);
+		assert.strictEqual(current.webview.ofType("sessions").length, 0);
 	});
 
 	test("broadcasts updates to every attached webview", async () => {

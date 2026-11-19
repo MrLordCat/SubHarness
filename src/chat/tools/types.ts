@@ -38,6 +38,8 @@ export interface ChatTool {
 	readonly group: string;
 	/** Never changes files, so the change tracker does not snapshot before it. */
 	readonly readOnly?: boolean;
+	/** Absolute paths this call may write; lets parallel chats tell their changes apart. */
+	writes?(input: unknown): string[];
 	/** Returns a confirmation when this exact call must be approved by the user; undefined runs it at once. */
 	needsConfirmation?(input: unknown): ChatToolConfirmation | undefined;
 	/** False hides the tool from the model and the picker, e.g. when no model can serve it. */

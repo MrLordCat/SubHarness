@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import type { ChatModelGroup, ChatRunState, ChatToolGroup } from "../shared/protocol";
+import type { ChatModelGroup, ChatProviderQuota, ChatRunState, ChatToolGroup } from "../shared/protocol";
 import { ModelPicker } from "./model-picker";
+import { QuotaIndicator } from "./quota-indicator";
+import { ThinkingPicker } from "./thinking-picker";
 import { ToolPicker } from "./tool-picker";
 
 interface ComposerProps {
@@ -8,14 +10,32 @@ interface ComposerProps {
 	models: ChatModelGroup[];
 	tools: ChatToolGroup[];
 	selectedModelId: string | undefined;
+	selectedThinking: string | undefined;
+	quota: ChatProviderQuota[];
 	context: string | undefined;
 	onSend: (text: string) => void;
 	onStop: () => void;
 	onSelectModel: (modelId: string) => void;
+	onSelectThinking: (value: string) => void;
+	onRefreshQuota: () => void;
 	onSetToolsEnabled: (names: string[], enabled: boolean) => void;
 }
 
-export function Composer({ run, models, tools, selectedModelId, context, onSend, onStop, onSelectModel, onSetToolsEnabled }: ComposerProps) {
+export function Composer({
+	run,
+	models,
+	tools,
+	selectedModelId,
+	selectedThinking,
+	quota,
+	context,
+	onSend,
+	onStop,
+	onSelectModel,
+	onSelectThinking,
+	onRefreshQuota,
+	onSetToolsEnabled,
+}: ComposerProps) {
 	const [text, setText] = useState("");
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -31,6 +51,8 @@ export function Composer({ run, models, tools, selectedModelId, context, onSend,
 	}, [text]);
 
 	const canSend = text.trim().length > 0 && !run.running;
+	const selectedGroup = models.find(group => group.models.some(model => model.id === selectedModelId));
+	const selectedModel = selectedGroup?.models.find(model => model.id === selectedModelId);
 	const submit = () => {
 		if (!canSend) {
 			return;
@@ -63,7 +85,11 @@ export function Composer({ run, models, tools, selectedModelId, context, onSend,
 			/>
 			<div class="composer-row">
 				<ModelPicker models={models} selectedModelId={selectedModelId} onSelectModel={onSelectModel} />
+				{selectedModel?.thinking
+					? <ThinkingPicker thinking={selectedModel.thinking} selected={selectedThinking} onSelect={onSelectThinking} />
+					: null}
 				<ToolPicker tools={tools} onSetToolsEnabled={onSetToolsEnabled} />
+				<QuotaIndicator quota={quota} provider={selectedGroup?.provider} onRefresh={onRefreshQuota} />
 				{context ? <span class="context-indicator" title="Prompt tokens / context window">{context}</span> : null}
 				{run.running ? (
 					<button type="button" class="send-button" onClick={onStop}>Stop</button>

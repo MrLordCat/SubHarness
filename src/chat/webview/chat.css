@@ -28,9 +28,78 @@ body {
 }
 
 .chat-header {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 6px;
 	flex: 0 0 auto;
 	padding: 6px 10px;
 	border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
+}
+
+.activity-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex: 0 0 auto;
+	margin-left: auto;
+	padding: 1px 6px;
+	border: 1px solid var(--vscode-input-border, var(--vscode-focusBorder));
+	border-radius: 2px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-family: inherit;
+	font-size: 11px;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.activity-badge:hover {
+	border-color: var(--vscode-focusBorder);
+	color: var(--vscode-foreground);
+}
+
+.activity-badge:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.activity-badge .activity-running,
+.history-status-running {
+	color: var(--vscode-progressBar-background);
+}
+
+.activity-badge .activity-dot,
+.history-status-running {
+	animation: activity-pulse 1.6s ease-in-out infinite;
+}
+
+.activity-badge .activity-approval,
+.history-status-approval {
+	color: var(--vscode-editorWarning-foreground);
+	font-weight: 600;
+}
+
+.activity-badge .activity-finished,
+.history-status-finished {
+	color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+}
+
+@keyframes activity-pulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.45;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.activity-badge .activity-dot,
+	.history-status-running {
+		animation: none;
+	}
 }
 
 .chat-title {
@@ -648,7 +717,7 @@ body {
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
-	gap: 6px;
+	gap: 4px 6px;
 }
 
 .picker {
@@ -656,6 +725,12 @@ body {
 	flex: 0 1 auto;
 	min-width: 0;
 	max-width: 220px;
+}
+
+.model-picker {
+	flex: 0 1 auto;
+	min-width: 120px;
+	max-width: 260px;
 }
 
 .composer-row .context-indicator {
@@ -694,7 +769,183 @@ body {
 
 .picker-trigger-provider {
 	flex: 0 0 auto;
+	margin-left: 4px;
 	color: var(--vscode-descriptionForeground);
+}
+
+.thinking-picker {
+	max-width: 150px;
+}
+
+.thinking-popup {
+	min-width: 220px;
+	outline: none;
+}
+
+.thinking-option {
+	align-items: flex-start;
+}
+
+.thinking-option-text {
+	display: flex;
+	flex: 1 1 auto;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+}
+
+.thinking-option-label {
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.thinking-option-desc {
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.thinking-option.picker-option-active .thinking-option-desc {
+	color: inherit;
+}
+
+.quota-picker {
+	flex: 0 1 auto;
+	min-width: 0;
+	max-width: 180px;
+}
+
+.quota-chip {
+	display: block;
+	width: 100%;
+	min-width: 0;
+	padding: 2px 6px;
+	overflow: hidden;
+	border: 1px solid var(--vscode-input-border, var(--vscode-focusBorder));
+	border-radius: 2px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-family: inherit;
+	font-size: 11px;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	cursor: pointer;
+}
+
+.quota-chip:hover {
+	border-color: var(--vscode-focusBorder);
+	color: var(--vscode-foreground);
+}
+
+.quota-chip.quota-warning {
+	color: var(--vscode-editorWarning-foreground);
+}
+
+.quota-chip.quota-error {
+	color: var(--vscode-errorForeground);
+}
+
+.quota-popup {
+	right: 0;
+	left: auto;
+	min-width: 240px;
+	gap: 8px;
+	outline: none;
+}
+
+.quota-entry {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	min-width: 0;
+}
+
+.quota-entry + .quota-entry {
+	padding-top: 6px;
+	border-top: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
+}
+
+.quota-entry-head {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	min-width: 0;
+}
+
+.quota-provider {
+	flex: 0 0 auto;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.quota-plan {
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.quota-window {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+}
+
+.quota-window-head {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	min-width: 0;
+	font-size: 11px;
+}
+
+.quota-window-label {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.quota-window-percent {
+	flex: 0 0 auto;
+	font-family: var(--vscode-editor-font-family);
+}
+
+.quota-bar {
+	height: 3px;
+	overflow: hidden;
+	border-radius: 2px;
+	background: var(--vscode-input-background);
+}
+
+.quota-bar-fill {
+	display: block;
+	height: 100%;
+	background: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+}
+
+.quota-bar-fill.quota-warning {
+	background: var(--vscode-editorWarning-foreground);
+}
+
+.quota-bar-fill.quota-error {
+	background: var(--vscode-errorForeground);
+}
+
+.quota-resets {
+	color: var(--vscode-descriptionForeground);
+	font-size: 10px;
+}
+
+.quota-balance {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 12px;
 }
 
 .picker-popup {
@@ -794,6 +1045,181 @@ body {
 	padding: 6px;
 	color: var(--vscode-descriptionForeground);
 	font-size: 12px;
+}
+
+.history-trigger {
+	display: flex;
+	align-items: baseline;
+	gap: 4px;
+	flex: 0 1 auto;
+	min-width: 0;
+	max-width: 100%;
+	padding: 0;
+	border: none;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	font-weight: 600;
+	text-align: left;
+	cursor: pointer;
+}
+
+.history-trigger:hover .history-title {
+	text-decoration: underline;
+}
+
+.history-trigger:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.history-title {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.history-chevron {
+	flex: 0 0 auto;
+	color: var(--vscode-descriptionForeground);
+	font-size: 10px;
+}
+
+.history {
+	flex: 0 1 auto;
+	min-width: 0;
+}
+
+.history-popup {
+	top: 100%;
+	bottom: auto;
+	left: 6px;
+	right: 6px;
+	max-width: 480px;
+	min-width: 0;
+	max-height: min(60vh, 420px);
+	margin-top: 4px;
+	margin-bottom: 0;
+	overflow: hidden;
+}
+
+.history-top {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.history-top .picker-search {
+	flex: 1 1 auto;
+	width: auto;
+	min-width: 0;
+}
+
+.history-new {
+	flex: 0 0 auto;
+	padding: 2px 8px;
+	border: none;
+	border-radius: 2px;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	font-family: inherit;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.history-new:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.history-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+}
+
+.history-row {
+	display: flex;
+	align-items: center;
+	border-left: 2px solid transparent;
+}
+
+.history-row:hover {
+	background: var(--vscode-list-hoverBackground, #2a2d2e);
+}
+
+.history-row.picker-option-active {
+	background: var(--vscode-list-activeSelectionBackground, #04395e);
+	color: var(--vscode-list-activeSelectionForeground, inherit);
+}
+
+.history-active {
+	border-left-color: var(--vscode-focusBorder);
+}
+
+.history-active .history-row-title {
+	font-weight: 600;
+}
+
+.history-open {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex: 1 1 auto;
+	min-width: 0;
+	padding: 3px 6px;
+	border: none;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.history-status {
+	flex: 0 0 12px;
+	width: 12px;
+	text-align: center;
+	font-size: 11px;
+	line-height: 1;
+}
+
+.history-row-title {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.history-row-age {
+	flex: 0 0 auto;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.history-delete {
+	flex: 0 0 auto;
+	padding: 0 6px;
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font: inherit;
+	opacity: 0;
+	cursor: pointer;
+}
+
+.history-row:hover .history-delete,
+.history-row.picker-option-active .history-delete,
+.history-delete:focus {
+	opacity: 1;
+}
+
+.history-delete:hover {
+	color: var(--vscode-errorForeground);
 }
 
 .tool-group {

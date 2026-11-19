@@ -169,6 +169,20 @@ suite("chat change tracker", () => {
 		assert.deepStrictEqual(set.sinceTurn, [{ turn: 1, files: 1 }]);
 	});
 
+	test("forgetSession drops a deleted chat's changes", async () => {
+		const current = tracker();
+		await turn(current, 1, async () => fs.writeFile(file("a.txt"), "agent\n"));
+		assert.strictEqual((await current.changeSet(SESSION)).files.length, 1);
+		const stored = path.join(storage, "sessions", `${SESSION}.json`);
+		await fs.access(stored);
+
+		await current.forgetSession(SESSION);
+		const set = await current.changeSet(SESSION);
+		assert.deepStrictEqual(set.files, []);
+		assert.deepStrictEqual(set.sinceTurn, []);
+		assert.strictEqual(await fs.access(stored).then(() => true, () => false), false);
+	});
+
 	test("the original content feeds the diff view", async () => {
 		const current = tracker();
 		await turn(current, 1, async () => {
@@ -182,6 +196,67 @@ suite("chat change tracker", () => {
 		const added = await current.original(SESSION, ids.get("b.txt")!);
 		assert.strictEqual(added?.before, undefined);
 		assert.strictEqual(await current.original(SESSION, "missing"), undefined);
+	});
+
+	test("a turn without a parallel turn keeps every changed file", async () => {
+		const current = tracker();
+		const begin = await current.beginTurn();
+		assert.ok(begin, "the turn snapshot must exist");
+		await fs.writeFile(file("a.txt"), "agent\n");
+		await fs.writeFile(file("b.txt"), "new\n");
+		await current.endTurn(SESSION, 1, begin, [file("a.txt")]);
+		const set = await current.changeSet(SESSION);
+		assert.deepStrictEqual(set.files.map(entry => entry.path).sort(), ["a.txt", "b.txt"]);
+		assert.strictEqual(set.notice, undefined);
+	});
+
+	test("overlapping turns keep only the files their own tools wrote", async () => {
+		const current = tracker();
+		const beginA = await current.beginTurn();
+		const beginB = await current.beginTurn();
+		assert.ok(beginA, "the first turn snapshot must exist");
+		assert.ok(beginB, "the second turn snapshot must exist");
+		await fs.writeFile(file("a.txt"), "from chat A\n");
+		await fs.writeFile(file("b.txt"), "from chat B\n");
+		await fs.writeFile(file("c.txt"), "from a terminal\n");
+		await current.endTurn("session-a", 1, beginA, [file("a.txt")]);
+		let set = await current.changeSet("session-a");
+		assert.deepStrictEqual(set.files.map(entry => entry.path), ["a.txt"]);
+		assert.strictEqual(set.notice, "Another chat was working at the same time, so 2 files changed by other means are not listed here.");
+		await current.endTurn("session-b", 1, beginB, [file("b.txt")]);
+		set = await current.changeSet("session-b");
+		assert.deepStrictEqual(set.files.map(entry => entry.path), ["b.txt"]);
+		assert.strictEqual(set.notice, "Another chat was working at the same time, so 2 files changed by other means are not listed here.");
+	});
+
+	test("an overlapped turn that claims nothing reports the overlap without turn records", async () => {
+		const current = tracker();
+		const beginA = await current.beginTurn();
+		const beginB = await current.beginTurn();
+		assert.ok(beginA, "the first turn snapshot must exist");
+		assert.ok(beginB, "the second turn snapshot must exist");
+		await fs.writeFile(file("a.txt"), "from chat A\n");
+		await current.endTurn("session-a", 1, beginA, [file("a.txt")]);
+		await current.endTurn("session-b", 1, beginB);
+		const set = await current.changeSet("session-b");
+		assert.deepStrictEqual(set.files, []);
+		assert.deepStrictEqual(set.sinceTurn, []);
+		assert.strictEqual(set.notice, "Another chat was working at the same time, so 1 file changed by other means is not listed here.");
+	});
+
+	test("a turn that starts after the other one ended is not overlapped", async () => {
+		const current = tracker();
+		const first = await current.beginTurn();
+		assert.ok(first, "the first turn snapshot must exist");
+		await fs.writeFile(file("a.txt"), "first\n");
+		await current.endTurn("session-a", 1, first);
+		const second = await current.beginTurn();
+		assert.ok(second, "the second turn snapshot must exist");
+		await fs.writeFile(file("b.txt"), "second\n");
+		await current.endTurn("session-b", 1, second);
+		const set = await current.changeSet("session-b");
+		assert.deepStrictEqual(set.files.map(entry => entry.path), ["b.txt"]);
+		assert.strictEqual(set.notice, undefined);
 	});
 
 	test("without git the tracker reports why and takes no snapshots", async () => {

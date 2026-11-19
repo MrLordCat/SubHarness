@@ -1,4 +1,4 @@
-import { useEffect } from "preact/hooks";
+import { useEffect, useLayoutEffect } from "preact/hooks";
 
 /** Closes the popup when a pointer goes down outside of `target` or keyboard focus leaves it. */
 export function useDismiss(target: { current: HTMLElement | null }, open: boolean, onClose: () => void): void {
@@ -29,6 +29,36 @@ export function useDismiss(target: { current: HTMLElement | null }, open: boolea
 			wrapper?.removeEventListener("focusout", onFocusOut);
 		};
 	}, [open, onClose, target]);
+}
+
+const VIEWPORT_MARGIN = 4;
+
+/** Shifts an open popup horizontally so it stays inside the window. */
+export function useKeepInView(popup: { current: HTMLElement | null }, open: boolean): void {
+	useLayoutEffect(() => {
+		if (!open) {
+			return;
+		}
+		const fit = () => {
+			const node = popup.current;
+			if (!node) {
+				return;
+			}
+			node.style.transform = "";
+			const box = node.getBoundingClientRect();
+			const limit = document.documentElement.clientWidth - VIEWPORT_MARGIN;
+			let shift = box.right > limit ? limit - box.right : 0;
+			if (box.left + shift < VIEWPORT_MARGIN) {
+				shift = VIEWPORT_MARGIN - box.left;
+			}
+			if (shift !== 0) {
+				node.style.transform = `translateX(${Math.round(shift)}px)`;
+			}
+		};
+		fit();
+		window.addEventListener("resize", fit);
+		return () => window.removeEventListener("resize", fit);
+	}, [open, popup]);
 }
 
 const POPUP_ROOM = 320;

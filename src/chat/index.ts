@@ -4,7 +4,7 @@ import { CocoTerminalManager } from "../coco/terminal-manager";
 import { resolveProviderSwitchContextTokens } from "../context/provider-handoff";
 import { ChatChangeTracker } from "./changes/change-tracker";
 import { findGitExecutable } from "./changes/shadow-git";
-import { ChatController } from "./chat-controller";
+import { ChatController, type ChatQuotaSource } from "./chat-controller";
 import { registerChatView } from "./chat-view";
 import { CHAT_COMPACTION_TARGET_TOKENS, createChatSummarizer } from "./compaction";
 import { ChatPromptSource } from "./prompt/instructions";
@@ -27,6 +27,7 @@ export interface ChatWindowDeps {
 	log?: (event: string, data: Record<string, unknown>) => void;
 	/** Sent with DeepSeek summary requests. */
 	userAgent?: string;
+	quota?: ChatQuotaSource;
 }
 
 const DEEPSEEK_KEY_SECRET = "llamacpp.deepSeekApiKey";
@@ -105,6 +106,16 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		openChange: registerChangeDiff(context, changes),
 		prompt: new ChatPromptSource({ folders }),
 		abandonConversation: async id => { await deps.composite.abandonConversation?.(id); },
+		confirm: async (message, action) => (await vscode.window.showWarningMessage(message, { modal: true }, action)) === action,
+		notify: async (message, action) => {
+			const choice = await vscode.window.showInformationMessage(message, action);
+			if (choice === action) {
+				// VS Code generates "<viewId>.focus" for every contributed view.
+				await Promise.resolve(vscode.commands.executeCommand("llamacpp.chat.focus")).catch(() => undefined);
+			}
+			return choice === action;
+		},
+		quota: deps.quota,
 		compaction: {
 			summarize: createChatSummarizer({
 				apiKey: async () => (await context.secrets.get(DEEPSEEK_KEY_SECRET))?.trim() || undefined,
@@ -123,6 +134,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		terminals,
 		controller,
 		vscode.commands.registerCommand("llamacpp.chat.new", () => controller.newChat()),
+		vscode.commands.registerCommand("llamacpp.chat.history", () => controller.showSessions()),
 		vscode.commands.registerCommand("llamacpp.chat.openInEditor", () => host.openInEditor()),
 	);
 }

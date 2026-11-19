@@ -373,6 +373,14 @@ export function createCoreTools(options: {
 		}
 	};
 
+	const writtenPath = (input: unknown): string[] => {
+		try {
+			return [resolveToolPath(inputRecord(input).filePath, roots())];
+		} catch {
+			return [];
+		}
+	};
+
 	const readFile: ChatTool = {
 		name: "read_file",
 		group: CHAT_TOOL_GROUPS.files,
@@ -581,6 +589,7 @@ export function createCoreTools(options: {
 		needsConfirmation(input: unknown): ChatToolConfirmation | undefined {
 			return outsideWorkspace(input, "Create a file outside the workspace");
 		},
+		writes: writtenPath,
 		async invoke(input: unknown, token: vscode.CancellationToken): Promise<string> {
 			checkCancellation(token);
 			const record = inputRecord(input);
@@ -622,6 +631,7 @@ export function createCoreTools(options: {
 		needsConfirmation(input: unknown): ChatToolConfirmation | undefined {
 			return outsideWorkspace(input, "Edit a file outside the workspace");
 		},
+		writes: writtenPath,
 		async invoke(input: unknown, token: vscode.CancellationToken): Promise<string> {
 			checkCancellation(token);
 			const record = inputRecord(input);

@@ -1,6 +1,28 @@
-import type { ChatModelEntry, ChatModelGroup } from "./protocol";
+import type { ChatModelEntry, ChatModelGroup, ChatThinkingOptions } from "./protocol";
 
-export interface ModelInfoLike { id: string; name: string; maxInputTokens: number; detail?: string }
+export interface ModelInfoLike { id: string; name: string; maxInputTokens: number; detail?: string; configurationSchema?: unknown }
+
+function record(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined;
+}
+
+/** The reasoningEffort property every bridge provider puts into configurationSchema. */
+export function thinkingOptions(model: ModelInfoLike): ChatThinkingOptions | undefined {
+	const property = record(record(record(model.configurationSchema)?.properties)?.reasoningEffort);
+	const values = Array.isArray(property?.enum) ? property.enum.filter((value): value is string => typeof value === "string") : [];
+	if (!property || values.length === 0) {
+		return undefined;
+	}
+	const labels = Array.isArray(property.enumItemLabels) ? property.enumItemLabels : [];
+	const descriptions = Array.isArray(property.enumDescriptions) ? property.enumDescriptions : [];
+	const levels = values.map((value, index) => ({
+		value,
+		label: typeof labels[index] === "string" ? labels[index] as string : value.charAt(0).toUpperCase() + value.slice(1),
+		...(typeof descriptions[index] === "string" ? { description: descriptions[index] as string } : {}),
+	}));
+	const fallback = typeof property.default === "string" && values.includes(property.default) ? property.default : undefined;
+	return { levels, ...(fallback ? { default: fallback } : {}) };
+}
 
 const GROUP_ORDER = ["Codex", "Claude", "Coco", "Cursor", "DeepSeek", "Local"];
 const PROVIDER_ALIASES: Record<string, string> = {
@@ -69,6 +91,10 @@ export function groupModels(models: readonly ModelInfoLike[]): ChatModelGroup[] 
 			};
 			if (item.model.detail !== undefined) {
 				entry.detail = item.model.detail;
+			}
+			const thinking = thinkingOptions(item.model);
+			if (thinking) {
+				entry.thinking = thinking;
 			}
 			return entry;
 		});

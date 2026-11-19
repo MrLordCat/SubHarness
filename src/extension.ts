@@ -66,6 +66,7 @@ import {
 } from "./usage-experiment";
 import { registerCopilotPatchIntegration } from "./copilot-patch-runtime";
 import { registerChatWindow } from "./chat";
+import { balanceQuota, subscriptionQuota } from "./chat/quota";
 
 interface ContextUsageDisplay {
 	summary: string;
@@ -719,7 +720,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	], history: conversationHistory });
 	context.subscriptions.push(compositeProvider);
 	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, compositeProvider));
-	registerChatWindow(context, { composite: compositeProvider, log: (event, data) => logService.log(event, data), userAgent: ua });
+	const quotaChanges = new vscode.EventEmitter<void>();
+	context.subscriptions.push(
+		quotaChanges,
+		claudeProvider.onDidChangeStatus(() => quotaChanges.fire()),
+		...[...codexProviders.values()].map(provider => provider.onDidChangeStatus(() => quotaChanges.fire())),
+	);
+	registerChatWindow(context, {
+		composite: compositeProvider,
+		log: (event, data) => logService.log(event, data),
+		userAgent: ua,
+		quota: {
+			snapshot: () => [
+				subscriptionQuota("Codex", activeCodex().subscriptionWindows),
+				subscriptionQuota("Claude", claudeProvider.subscriptionWindows),
+				balanceQuota("DeepSeek", llamaProvider.deepSeekBalanceSummary),
+			].filter(quota => quota !== undefined),
+			refresh: async () => {
+				await Promise.allSettled([activeCodex().refreshStatus(), claudeProvider.refreshSubscriptionUsage(true), llamaProvider.refreshDeepSeekBalance(true)]);
+			},
+			onDidChange: quotaChanges.event,
+		},
+	});
 
 	let lastThroughput: string | undefined;
 	let lastPromptCache: string | undefined;

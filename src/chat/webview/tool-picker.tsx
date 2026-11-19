@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ChatToolGroup, ChatToolInfo } from "../shared/protocol";
-import { matchesQuery, popupPlacement, useDismiss } from "./popup";
+import { matchesQuery, popupPlacement, useDismiss, useKeepInView } from "./popup";
 
 interface ToolPickerProps {
 	tools: ChatToolGroup[];
@@ -19,12 +19,14 @@ export function ToolPicker({ tools, onSetToolsEnabled }: ToolPickerProps) {
 	const wrapperRef = useRef<HTMLDivElement>(null);
 	const triggerRef = useRef<HTMLButtonElement>(null);
 	const searchRef = useRef<HTMLInputElement>(null);
+	const popupRef = useRef<HTMLDivElement>(null);
 	const close = useCallback(() => setOpen(false), []);
 	const closeAndFocus = useCallback(() => {
 		setOpen(false);
 		triggerRef.current?.focus();
 	}, []);
 	useDismiss(wrapperRef, open, close);
+	useKeepInView(popupRef, open);
 
 	const groups = useMemo<VisibleToolGroup[]>(
 		() => tools
@@ -88,7 +90,7 @@ export function ToolPicker({ tools, onSetToolsEnabled }: ToolPickerProps) {
 				<span class="picker-trigger-name">Tools {enabledTotal}/{total}</span>
 			</button>
 			{open ? (
-				<div class={`picker-popup tool-popup picker-popup-${placement}`} onKeyDown={onPopupKeyDown}>
+				<div ref={popupRef} class={`picker-popup tool-popup picker-popup-${placement}`} onKeyDown={onPopupKeyDown}>
 					<input
 						ref={searchRef}
 						class="picker-search"

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 import type { ChatModelEntry, ChatModelGroup } from "../shared/protocol";
 import { OPEN_MODEL_PICKER_EVENT } from "./events";
-import { matchesQuery, popupPlacement, useDismiss } from "./popup";
+import { matchesQuery, popupPlacement, useDismiss, useKeepInView } from "./popup";
 
 interface ModelPickerProps {
 	models: ChatModelGroup[];
@@ -28,12 +28,14 @@ export function ModelPicker({ models, selectedModelId, onSelectModel }: ModelPic
 	const wrapperRef = useRef<HTMLDivElement>(null);
 	const triggerRef = useRef<HTMLButtonElement>(null);
 	const searchRef = useRef<HTMLInputElement>(null);
+	const popupRef = useRef<HTMLDivElement>(null);
 	const close = useCallback(() => setOpen(false), []);
 	const closeAndFocus = useCallback(() => {
 		setOpen(false);
 		triggerRef.current?.focus();
 	}, []);
 	useDismiss(wrapperRef, open, close);
+	useKeepInView(popupRef, open);
 
 	const groups = useMemo<VisibleGroup[]>(() => {
 		const result: VisibleGroup[] = [];
@@ -148,7 +150,7 @@ export function ModelPicker({ models, selectedModelId, onSelectModel }: ModelPic
 	};
 
 	return (
-		<div class="picker" ref={wrapperRef}>
+		<div class="picker model-picker" ref={wrapperRef}>
 			<button
 				type="button"
 				ref={triggerRef}
@@ -159,10 +161,10 @@ export function ModelPicker({ models, selectedModelId, onSelectModel }: ModelPic
 				onClick={() => (open ? setOpen(false) : openPopup())}
 			>
 				<span class="picker-trigger-name">{selected?.model.name ?? "Select model"}</span>
-				{selected ? <span class="picker-trigger-provider"> · {selected.provider}</span> : null}
+				{selected ? <span class="picker-trigger-provider">· {selected.provider}</span> : null}
 			</button>
 			{open ? (
-				<div class={`picker-popup model-popup picker-popup-${placement}`} onKeyDown={onPopupKeyDown}>
+				<div ref={popupRef} class={`picker-popup model-popup picker-popup-${placement}`} onKeyDown={onPopupKeyDown}>
 					<input
 						ref={searchRef}
 						class="picker-search"

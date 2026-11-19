@@ -4,7 +4,9 @@ import {
 	type ChatChangeSet,
 	type ChatMessage,
 	type ChatModelGroup,
+	type ChatProviderQuota,
 	type ChatRunState,
+	type ChatSessionActivity,
 	type ChatSessionMeta,
 	type ChatSubagentRun,
 	type ChatToolGroup,
@@ -16,7 +18,10 @@ const HOST_MESSAGE_TYPES = new Set([
 	"init",
 	"changes",
 	"models",
+	"quota",
 	"session",
+	"sessions",
+	"showSessions",
 	"tools",
 	"messageAdded",
 	"partAdded",
@@ -28,16 +33,26 @@ const HOST_MESSAGE_TYPES = new Set([
 	"approvalResolved",
 	"toolResultFull",
 	"subagent",
+	"activity",
 ]);
 
 /** Webview-side chat state shared by the Preact tree; every host update bumps one message version. */
 export class ChatStore {
 	session: ChatSessionMeta | undefined;
+	/** Undefined until the first chat list arrives. */
+	sessions: ChatSessionMeta[] | undefined;
+	activeSessionId: string | undefined;
+	/** Bumped when the host asks the history popup to open. */
+	showSessionsRequest = 0;
 	messages: ChatMessage[] = [];
 	models: ChatModelGroup[] = [];
 	tools: ChatToolGroup[] = [];
 	approvals: ChatApprovalRequest[] = [];
 	changes: ChatChangeSet = { files: [], sinceTurn: [] };
+	/** Chosen reasoning level of the selected model; absent means the model's default. */
+	selectedThinking: string | undefined;
+	quota: ChatProviderQuota[] = [];
+	activity: ChatSessionActivity[] = [];
 	selectedModelId: string | undefined;
 	run: ChatRunState = { running: false };
 	latestUsage: ChatUsage | undefined;
@@ -119,9 +134,13 @@ export class ChatStore {
 		switch (update.type) {
 			case "init":
 				this.session = update.session;
+				this.activeSessionId = update.session.id;
 				this.messages = update.messages;
 				this.models = update.models;
 				this.tools = update.tools;
+				this.selectedThinking = update.selectedThinking;
+				this.quota = update.quota;
+				this.activity = update.activity;
 				this.approvals = update.approvals;
 				this.changes = update.changes;
 				this.selectedModelId = update.selectedModelId;
@@ -137,9 +156,23 @@ export class ChatStore {
 				if (update.selectedModelId !== undefined) {
 					this.selectedModelId = update.selectedModelId;
 				}
+				this.selectedThinking = update.selectedThinking;
+				return;
+			case "quota":
+				this.quota = update.quota;
+				return;
+			case "activity":
+				this.activity = update.activity;
 				return;
 			case "session":
 				this.session = update.session;
+				return;
+			case "sessions":
+				this.sessions = update.sessions;
+				this.activeSessionId = update.activeId;
+				return;
+			case "showSessions":
+				this.showSessionsRequest += 1;
 				return;
 			case "tools":
 				this.tools = update.tools;

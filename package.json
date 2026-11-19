@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/ai-agent-bridge.git"
 	},
-	"version": "1.21.13",
+	"version": "1.21.16",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -1309,6 +1309,11 @@
 				"icon": "$(add)"
 			},
 			{
+				"command": "llamacpp.chat.history",
+				"title": "AI Agent Bridge: Show Chats",
+				"icon": "$(history)"
+			},
+			{
 				"command": "llamacpp.chat.openInEditor",
 				"title": "AI Agent Bridge: Open Chat in Editor",
 				"icon": "$(link-external)"
@@ -1609,6 +1614,11 @@
 		],
 		"menus": {
 			"view/title": [
+				{
+					"command": "llamacpp.chat.history",
+					"when": "view == llamacpp.chat",
+					"group": "navigation"
+				},
 				{
 					"command": "llamacpp.chat.new",
 					"when": "view == llamacpp.chat",

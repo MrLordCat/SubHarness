@@ -15,6 +15,8 @@ export interface ChatToolSource {
 	setEnabled?(names: readonly string[], enabled: boolean): Promise<void>;
 	/** True when the tool never changes files; unknown tools count as writing. */
 	isReadOnly?(name: string): boolean;
+	/** Absolute paths the call may write; empty when the tool does not report them. */
+	writtenPaths?(name: string, input: unknown): string[];
 }
 
 export interface ChatToolCatalogLike {
@@ -54,5 +56,12 @@ export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSour
 		groups: () => catalog.groups(),
 		setEnabled: (names, enabled) => catalog.setEnabled(names, enabled),
 		isReadOnly: name => catalog.enabledTools().find(tool => tool.name === name)?.readOnly === true,
+		writtenPaths(name, input) {
+			try {
+				return catalog.enabledTools().find(tool => tool.name === name)?.writes?.(input) ?? [];
+			} catch {
+				return [];
+			}
+		},
 	};
 }

@@ -108,6 +108,22 @@ suite("Chat core tools", () => {
 		);
 	});
 
+	test("create_file and replace_string_in_file report the paths they may write", () => {
+		const create = tool("create_file");
+		const replace = tool("replace_string_in_file");
+		assert.deepStrictEqual(
+			create.writes?.({ filePath: "nested/deep/note.txt", content: "" }),
+			[path.resolve(tmpDir, "nested", "deep", "note.txt")]
+		);
+		assert.deepStrictEqual(
+			replace.writes?.({ filePath: "edit.txt", oldString: "a", newString: "b" }),
+			[path.resolve(tmpDir, "edit.txt")]
+		);
+		assert.deepStrictEqual(create.writes?.({ filePath: 42, content: "" }), []);
+		assert.deepStrictEqual(create.writes?.({}), []);
+		assert.deepStrictEqual(replace.writes?.("not an object"), []);
+	});
+
 	test("needsConfirmation flags paths outside the workspace only", () => {
 		const outside = path.join(tmpDir, "..", "outside-file.txt");
 		const create = tool("create_file");

@@ -7,14 +7,17 @@ import { compactChatHistory, estimateTextTokens, planChatCompaction, previousMod
 import type { ChatSessionStore } from "./session-store";
 import { runChatSubagent } from "./subagent-runner";
 import { SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
-import { groupModels } from "./shared/model-groups";
+import { groupModels, thinkingOptions } from "./shared/model-groups";
 import { appendChatText, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS } from "./shared/protocol";
 import type {
 	ChatApprovalRequest,
 	ChatChangeSet,
 	ChatMessage,
 	ChatPart,
+	ChatProviderQuota,
 	ChatRunState,
+	ChatSessionActivity,
+	ChatSessionActivityState,
 	ChatSessionMeta,
 	ChatStructuredPart,
 	ChatTextKind,
@@ -43,6 +46,19 @@ export interface ChatControllerDeps {
 	compaction?: ChatCompactionDeps;
 	/** Tells the providers a chat was left, so a turn stopped during a tool call stops waiting for results. */
 	abandonConversation?: (conversationId: string) => Promise<void>;
+	/** Modal confirmation for destructive actions; without it they proceed. */
+	confirm?: (message: string, action: string) => Promise<boolean>;
+	/** Non-modal notice with one action; resolves true when the user picks it. */
+	notify?: (message: string, action: string) => Promise<boolean>;
+	/** Subscription limits and balances shown next to the model picker. */
+	quota?: ChatQuotaSource;
+}
+
+export interface ChatQuotaSource {
+	snapshot(): ChatProviderQuota[];
+	/** Asks the providers for fresh numbers. */
+	refresh?(): Promise<void>;
+	onDidChange?: vscode.Event<void>;
 }
 
 export interface ChatPromptProvider {
@@ -57,7 +73,13 @@ export interface ChatCompactionDeps {
 
 const ACTIVE_SESSION_KEY = "llamacpp.chat.activeSession";
 const LAST_MODEL_KEY = "llamacpp.chat.lastModel";
+/** Reasoning level per model id. */
+const THINKING_KEY = "llamacpp.chat.thinking";
+const SESSION_ID = /^[A-Za-z0-9-]{1,64}$/;
 const DELTA_FLUSH_MS = 50;
+/** Codex re-announces its status every 200 ms while it streams. */
+const QUOTA_COALESCE_MS = 2_000;
+const QUOTA_REFRESH_INTERVAL_MS = 30_000;
 const NO_MODEL_NOTICE = "No model is available. Configure a provider first.";
 const COMPACTING_DETAIL = "Compacting context…";
 
@@ -67,6 +89,7 @@ interface DeltaBuffer {
 }
 
 interface RunningTurn {
+	runtime: SessionRuntime;
 	sessionId: string;
 	message: ChatMessage;
 	cts: vscode.CancellationTokenSource;
@@ -74,6 +97,19 @@ interface RunningTurn {
 	persistedParts: number;
 	buffer: DeltaBuffer | undefined;
 	timer: ReturnType<typeof setTimeout> | undefined;
+}
+
+interface SessionRuntime {
+	meta: ChatSessionMeta;
+	messages: ChatMessage[];
+	changes: ChatChangeSet;
+	running: RunningTurn | undefined;
+	/** A turn, edit or keep/undo is under way in this chat. */
+	busy: boolean;
+	completion: Promise<void>;
+	approvals: Map<string, { request: ChatApprovalRequest; settle: (allowed: boolean) => void }>;
+	/** A turn ended while this chat was not shown. */
+	finished: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -101,6 +137,8 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 		case "openChange": return typeof value.id === "string" ? { type: "openChange", id: value.id } : undefined;
 		case "stop": return { type: "stop" };
 		case "selectModel": return typeof value.modelId === "string" ? { type: "selectModel", modelId: value.modelId } : undefined;
+		case "selectThinking": return typeof value.value === "string" ? { type: "selectThinking", value: value.value } : undefined;
+		case "refreshQuota": return { type: "refreshQuota" };
 		case "setToolsEnabled":
 			return Array.isArray(value.names) && value.names.every(name => typeof name === "string") && typeof value.enabled === "boolean"
 				? { type: "setToolsEnabled", names: value.names as string[], enabled: value.enabled }
@@ -108,6 +146,12 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 		case "approve":
 			return typeof value.id === "string" && typeof value.allow === "boolean" ? { type: "approve", id: value.id, allow: value.allow } : undefined;
 		case "newChat": return { type: "newChat" };
+		case "listSessions": return { type: "listSessions" };
+		case "openSession":
+		case "deleteSession":
+			return typeof value.sessionId === "string" && SESSION_ID.test(value.sessionId)
+				? { type: value.type, sessionId: value.sessionId }
+				: undefined;
 		case "loadToolResult":
 			return typeof value.messageId === "string" && typeof value.callId === "string"
 				? { type: "loadToolResult", messageId: value.messageId, callId: value.callId }
@@ -167,20 +211,22 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	private _models: vscode.LanguageModelChatInformation[] = [];
 	private _modelsLoaded = false;
 	private _selectedModelId: string | undefined;
-	private _session: ChatSessionMeta | undefined;
-	private _messages: ChatMessage[] = [];
+	private readonly _runtimes = new Map<string, SessionRuntime>();
+	private _activeId: string | undefined;
 	private _sessionTask: Promise<void> | undefined;
 	private _sessionLoaded = false;
-	private _running: RunningTurn | undefined;
-	private readonly _approvals = new Map<string, { request: ChatApprovalRequest; settle: (allowed: boolean) => void }>();
-	private _changes: ChatChangeSet = emptyChangeSet();
-	private _turnActive = false;
-	private _turnCompletion: Promise<void> = Promise.resolve();
+	private _sessionSwitch: Promise<void> = Promise.resolve();
 	private _disposed = false;
+	private readonly _quotaSubscription: vscode.Disposable | undefined;
+	private _quotaTimer: ReturnType<typeof setTimeout> | undefined;
+	private _quotaRefreshedAt = 0;
+	private _lastQuota: string | undefined;
+	private _lastActivity: string | undefined;
 
 	constructor(deps: ChatControllerDeps) {
 		this._deps = deps;
 		this._modelChangeSubscription = deps.onDidChangeModels(() => { void this._onModelsChanged(); });
+		this._quotaSubscription = deps.quota?.onDidChange?.(() => this._scheduleQuotaBroadcast());
 	}
 
 	attach(webview: vscode.Webview): vscode.Disposable {
@@ -205,17 +251,133 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		return attachment;
 	}
 
-	async newChat(): Promise<void> {
-		this._stop();
-		await this._turnCompletion;
-		const previous = this._session?.id;
+	newChat(): Promise<void> {
+		return this._switchSession(async () => {
+			const previous = this._active();
+			await this._ensureModels();
+			const runtime = await this._runtime(await this._deps.store.create(this._selectedModelId));
+			if (runtime.running) {
+				this._flushDelta(runtime.running);
+			}
+			await this._activate(runtime);
+			this._broadcast(this._initMessage());
+			this._broadcastActivity();
+			if (previous && previous.meta.id !== runtime.meta.id) {
+				await this._leave(previous);
+			}
+		});
+	}
+
+	showSessions(): void {
+		this._broadcast({ type: "showSessions" });
+	}
+
+	openSession(sessionId: string): Promise<void> {
+		return this._switchSession(() => this._openSession(sessionId));
+	}
+
+	deleteSession(sessionId: string): Promise<void> {
+		return this._switchSession(() => this._deleteSession(sessionId));
+	}
+
+	/** Switches run one at a time so quick clicks in the history cannot interleave. */
+	private _switchSession(task: () => Promise<void>): Promise<void> {
+		const result = this._sessionSwitch.then(task, task);
+		this._sessionSwitch = result.catch(() => undefined);
+		return result;
+	}
+
+	private async _openSession(sessionId: string): Promise<void> {
 		await this._ensureModels();
-		const session = await this._deps.store.create(this._selectedModelId);
-		await this._activateSession(session);
-		this._broadcast(this._initMessage());
-		if (previous && previous !== session.id) {
-			await this._abandon(previous);
+		await this._ensureSession();
+		if (this._activeId === sessionId) {
+			return;
 		}
+		const target = await this._deps.store.get(sessionId);
+		if (!target) {
+			this._broadcast(await this._sessionsMessage());
+			return;
+		}
+		const previous = this._active();
+		const runtime = await this._runtime(target);
+		if (runtime.running) {
+			this._flushDelta(runtime.running);
+		}
+		await this._activate(runtime);
+		this._broadcast(this._initMessage());
+		this._broadcastActivity();
+		if (previous && previous.meta.id !== runtime.meta.id) {
+			await this._leave(previous);
+		}
+	}
+
+	private async _deleteSession(sessionId: string): Promise<void> {
+		await this._ensureSession();
+		const meta = await this._deps.store.get(sessionId);
+		if (!meta) {
+			this._broadcast(await this._sessionsMessage());
+			return;
+		}
+		const confirmed = this._deps.confirm
+			? await this._deps.confirm(`Delete the chat "${meta.title}"? Files the agent changed stay as they are.`, "Delete")
+			: true;
+		if (!confirmed) {
+			return;
+		}
+		const active = this._activeId === sessionId;
+		const runtime = this._runtimes.get(sessionId);
+		if (runtime) {
+			runtime.running?.cts.cancel();
+			for (const approval of [...runtime.approvals.values()]) {
+				approval.settle(false);
+			}
+			await runtime.completion.catch(() => undefined);
+			this._runtimes.delete(sessionId);
+		}
+		await this._deps.store.delete(sessionId);
+		try {
+			await this._deps.changes?.forgetSession?.(sessionId);
+		} catch (error) {
+			this._log("chat.session.cleanup_failed", { message: errorMessage(error) });
+		}
+		await this._abandon(sessionId);
+		if (active) {
+			await this._ensureModels();
+			const next = (await this._deps.store.list()).find(candidate => candidate.messageCount > 0);
+			const opened = await this._runtime(next ?? await this._deps.store.create(this._selectedModelId));
+			if (opened.running) {
+				this._flushDelta(opened.running);
+			}
+			await this._activate(opened);
+			this._broadcast(this._initMessage());
+		}
+		this._broadcast(await this._sessionsMessage());
+		this._broadcastActivity();
+	}
+
+	private async _sessionsMessage(): Promise<HostMessage> {
+		const listed = await this._deps.store.list();
+		const sessions = listed.filter(meta => meta.messageCount > 0 || meta.id === this._activeId);
+		return { type: "sessions", sessions, activeId: this._activeId ?? "" };
+	}
+
+	/** A chat that still works stays in memory; an idle untouched one would only clutter the history. */
+	private async _leave(runtime: SessionRuntime): Promise<void> {
+		if (runtime.running || runtime.busy || runtime.approvals.size > 0) {
+			return;
+		}
+		const sessionId = runtime.meta.id;
+		await this._abandon(sessionId);
+		try {
+			const meta = await this._deps.store.get(sessionId);
+			if (meta && meta.messageCount === 0) {
+				await this._deps.store.delete(sessionId);
+				await this._deps.changes?.forgetSession?.(sessionId);
+			}
+		} catch (error) {
+			this._log("chat.session.cleanup_failed", { message: errorMessage(error) });
+		}
+		this._runtimes.delete(sessionId);
 	}
 
 	private async _abandon(sessionId: string): Promise<void> {
@@ -231,16 +393,24 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			return;
 		}
 		this._disposed = true;
-		for (const approval of [...this._approvals.values()]) {
-			approval.settle(false);
+		for (const runtime of this._runtimes.values()) {
+			for (const approval of [...runtime.approvals.values()]) {
+				approval.settle(false);
+			}
+			const running = runtime.running;
+			running?.cts.cancel();
+			if (running?.timer) {
+				clearTimeout(running.timer);
+				running.timer = undefined;
+			}
+			runtime.running = undefined;
 		}
-		this._running?.cts.cancel();
-		if (this._running?.timer) {
-			clearTimeout(this._running.timer);
-			this._running.timer = undefined;
-		}
-		this._running = undefined;
 		this._modelChangeSubscription.dispose();
+		this._quotaSubscription?.dispose();
+		if (this._quotaTimer) {
+			clearTimeout(this._quotaTimer);
+			this._quotaTimer = undefined;
+		}
 		for (const attachment of [...this._attachments.values()]) {
 			attachment.dispose();
 		}
@@ -264,27 +434,51 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "undoChanges":
 				await this._resolveChanges(message.type === "keepChanges" ? "keep" : "undo", message.ids);
 				return;
-			case "openChange":
+			case "openChange": {
 				await this._ensureSession();
-				if (this._session) {
-					await this._deps.openChange?.(this._session.id, message.id);
+				const runtime = this._active();
+				if (runtime) {
+					await this._deps.openChange?.(runtime.meta.id, message.id);
 				}
 				return;
+			}
 			case "stop":
 				this._stop();
 				return;
 			case "selectModel":
 				await this._selectModel(message.modelId);
 				return;
+			case "selectThinking":
+				await this._selectThinking(message.value);
+				return;
+			case "refreshQuota":
+				await this._refreshQuota();
+				return;
 			case "setToolsEnabled":
 				await this._deps.tools.setEnabled?.(message.names, message.enabled);
 				this._broadcast({ type: "tools", tools: this._toolGroups() });
 				return;
 			case "approve":
-				this._approvals.get(message.id)?.settle(message.allow);
+				for (const runtime of this._runtimes.values()) {
+					const approval = runtime.approvals.get(message.id);
+					if (approval) {
+						approval.settle(message.allow);
+						break;
+					}
+				}
 				return;
 			case "newChat":
 				await this.newChat();
+				return;
+			case "listSessions":
+				await this._ensureSession();
+				this._post(webview, await this._sessionsMessage());
+				return;
+			case "openSession":
+				await this.openSession(message.sessionId);
+				return;
+			case "deleteSession":
+				await this.deleteSession(message.sessionId);
 				return;
 			case "loadToolResult":
 				this._sendFullToolResult(webview, message.messageId, message.callId);
@@ -293,46 +487,52 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	}
 
 	private async _send(text: string): Promise<void> {
-		if (!text.trim() || this._turnActive) {
+		if (!text.trim()) {
 			return;
 		}
-		this._turnActive = true;
+		await this._ensureSession();
+		const runtime = this._active();
+		if (!runtime || runtime.busy) {
+			return;
+		}
+		runtime.busy = true;
 		try {
-			await this._sendTurn(text);
+			await this._sendTurn(runtime, text);
 		} finally {
-			this._turnActive = false;
+			runtime.busy = false;
 		}
 	}
 
 	private async _resolveChanges(action: "keep" | "undo", ids: readonly string[] | undefined): Promise<void> {
 		const tracker = this._deps.changes;
-		if (!tracker || this._turnActive) {
+		if (!tracker) {
 			return;
 		}
-		this._turnActive = true;
+		await this._ensureSession();
+		const runtime = this._active();
+		if (!runtime || runtime.busy) {
+			return;
+		}
+		runtime.busy = true;
 		try {
-			await this._ensureSession();
-			const session = this._session;
-			if (!session) {
-				return;
-			}
 			try {
-				await (action === "keep" ? tracker.keep(session.id, ids) : tracker.undo(session.id, ids));
+				await (action === "keep" ? tracker.keep(runtime.meta.id, ids) : tracker.undo(runtime.meta.id, ids));
 			} catch (error) {
 				this._log("chat.changes.resolve_failed", { action, message: errorMessage(error) });
 			}
-			await this._refreshChanges(session.id);
+			await this._refreshChanges(runtime.meta.id);
 		} finally {
-			this._turnActive = false;
+			runtime.busy = false;
 		}
 	}
 
 	private async _refreshChanges(sessionId: string): Promise<void> {
-		const changes = await this._loadChanges(sessionId);
-		if (this._session?.id === sessionId) {
-			this._changes = changes;
-			this._broadcast({ type: "changes", changes });
+		const runtime = this._runtimes.get(sessionId);
+		if (!runtime) {
+			return;
 		}
+		runtime.changes = await this._loadChanges(sessionId);
+		this._emit(runtime, { type: "changes", changes: runtime.changes });
 	}
 
 	private async _loadChanges(sessionId: string): Promise<ChatChangeSet> {
@@ -349,59 +549,57 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 
 	/** Drops the edited user message and everything after it, then sends the new text as a fresh turn. */
 	private async _edit(messageId: string, text: string, undoChanges: boolean): Promise<void> {
-		if (!text.trim() || this._turnActive) {
+		if (!text.trim()) {
 			return;
 		}
-		this._turnActive = true;
+		await this._ensureSession();
+		const runtime = this._active();
+		if (!runtime || runtime.busy) {
+			return;
+		}
+		runtime.busy = true;
 		try {
-			await this._ensureSession();
-			const session = this._session;
-			const index = this._messages.findIndex(message => message.id === messageId && message.role === "user");
-			if (!session || index < 0) {
+			const index = runtime.messages.findIndex(message => message.id === messageId && message.role === "user");
+			if (index < 0) {
 				return;
 			}
 			const tracker = this._deps.changes;
 			if (tracker) {
-				const turn = this._messages[index].turn;
+				const turn = runtime.messages[index].turn;
 				try {
-					await (undoChanges ? tracker.undoSinceTurn(session.id, turn) : tracker.forgetTurnsFrom(session.id, turn));
+					await (undoChanges ? tracker.undoSinceTurn(runtime.meta.id, turn) : tracker.forgetTurnsFrom(runtime.meta.id, turn));
 				} catch (error) {
 					this._log("chat.changes.edit_rollback_failed", { message: errorMessage(error) });
 				}
-				await this._refreshChanges(session.id);
+				await this._refreshChanges(runtime.meta.id);
 			}
 			try {
-				await this._deps.store.truncateFrom(session.id, messageId);
+				await this._deps.store.truncateFrom(runtime.meta.id, messageId);
 			} catch (error) {
 				this._log("chat.persist.truncate_failed", { message: errorMessage(error) });
 				return;
 			}
-			this._messages.splice(index);
-			const updated = await this._deps.store.get(session.id).catch(() => undefined);
-			if (updated && this._session?.id === session.id) {
-				this._session = updated;
+			runtime.messages.splice(index);
+			const updated = await this._deps.store.get(runtime.meta.id).catch(() => undefined);
+			if (updated) {
+				runtime.meta = updated;
 			}
-			this._broadcast({ type: "truncated", messageId });
-			await this._sendTurn(text);
+			this._emit(runtime, { type: "truncated", messageId });
+			await this._sendTurn(runtime, text);
 		} finally {
-			this._turnActive = false;
+			runtime.busy = false;
 		}
 	}
 
-	private async _sendTurn(text: string): Promise<void> {
+	private async _sendTurn(runtime: SessionRuntime, text: string): Promise<void> {
 		await this._ensureModels();
-		await this._ensureSession();
-		const session = this._session;
-		if (!session) {
-			return;
-		}
-		const messages = this._messages;
+		const messages = runtime.messages;
 		const modelId = this._selectedModelId;
 		const model = modelId === undefined ? undefined : this._models.find(candidate => candidate.id === modelId);
 		if (!model) {
 			const turn = Math.max(1, maxTurn(messages));
 			const notice: ChatStructuredPart = { kind: "notice", level: "error", text: NO_MODEL_NOTICE };
-			await this._appendMessage(messages, session.id, { id: randomUUID(), role: "assistant", turn, createdAt: Date.now(), parts: [notice] });
+			await this._appendMessage(runtime, { id: randomUUID(), role: "assistant", turn, createdAt: Date.now(), parts: [notice] });
 			return;
 		}
 		const turn = maxTurn(messages) + 1;
@@ -414,29 +612,32 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			parts: [{ kind: "text", text }],
 			...(hostContext ? { hostContext } : {}),
 		};
-		await this._appendMessage(messages, session.id, user);
-		await this._refreshSessionMeta(session.id);
+		await this._appendMessage(runtime, user);
+		await this._refreshSessionMeta(runtime);
 		const history = messages.slice();
 		const assistant: ChatMessage = { id: randomUUID(), role: "assistant", turn, createdAt: Date.now(), modelId: model.id, parts: [] };
-		await this._appendMessage(messages, session.id, assistant);
-		if (this._session?.id !== session.id) {
+		await this._appendMessage(runtime, assistant);
+		// A chat deleted while its messages were being saved must not start a turn nobody can stop.
+		if (this._runtimes.get(runtime.meta.id) !== runtime) {
 			return;
 		}
 		const running: RunningTurn = {
-			sessionId: session.id,
+			runtime,
+			sessionId: runtime.meta.id,
 			message: assistant,
 			cts: new vscode.CancellationTokenSource(),
 			persistedParts: 0,
 			buffer: undefined,
 			timer: undefined,
 		};
-		this._running = running;
-		this._broadcast({ type: "run", run: { running: true } });
-		this._turnCompletion = this._runTurn(running, model, history, turn);
-		await this._turnCompletion;
+		runtime.running = running;
+		this._emit(runtime, { type: "run", run: { running: true } });
+		runtime.completion = this._runTurn(running, model, history, turn);
+		await runtime.completion;
 	}
 
 	private async _runTurn(running: RunningTurn, model: vscode.LanguageModelChatInformation, history: ChatMessage[], turn: number): Promise<void> {
+		const runtime = running.runtime;
 		const sink: AgentTurnSink = {
 			text: (kind, text) => {
 				if (!text) {
@@ -449,12 +650,13 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			usage: usage => {
 				running.message.usage = usage;
 				void this._persistUsage(running, usage);
-				this._broadcast({ type: "usage", messageId: running.message.id, usage });
+				this._emit(runtime, { type: "usage", messageId: running.message.id, usage });
 			},
 		};
 		const source = this._deps.tools;
 		const tracker = this._deps.changes;
 		let begin: Promise<TurnSnapshot | undefined> | undefined;
+		const claimed = new Set<string>();
 		const invoke = async (name: string, input: unknown, token: vscode.CancellationToken, callId: string | undefined, nested: boolean) => {
 			// The snapshot must exist before the first tool that may write; read-only rounds cost nothing.
 			if (tracker && !begin && !source.isReadOnly?.(name)) {
@@ -464,6 +666,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				});
 			}
 			await begin;
+			for (const file of source.writtenPaths?.(name, input) ?? []) {
+				claimed.add(file);
+			}
 			return source.invoke(name, input, token, {
 				callId,
 				approve: confirmation => this._requestApproval(running, name, callId, confirmation, token),
@@ -483,6 +688,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		};
 		try {
 			const system = await this._systemPrompt();
+			const thinking = this._thinkingFor(model.id);
 			const initialParts = await this._compactForModel(running, model, history, system);
 			await runAgentTurn({
 				backend: this._deps.backend,
@@ -495,6 +701,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				token: running.cts.token,
 				system,
 				initialParts,
+				modelOptions: thinking ? { reasoningEffort: thinking } : undefined,
 			});
 		} catch (error) {
 			this._flushDelta(running);
@@ -502,24 +709,30 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				? { kind: "notice", level: "info", text: "Stopped." }
 				: { kind: "notice", level: "error", text: turnErrorText(error) };
 			running.message.parts.push(notice);
-			this._broadcast({ type: "partAdded", messageId: running.message.id, part: viewPart(notice) });
+			this._emit(runtime, { type: "partAdded", messageId: running.message.id, part: viewPart(notice) });
 		} finally {
 			this._flushDelta(running);
 			this._persistFinishedParts(running);
 			const snapshot = await begin;
 			if (tracker && snapshot) {
 				try {
-					await tracker.endTurn(running.sessionId, turn, snapshot);
+					await tracker.endTurn(runtime.meta.id, turn, snapshot, [...claimed]);
 				} catch (error) {
 					this._log("chat.changes.end_failed", { message: errorMessage(error) });
 				}
-				await this._refreshChanges(running.sessionId);
+				await this._refreshChanges(runtime.meta.id);
 			}
-			if (this._running === running) {
-				this._running = undefined;
+			if (runtime.running === running) {
+				runtime.running = undefined;
 			}
 			running.cts.dispose();
-			this._broadcast({ type: "run", run: { running: false } });
+			this._emit(runtime, { type: "run", run: { running: false } });
+			if (runtime.meta.id !== this._activeId) {
+				runtime.finished = true;
+			}
+			this._broadcastActivity();
+			// A finished request moves the subscription windows; providers report them without an event.
+			this._scheduleQuotaBroadcast();
 		}
 	}
 
@@ -544,7 +757,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			token,
 			system: await this._systemPrompt(),
 			hostContext: this._turnContext(),
-			onUpdate: run => this._broadcast({ type: "subagent", messageId: running.message.id, run }),
+			onUpdate: run => this._emit(running.runtime, { type: "subagent", messageId: running.message.id, run }),
 			onFinish: run => {
 				this._log("chat.subagent.finished", { model: model.id, status: run.status, steps: run.steps.length, durationMs: run.durationMs });
 				this._addPart(running, { kind: "subagent", ...run });
@@ -553,20 +766,20 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	}
 
 	/** The first user message names the chat; an edit may rename it. */
-	private async _refreshSessionMeta(sessionId: string): Promise<void> {
-		const updated = await this._deps.store.get(sessionId).catch(() => undefined);
-		if (!updated || this._session?.id !== sessionId) {
+	private async _refreshSessionMeta(runtime: SessionRuntime): Promise<void> {
+		const updated = await this._deps.store.get(runtime.meta.id).catch(() => undefined);
+		if (!updated) {
 			return;
 		}
-		this._session = updated;
-		this._broadcast({ type: "session", session: updated });
+		runtime.meta = updated;
+		this._emit(runtime, { type: "session", session: updated });
 	}
 
 	private _addPart(running: RunningTurn, part: ChatStructuredPart): void {
 		this._flushDelta(running);
 		running.message.parts.push(part);
 		this._persistFinishedParts(running);
-		this._broadcast({ type: "partAdded", messageId: running.message.id, part: viewPart(part) });
+		this._emit(running.runtime, { type: "partAdded", messageId: running.message.id, part: viewPart(part) });
 	}
 
 	private _turnContext(): string | undefined {
@@ -608,7 +821,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			return [];
 		}
 		const token = running.cts.token;
-		this._broadcast({ type: "run", run: { running: true, detail: COMPACTING_DETAIL } });
+		this._emit(running.runtime, { type: "run", run: { running: true, detail: COMPACTING_DETAIL } });
 		const startedAt = Date.now();
 		try {
 			const part = await compactChatHistory(history, { limits, summarize: compaction.summarize, token, plan });
@@ -635,7 +848,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			return [];
 		} finally {
 			if (!token.isCancellationRequested) {
-				this._broadcast({ type: "run", run: { running: true } });
+				this._emit(running.runtime, { type: "run", run: { running: true } });
 			}
 		}
 	}
@@ -663,7 +876,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			return;
 		}
 		running.buffer = undefined;
-		this._broadcast({ type: "textDelta", messageId: running.message.id, kind: buffer.kind, text: buffer.text });
+		this._emit(running.runtime, { type: "textDelta", messageId: running.message.id, kind: buffer.kind, text: buffer.text });
 	}
 
 	/** A trailing text part may still grow, so only everything up to the last structured part is final. */
@@ -695,23 +908,29 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
-	private async _appendMessage(messages: ChatMessage[], sessionId: string, message: ChatMessage): Promise<void> {
+	private async _appendMessage(runtime: SessionRuntime, message: ChatMessage): Promise<void> {
 		try {
-			await this._deps.store.appendMessage(sessionId, message);
+			await this._deps.store.appendMessage(runtime.meta.id, message);
 		} catch (error) {
 			this._log("chat.persist.message_failed", { message: errorMessage(error) });
 		}
-		messages.push(message);
-		if (this._session?.id === sessionId) {
-			this._broadcast({ type: "messageAdded", message: viewMessage(message) });
-		}
+		runtime.messages.push(message);
+		this._emit(runtime, { type: "messageAdded", message: viewMessage(message) });
 	}
 
 	private _stop(): void {
-		this._running?.cts.cancel();
+		const running = this._active()?.running;
+		if (!running) {
+			return;
+		}
+		if (running.timer) {
+			clearTimeout(running.timer);
+			running.timer = undefined;
+		}
+		running.cts.cancel();
 	}
 
-	/** Shows an approval card in every attached webview; Stop or a closed controller counts as a denial. */
+	/** Shows an approval card in the chat's webviews; Stop or a closed controller counts as a denial. */
 	private _requestApproval(
 		running: RunningTurn,
 		toolName: string,
@@ -723,6 +942,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			return Promise.resolve(false);
 		}
 		this._flushDelta(running);
+		const runtime = running.runtime;
 		const request: ChatApprovalRequest = {
 			id: randomUUID(),
 			messageId: running.message.id,
@@ -735,17 +955,29 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		return new Promise<boolean>(resolve => {
 			const subscriptions: vscode.Disposable[] = [];
 			const settle = (allowed: boolean): void => {
-				if (!this._approvals.delete(request.id)) {
+				if (!runtime.approvals.delete(request.id)) {
 					return;
 				}
 				subscriptions.forEach(subscription => subscription.dispose());
 				this._log("chat.tool.approval", { tool: toolName, allowed });
-				this._broadcast({ type: "approvalResolved", id: request.id, allowed });
+				this._emit(runtime, { type: "approvalResolved", id: request.id, allowed });
+				this._broadcastActivity();
 				resolve(allowed);
 			};
-			this._approvals.set(request.id, { request, settle });
+			runtime.approvals.set(request.id, { request, settle });
 			subscriptions.push(token.onCancellationRequested(() => settle(false)));
-			this._broadcast({ type: "approval", request });
+			this._emit(runtime, { type: "approval", request });
+			this._broadcastActivity();
+			if (runtime.meta.id !== this._activeId) {
+				const notice = this._deps.notify?.(`"${runtime.meta.title}" is waiting for your approval.`, "Open Chat");
+				if (notice) {
+					void notice.then(open => {
+						if (open) {
+							void this.openSession(runtime.meta.id);
+						}
+					}, () => undefined);
+				}
+			}
 		});
 	}
 
@@ -759,14 +991,14 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			return;
 		}
 		await this._ensureSession();
-		const session = this._session;
-		if (!session) {
+		const runtime = this._active();
+		if (!runtime) {
 			return;
 		}
 		try {
-			const updated = await this._deps.store.updateMeta(session.id, { modelId });
-			if (updated && this._session?.id === session.id) {
-				this._session = updated;
+			const updated = await this._deps.store.updateMeta(runtime.meta.id, { modelId });
+			if (updated) {
+				runtime.meta = updated;
 			}
 		} catch (error) {
 			this._log("chat.persist.model_failed", { message: errorMessage(error) });
@@ -776,8 +1008,69 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		this._broadcastModels();
 	}
 
+	/** The remembered level when the model still offers it; otherwise the provider's default applies. */
+	private _thinkingFor(modelId: string | undefined): string | undefined {
+		const model = modelId === undefined ? undefined : this._models.find(candidate => candidate.id === modelId);
+		const stored = model ? this._deps.state.get<Record<string, unknown>>(THINKING_KEY)?.[model.id] : undefined;
+		return typeof stored === "string" && thinkingOptions(model!)?.levels.some(level => level.value === stored) ? stored : undefined;
+	}
+
+	private async _selectThinking(value: string): Promise<void> {
+		await this._ensureModels();
+		const model = this._models.find(candidate => candidate.id === this._selectedModelId);
+		if (!model || !thinkingOptions(model)?.levels.some(level => level.value === value)) {
+			return;
+		}
+		const stored = this._deps.state.get<Record<string, unknown>>(THINKING_KEY);
+		await this._deps.state.update(THINKING_KEY, { ...(typeof stored === "object" && stored !== null ? stored : {}), [model.id]: value });
+		this._broadcastModels();
+	}
+
+	private _quota(): ChatProviderQuota[] {
+		try {
+			return this._deps.quota?.snapshot() ?? [];
+		} catch (error) {
+			this._log("chat.quota.snapshot_failed", { message: errorMessage(error) });
+			return [];
+		}
+	}
+
+	private _scheduleQuotaBroadcast(): void {
+		if (this._disposed || this._quotaTimer) {
+			return;
+		}
+		this._quotaTimer = setTimeout(() => {
+			this._quotaTimer = undefined;
+			this._broadcastQuota(false);
+		}, QUOTA_COALESCE_MS);
+	}
+
+	private _broadcastQuota(force: boolean): void {
+		const quota = this._quota();
+		const serialized = JSON.stringify(quota);
+		if (!force && serialized === this._lastQuota) {
+			return;
+		}
+		this._lastQuota = serialized;
+		this._broadcast({ type: "quota", quota });
+	}
+
+	/** Opening the quota popup asks the providers again, at most every QUOTA_REFRESH_INTERVAL_MS. */
+	private async _refreshQuota(): Promise<void> {
+		const source = this._deps.quota;
+		if (source?.refresh && Date.now() - this._quotaRefreshedAt >= QUOTA_REFRESH_INTERVAL_MS) {
+			this._quotaRefreshedAt = Date.now();
+			try {
+				await source.refresh();
+			} catch (error) {
+				this._log("chat.quota.refresh_failed", { message: errorMessage(error) });
+			}
+		}
+		this._broadcastQuota(true);
+	}
+
 	private _sendFullToolResult(webview: vscode.Webview, messageId: string, callId: string): void {
-		const message = this._messages.find(candidate => candidate.id === messageId);
+		const message = this._active()?.messages.find(candidate => candidate.id === messageId);
 		const part = message?.parts.find(candidate => candidate.kind === "toolResult" && candidate.callId === callId);
 		if (part?.kind === "toolResult") {
 			this._post(webview, { type: "toolResultFull", messageId, callId, text: part.text });
@@ -820,7 +1113,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	private _refreshSelection(): void {
 		const available = new Set(this._models.map(model => model.id));
 		const remembered = this._deps.state.get<string>(LAST_MODEL_KEY);
-		const candidates = [this._session?.modelId, remembered];
+		const candidates = [this._active()?.meta.modelId, remembered];
 		const selected = candidates.find((id): id is string => typeof id === "string" && available.has(id)) ?? defaultModelId(this._models);
 		this._selectedModelId = selected;
 	}
@@ -840,52 +1133,113 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 
 	private async _openActiveSession(): Promise<void> {
 		const stored = this._deps.state.get<string>(ACTIVE_SESSION_KEY);
-		let session: ChatSessionMeta | undefined;
+		let meta: ChatSessionMeta | undefined;
 		if (typeof stored === "string") {
 			try {
-				session = await this._deps.store.get(stored);
+				meta = await this._deps.store.get(stored);
 			} catch (error) {
 				this._log("chat.session.restore_failed", { message: errorMessage(error) });
 			}
 		}
-		await this._activateSession(session ?? await this._deps.store.create(this._selectedModelId));
+		await this._activate(await this._runtime(meta ?? await this._deps.store.create(this._selectedModelId)));
 	}
 
-	private async _activateSession(session: ChatSessionMeta): Promise<void> {
-		const messages = await this._deps.store.load(session.id);
-		this._changes = await this._loadChanges(session.id);
-		this._session = session;
-		this._messages = messages;
+	private async _runtime(meta: ChatSessionMeta): Promise<SessionRuntime> {
+		const existing = this._runtimes.get(meta.id);
+		if (existing) {
+			existing.meta = meta;
+			return existing;
+		}
+		const runtime: SessionRuntime = {
+			meta,
+			messages: await this._deps.store.load(meta.id),
+			changes: await this._loadChanges(meta.id),
+			running: undefined,
+			busy: false,
+			completion: Promise.resolve(),
+			approvals: new Map(),
+			finished: false,
+		};
+		this._runtimes.set(meta.id, runtime);
+		return runtime;
+	}
+
+	private async _activate(runtime: SessionRuntime): Promise<void> {
+		this._activeId = runtime.meta.id;
+		runtime.finished = false;
 		this._sessionLoaded = true;
 		this._sessionTask = undefined;
-		await this._deps.state.update(ACTIVE_SESSION_KEY, session.id);
+		await this._deps.state.update(ACTIVE_SESSION_KEY, runtime.meta.id);
 		this._refreshSelection();
 	}
 
 	private _initMessage(): HostMessage {
-		const session = this._session;
-		if (!session) {
+		const runtime = this._active();
+		if (!runtime) {
 			throw new Error("The chat session is not loaded.");
 		}
 		return {
 			type: "init",
-			session: { ...session },
-			messages: this._messages.map(viewMessage),
+			session: { ...runtime.meta },
+			messages: runtime.messages.map(viewMessage),
 			models: groupModels(this._models),
 			selectedModelId: this._selectedModelId,
 			run: this._runState(),
 			tools: this._toolGroups(),
-			approvals: [...this._approvals.values()].map(approval => approval.request),
-			changes: this._changes,
+			approvals: [...runtime.approvals.values()].map(approval => approval.request),
+			changes: runtime.changes,
+			selectedThinking: this._thinkingFor(this._selectedModelId),
+			quota: this._quota(),
+			activity: this._activity(),
 		};
 	}
 
 	private _broadcastModels(): void {
-		this._broadcast({ type: "models", models: groupModels(this._models), selectedModelId: this._selectedModelId });
+		this._broadcast({
+			type: "models",
+			models: groupModels(this._models),
+			selectedModelId: this._selectedModelId,
+			selectedThinking: this._thinkingFor(this._selectedModelId),
+		});
 	}
 
 	private _runState(): ChatRunState {
-		return { running: this._running !== undefined };
+		return { running: this._active()?.running !== undefined };
+	}
+
+	private _active(): SessionRuntime | undefined {
+		return this._activeId === undefined ? undefined : this._runtimes.get(this._activeId);
+	}
+
+	/** Session updates reach the webviews only while the update's chat is the shown one. */
+	private _emit(runtime: SessionRuntime, message: HostMessage): void {
+		if (runtime.meta.id === this._activeId) {
+			this._broadcast(message);
+		}
+	}
+
+	private _activity(): ChatSessionActivity[] {
+		const activity: ChatSessionActivity[] = [];
+		for (const runtime of this._runtimes.values()) {
+			if (runtime.meta.id === this._activeId) {
+				continue;
+			}
+			const state: ChatSessionActivityState | undefined = runtime.approvals.size > 0 ? "approval" : runtime.running ? "running" : runtime.finished ? "finished" : undefined;
+			if (state) {
+				activity.push({ id: runtime.meta.id, title: runtime.meta.title, state });
+			}
+		}
+		return activity;
+	}
+
+	private _broadcastActivity(): void {
+		const activity = this._activity();
+		const serialized = JSON.stringify(activity);
+		if (serialized === this._lastActivity) {
+			return;
+		}
+		this._lastActivity = serialized;
+		this._broadcast({ type: "activity", activity });
 	}
 
 	private _broadcast(message: HostMessage): void {
