@@ -8,6 +8,7 @@ import { ChatHistory } from "./chat-history";
 import { Composer } from "./composer";
 import { useComposerActions } from "./composer-actions";
 import { contextIndicator, formatCacheHit, modelCacheStats } from "./format";
+import { MemoryPanel } from "./memory-panel";
 import { MessageList } from "./message-list";
 import { QueuedMessages } from "./queued-messages";
 import { QuestionCard } from "./question-card";
@@ -38,6 +39,7 @@ export function App({ store }: { store: ChatStore }) {
 	const onApprove = useCallback((id: string, allow: boolean) => postMessage({ type: "approve", id, allow }), []);
 	const onAnswer = useCallback((id: string, answers?: ChatQuestionAnswer[]) => postMessage(answers ? { type: "answerQuestions", id, answers } : { type: "answerQuestions", id }), []);
 	const onListSessions = useCallback(() => postMessage({ type: "listSessions" }), []);
+	const onListMemory = useCallback(() => postMessage({ type: "listMemory" }), []);
 	const onOpenSession = useCallback((sessionId: string) => postMessage({ type: "openSession", sessionId }), []);
 	const onDeleteSession = useCallback((sessionId: string) => postMessage({ type: "deleteSession", sessionId }), []);
 	const onShowActivity = useCallback(() => setBadgeOpens(count => count + 1), []);
@@ -64,6 +66,7 @@ export function App({ store }: { store: ChatStore }) {
 					onDelete={onDeleteSession}
 					onNewChat={onNewChat}
 				/>
+				<MemoryPanel memory={store.memory} onList={onListMemory} />
 				<ActivityBadge activity={store.activity} onClick={onShowActivity} />
 			</header>
 			{store.messages.length === 0 ? (

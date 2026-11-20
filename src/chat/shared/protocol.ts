@@ -226,6 +226,42 @@ export interface ChatTodoItem {
 	status: "not-started" | "in-progress" | "completed";
 }
 
+/** Kinds the shared memory service accepts; keep in sync with SharedMemoryKind. */
+export const ChatMemoryKinds = ["preference", "decision", "environment", "workflow", "externalFact", "other"] as const;
+
+export type ChatMemoryKind = typeof ChatMemoryKinds[number];
+
+/** The service's title cap. */
+export const CHAT_MEMORY_TITLE_MAX_CHARS = 160;
+
+/** Transport cap; the service applies its own content limits. */
+export const CHAT_MEMORY_CONTENT_MAX_CHARS = 100_000;
+
+/** A shared memory entry as the chat panel shows it. */
+export interface ChatMemoryEntry {
+	id: string;
+	title: string;
+	content: string;
+	kind: string;
+	scope: "global" | "workspace";
+	pinned: boolean;
+	tags: string[];
+	/** Epoch milliseconds. */
+	updatedAt: number;
+	expiresAt?: number;
+	expired: boolean;
+}
+
+/** What the panel may change; the other entry fields stay as they are. */
+export interface ChatMemorySaveInput {
+	id?: string;
+	title: string;
+	content: string;
+	kind: string;
+	scope: "global" | "workspace";
+	pinned: boolean;
+}
+
 export interface ChatQuestionOption {
 	label: string;
 	description?: string;
@@ -282,6 +318,8 @@ export type HostMessage =
 	| { type: "changes"; changes: ChatChangeSet }
 	| { type: "models"; models: ChatModelGroup[]; selectedModelId?: string; selectedThinking?: string }
 	| { type: "quota"; quota: ChatProviderQuota[] }
+	/** The shared memory entries visible here; notice is the last save or delete error. */
+	| { type: "memory"; enabled: boolean; projectLabel?: string; entries: ChatMemoryEntry[]; notice?: string }
 	| { type: "session"; session: ChatSessionMeta }
 	/** Chats for the history list, newest first; empty chats other than the active one are left out. */
 	| { type: "sessions"; sessions: ChatSessionMeta[]; activeId: string }
@@ -351,7 +389,11 @@ export type WebviewMessage =
 	| { type: "openSession"; sessionId: string }
 	| { type: "deleteSession"; sessionId: string }
 	| { type: "loadToolResult"; messageId: string; callId: string }
-	| { type: "loadPartText"; messageId: string; index: number };
+	| { type: "loadPartText"; messageId: string; index: number }
+	/** Asks for the shared memory visible in this project, e.g. when the panel opens. */
+	| { type: "listMemory" }
+	| { type: "saveMemory"; entry: ChatMemorySaveInput }
+	| { type: "deleteMemory"; id: string };
 
 /** Tool results longer than this reach the webview as a preview; the full text is loaded on request. */
 export const WEBVIEW_TOOL_RESULT_PREVIEW_CHARS = 600;

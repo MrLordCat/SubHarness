@@ -74,6 +74,11 @@ saves, searches and deletes entries with the `llamacpp_*_memory` tools without
 asking. The settings `llamacpp.memoryEnabled` and `llamacpp.memoryAutoInject`
 turn this off.
 
+The book button in the chat header opens the memory panel: the entries of this
+project and the global ones, with search and a scope filter. Click an entry to
+read it, then **Edit**, **Pin**/**Unpin** or **Delete**; **New** adds an
+entry. Pinned entries reach the model with every new chat.
+
 The model runs tools without asking, with one exception: a terminal command
 that matches a rule in `llamacpp.chat.dangerousCommands` waits for your
 approval in the chat. The default rules cover force pushes, hard resets,

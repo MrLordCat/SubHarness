@@ -3,7 +3,7 @@ import * as vscode from "vscode";
 import { CocoTerminalManager } from "../coco/terminal-manager";
 import { CONFIG_SECTION } from "../constants";
 import { resolveProviderSwitchContextTokens } from "../context/provider-handoff";
-import { getCurrentWorkspaceScopeId } from "../memory/scope";
+import { getCurrentWorkspaceScopeId, getCurrentWorkspaceScopeLabel } from "../memory/scope";
 import type { SharedMemoryService } from "../memory/shared-memory-service";
 import { ChatAttachmentSource } from "./attachment-source";
 import { ChatChangeTracker } from "./changes/change-tracker";
@@ -12,6 +12,7 @@ import { ChatController, type ChatQuotaSource } from "./chat-controller";
 import { registerChatView } from "./chat-view";
 import { CHAT_COMPACTION_TARGET_TOKENS, createChatSummarizer } from "./compaction";
 import { createChatMemorySource } from "./memory-context";
+import { createChatMemoryStore } from "./memory-store";
 import { ChatPromptSource } from "./prompt/instructions";
 import { ChatSessionStore } from "./session-store";
 import { createChatToolSource } from "./tool-executor";
@@ -93,6 +94,13 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 	const memory = deps.memory
 		? createChatMemorySource(deps.memory, { enabled: memoryEnabled, workspaceId: getCurrentWorkspaceScopeId })
 		: undefined;
+	const memoryStore = deps.memory
+		? createChatMemoryStore(deps.memory, {
+			enabled: () => vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>("memoryEnabled", true) !== false,
+			workspaceId: getCurrentWorkspaceScopeId,
+			projectLabel: getCurrentWorkspaceScopeLabel,
+		})
+		: undefined;
 	const changes = new ChatChangeTracker({
 		storageDir: path.join(storage, "chat-changes"),
 		folders,
@@ -131,6 +139,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		prompt: new ChatPromptSource({ folders, memoryEnabled }),
 		attachments,
 		memory,
+		memoryStore,
 		abandonConversation: async id => { await deps.composite.abandonConversation?.(id); },
 		confirm: async (message, action) => (await vscode.window.showWarningMessage(message, { modal: true }, action)) === action,
 		notify: async (message, action) => {

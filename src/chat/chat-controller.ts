@@ -7,16 +7,25 @@ import type { ChatWebviewBridge } from "./chat-view";
 import { compactChatHistory, estimateTextTokens, planChatCompaction, previousModelId, type ChatCompactionLimits, type ChatSummarizer } from "./compaction";
 import { activeCompaction } from "./lm-messages";
 import { MEMORY_INDEX_ID, type ChatMemoryContext, type ChatMemorySource } from "./memory-context";
+import type { ChatMemoryStore } from "./memory-store";
 import type { ChatSessionStore } from "./session-store";
 import { runChatSubagent } from "./subagent-runner";
 import { ASK_QUESTIONS_TOOL_NAME, TODO_TOOL_NAME } from "./tools/interaction-tools";
 import { SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
 import { groupModels, thinkingOptions } from "./shared/model-groups";
-import { appendChatText, WEBVIEW_THINKING_PREVIEW_CHARS, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS } from "./shared/protocol";
+import {
+	appendChatText,
+	CHAT_MEMORY_CONTENT_MAX_CHARS,
+	CHAT_MEMORY_TITLE_MAX_CHARS,
+	WEBVIEW_THINKING_PREVIEW_CHARS,
+	WEBVIEW_TOOL_RESULT_PREVIEW_CHARS,
+} from "./shared/protocol";
 import type {
 	ChatApprovalRequest,
 	ChatAttachment,
 	ChatChangeSet,
+	ChatMemoryEntry,
+	ChatMemorySaveInput,
 	ChatMessage,
 	ChatPart,
 	ChatProviderQuota,
@@ -66,6 +75,8 @@ export interface ChatControllerDeps {
 	attachments?: ChatAttachmentsDeps;
 	/** Shared durable memory shown to the model in <memory> blocks before user requests. */
 	memory?: ChatMemorySource;
+	/** The shared memory list the panel reads and edits. */
+	memoryStore?: ChatMemoryStore;
 }
 
 export interface ChatAttachmentsDeps {
@@ -101,6 +112,8 @@ const DELTA_FLUSH_MS = 50;
 /** Codex re-announces its status every 200 ms while it streams. */
 const QUOTA_COALESCE_MS = 2_000;
 const QUOTA_REFRESH_INTERVAL_MS = 30_000;
+const MEMORY_COALESCE_MS = 150;
+const MEMORY_ID_MAX_CHARS = 80;
 const NO_MODEL_NOTICE = "No model is available. Configure a provider first.";
 const INTERRUPTED_NOTICE = "This answer was interrupted: VS Code closed or reloaded while it was running.";
 const COMPACTING_DETAIL = "Compacting context…";
@@ -275,6 +288,29 @@ function sanitizeAnswers(questions: readonly ChatQuestion[], answers: readonly C
 	return result;
 }
 
+/** The entry a memory save may change, or undefined when the shape is malformed. */
+function asMemorySaveInput(value: unknown): ChatMemorySaveInput | undefined {
+	if (!isRecord(value)
+		|| typeof value.title !== "string" || value.title.length > CHAT_MEMORY_TITLE_MAX_CHARS
+		|| typeof value.content !== "string" || value.content.length > CHAT_MEMORY_CONTENT_MAX_CHARS
+		|| typeof value.kind !== "string"
+		|| (value.scope !== "global" && value.scope !== "workspace")
+		|| typeof value.pinned !== "boolean") {
+		return undefined;
+	}
+	if (value.id !== undefined && (typeof value.id !== "string" || value.id.length > MEMORY_ID_MAX_CHARS)) {
+		return undefined;
+	}
+	return {
+		...(value.id === undefined ? {} : { id: value.id }),
+		title: value.title,
+		content: value.content,
+		kind: value.kind,
+		scope: value.scope,
+		pinned: value.pinned,
+	};
+}
+
 function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 	if (!isRecord(value) || typeof value.type !== "string") {
 		return undefined;
@@ -358,6 +394,15 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			return typeof value.messageId === "string" && typeof value.index === "number" && Number.isInteger(value.index) && value.index >= 0
 				? { type: "loadPartText", messageId: value.messageId, index: value.index }
 				: undefined;
+		case "listMemory": return { type: "listMemory" };
+		case "saveMemory": {
+			const entry = asMemorySaveInput(value.entry);
+			return entry ? { type: "saveMemory", entry } : undefined;
+		}
+		case "deleteMemory":
+			return typeof value.id === "string" && value.id.length > 0 && value.id.length <= MEMORY_ID_MAX_CHARS
+				? { type: "deleteMemory", id: value.id }
+				: undefined;
 		default: return undefined;
 	}
 }
@@ -432,6 +477,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	private readonly _quotaSubscription: vscode.Disposable | undefined;
 	private _quotaTimer: ReturnType<typeof setTimeout> | undefined;
 	private _quotaRefreshedAt = 0;
+	private readonly _memorySubscription: vscode.Disposable | undefined;
+	private _memoryTimer: ReturnType<typeof setTimeout> | undefined;
 	private _lastQuota: string | undefined;
 	private _lastActivity: string | undefined;
 
@@ -439,6 +486,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		this._deps = deps;
 		this._modelChangeSubscription = deps.onDidChangeModels(() => { void this._onModelsChanged(); });
 		this._quotaSubscription = deps.quota?.onDidChange?.(() => this._scheduleQuotaBroadcast());
+		this._memorySubscription = deps.memoryStore?.onDidChange?.(() => this._scheduleMemoryBroadcast());
 	}
 
 	attach(webview: vscode.Webview): vscode.Disposable {
@@ -638,6 +686,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			clearTimeout(this._quotaTimer);
 			this._quotaTimer = undefined;
 		}
+		this._memorySubscription?.dispose();
+		if (this._memoryTimer) {
+			clearTimeout(this._memoryTimer);
+			this._memoryTimer = undefined;
+		}
 		for (const attachment of [...this._attachments.values()]) {
 			attachment.dispose();
 		}
@@ -709,6 +762,15 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				return;
 			case "refreshQuota":
 				await this._refreshQuota();
+				return;
+			case "listMemory":
+				this._post(webview, this._memoryMessage());
+				return;
+			case "saveMemory":
+				await this._saveMemory(message.entry);
+				return;
+			case "deleteMemory":
+				await this._deleteMemory(message.id);
 				return;
 			case "setToolsEnabled":
 				await this._deps.tools.setEnabled?.(message.names, message.enabled);
@@ -1587,6 +1649,78 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			}
 		}
 		this._broadcastQuota(true);
+	}
+
+	private async _saveMemory(entry: ChatMemorySaveInput): Promise<void> {
+		const store = this._deps.memoryStore;
+		if (!store) {
+			this._broadcast(this._memoryMessage("Shared memory is not available."));
+			return;
+		}
+		try {
+			await store.save(entry);
+		} catch (error) {
+			this._log("chat.memory.save_failed", { message: errorMessage(error) });
+			this._broadcast(this._memoryMessage(errorMessage(error)));
+			return;
+		}
+		this._broadcastMemory();
+	}
+
+	private async _deleteMemory(id: string): Promise<void> {
+		const store = this._deps.memoryStore;
+		if (!store) {
+			this._broadcast(this._memoryMessage("Shared memory is not available."));
+			return;
+		}
+		let removed: boolean;
+		try {
+			removed = await store.remove(id);
+		} catch (error) {
+			this._log("chat.memory.delete_failed", { message: errorMessage(error) });
+			this._broadcast(this._memoryMessage(errorMessage(error)));
+			return;
+		}
+		if (!removed) {
+			this._broadcast(this._memoryMessage("This entry is not visible in this project."));
+			return;
+		}
+		this._broadcastMemory();
+	}
+
+	private _scheduleMemoryBroadcast(): void {
+		if (this._disposed || this._memoryTimer) {
+			return;
+		}
+		this._memoryTimer = setTimeout(() => {
+			this._memoryTimer = undefined;
+			this._broadcastMemory();
+		}, MEMORY_COALESCE_MS);
+	}
+
+	private _broadcastMemory(): void {
+		this._broadcast(this._memoryMessage());
+	}
+
+	private _memoryMessage(notice?: string): HostMessage {
+		const store = this._deps.memoryStore;
+		let entries: ChatMemoryEntry[] = [];
+		let failure = notice;
+		if (store) {
+			try {
+				entries = store.list();
+			} catch (error) {
+				failure = errorMessage(error);
+			}
+		}
+		const projectLabel = store?.projectLabel();
+		return {
+			type: "memory",
+			enabled: store?.enabled() ?? false,
+			...(projectLabel === undefined ? {} : { projectLabel }),
+			entries,
+			...(failure === undefined ? {} : { notice: failure }),
+		};
 	}
 
 	private _sendFullToolResult(webview: vscode.Webview, messageId: string, callId: string): void {

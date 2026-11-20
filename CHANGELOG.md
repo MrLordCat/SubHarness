@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.21.30 (development patch) - 2026-11-20
+
+- Added: a memory panel in the bridge chat header. It lists this project's and
+  the global memory entries with search and a scope filter, and lets you read,
+  edit, pin, delete and add entries.
+
 ## 1.21.29 (development patch) - 2026-11-20
 
 - Added: the bridge chat gives every provider the shared memory, not only the

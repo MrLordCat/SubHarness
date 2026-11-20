@@ -3,6 +3,7 @@ import {
 	type ChatApprovalRequest,
 	type ChatAttachment,
 	type ChatChangeSet,
+	type ChatMemoryEntry,
 	type ChatMessage,
 	type ChatModelGroup,
 	type ChatProviderQuota,
@@ -25,6 +26,7 @@ const HOST_MESSAGE_TYPES = new Set([
 	"changes",
 	"models",
 	"quota",
+	"memory",
 	"session",
 	"sessions",
 	"showSessions",
@@ -109,6 +111,12 @@ export class ChatStore {
 	/** Chosen reasoning level of the selected model; absent means the model's default. */
 	selectedThinking: string | undefined;
 	quota: ChatProviderQuota[] = [];
+	/** Shared memory as the panel last saw it; loaded stays false until the host answers. */
+	memory: { loaded: boolean; enabled: boolean; projectLabel?: string; entries: ChatMemoryEntry[]; notice?: string } = {
+		loaded: false,
+		enabled: false,
+		entries: [],
+	};
 	activity: ChatSessionActivity[] = [];
 	/** Messages sent while the agent works; they go out after the current tool round. */
 	queued: ChatQueuedMessage[] = [];
@@ -304,6 +312,15 @@ export class ChatStore {
 				return;
 			case "quota":
 				this.quota = update.quota;
+				return;
+			case "memory":
+				this.memory = {
+					loaded: true,
+					enabled: update.enabled,
+					...(update.projectLabel === undefined ? {} : { projectLabel: update.projectLabel }),
+					entries: update.entries,
+					...(update.notice === undefined ? {} : { notice: update.notice }),
+				};
 				return;
 			case "activity":
 				this.activity = update.activity;

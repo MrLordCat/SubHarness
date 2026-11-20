@@ -9,9 +9,25 @@ import { ChatController, type ChatAttachmentsDeps, type ChatControllerDeps, type
 import type { ChatCompactionPlan } from "../chat/compaction";
 import { compactionSummaryText } from "../chat/lm-messages";
 import type { ChatMemoryContext, ChatMemorySource } from "../chat/memory-context";
+import type { ChatMemoryStore } from "../chat/memory-store";
 import { ChatSessionStore } from "../chat/session-store";
 import { groupModels } from "../chat/shared/model-groups";
-import { applyHostUpdate, WEBVIEW_THINKING_PREVIEW_CHARS, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatAttachment, type ChatChangeSet, type ChatMessage, type ChatProviderQuota, type ChatToolGroup, type ChatToolImage, type HostMessage } from "../chat/shared/protocol";
+import {
+	applyHostUpdate,
+	CHAT_MEMORY_CONTENT_MAX_CHARS,
+	CHAT_MEMORY_TITLE_MAX_CHARS,
+	WEBVIEW_THINKING_PREVIEW_CHARS,
+	WEBVIEW_TOOL_RESULT_PREVIEW_CHARS,
+	type ChatAttachment,
+	type ChatChangeSet,
+	type ChatMemoryEntry,
+	type ChatMemorySaveInput,
+	type ChatMessage,
+	type ChatProviderQuota,
+	type ChatToolGroup,
+	type ChatToolImage,
+	type HostMessage,
+} from "../chat/shared/protocol";
 import { createChatToolSource, DENIED_TOOL_RESULT, type ChatToolSource } from "../chat/tool-executor";
 import { ASK_QUESTIONS_TOOL_NAME, createAskQuestionsTool, createTodoTool, TODO_TOOL_NAME } from "../chat/tools/interaction-tools";
 import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
@@ -186,6 +202,67 @@ class FakeMemory implements ChatMemorySource {
 	async context(query: string, known: ReadonlyMap<string, string>): Promise<ChatMemoryContext | undefined> {
 		this.calls.push({ query, known: new Map(known) });
 		return this.current;
+	}
+}
+
+class FakeMemoryStore implements ChatMemoryStore {
+	enabledValue = true;
+	projectLabelValue: string | undefined = "Project A";
+	entries: ChatMemoryEntry[] = [];
+	readonly saved: ChatMemorySaveInput[] = [];
+	readonly removed: string[] = [];
+	fail: string | undefined;
+	removeResult = true;
+	private readonly emitter = new vscode.EventEmitter<void>();
+	readonly onDidChange = this.emitter.event;
+
+	enabled(): boolean {
+		return this.enabledValue;
+	}
+
+	projectLabel(): string | undefined {
+		return this.projectLabelValue;
+	}
+
+	list(): ChatMemoryEntry[] {
+		return this.entries;
+	}
+
+	async save(input: ChatMemorySaveInput): Promise<ChatMemoryEntry> {
+		if (this.fail) {
+			throw new Error(this.fail);
+		}
+		this.saved.push(input);
+		const entry: ChatMemoryEntry = {
+			id: input.id ?? `mem-${this.saved.length}`,
+			title: input.title,
+			content: input.content,
+			kind: input.kind,
+			scope: input.scope,
+			pinned: input.pinned,
+			tags: [],
+			updatedAt: Date.now(),
+			expired: false,
+		};
+		this.entries = [...this.entries.filter(candidate => candidate.id !== entry.id), entry];
+		return entry;
+	}
+
+	async remove(id: string): Promise<boolean> {
+		this.removed.push(id);
+		if (!this.removeResult) {
+			return false;
+		}
+		this.entries = this.entries.filter(entry => entry.id !== id);
+		return true;
+	}
+
+	fire(): void {
+		this.emitter.fire();
+	}
+
+	dispose(): void {
+		this.emitter.dispose();
 	}
 }
 
@@ -380,7 +457,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "confirm" | "notify" | "attachments" | "memory">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "confirm" | "notify" | "attachments" | "memory" | "memoryStore">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -1593,6 +1670,127 @@ suite("chat controller", () => {
 		second.dispose();
 	});
 
+	test("listMemory posts the visible entries to the requesting webview", async () => {
+		const memoryStore = new FakeMemoryStore();
+		memoryStore.entries = [{
+			id: "m1",
+			title: "Keep CRLF",
+			content: "Source files use CRLF.",
+			kind: "preference",
+			scope: "global",
+			pinned: true,
+			tags: ["style"],
+			updatedAt: 1_700_000_000_000,
+			expired: false,
+		}];
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, { memoryStore });
+		harness = current;
+		const second = new FakeWebview();
+		current.controller.attach(second.asWebview());
+
+		current.webview.receive({ type: "listMemory" });
+		await waitFor(() => current.webview.ofType("memory").length === 1, "memory message");
+		const message = current.webview.ofType("memory")[0];
+		assert.strictEqual(message.enabled, true);
+		assert.strictEqual(message.projectLabel, "Project A");
+		assert.deepStrictEqual(message.entries, memoryStore.entries);
+		assert.strictEqual(message.notice, undefined);
+		assert.deepStrictEqual(second.ofType("memory"), []);
+		second.dispose();
+	});
+
+	test("listMemory without a store reports memory as disabled", async () => {
+		const current = createHarness(root, new FakeBackend());
+		harness = current;
+		current.webview.receive({ type: "listMemory" });
+		await waitFor(() => current.webview.ofType("memory").length === 1, "memory message");
+		const message = current.webview.ofType("memory")[0];
+		assert.strictEqual(message.enabled, false);
+		assert.strictEqual(message.projectLabel, undefined);
+		assert.deepStrictEqual(message.entries, []);
+	});
+
+	test("saveMemory saves and broadcasts the refreshed list", async () => {
+		const memoryStore = new FakeMemoryStore();
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, { memoryStore });
+		harness = current;
+
+		current.webview.receive({
+			type: "saveMemory",
+			entry: { title: "Build", content: "npm run compile", kind: "workflow", scope: "workspace", pinned: true },
+		});
+		await waitFor(() => current.webview.ofType("memory").length === 1, "memory broadcast");
+		assert.deepStrictEqual(memoryStore.saved, [
+			{ title: "Build", content: "npm run compile", kind: "workflow", scope: "workspace", pinned: true },
+		]);
+		assert.deepStrictEqual(current.webview.ofType("memory")[0].entries.map(entry => entry.title), ["Build"]);
+		assert.strictEqual(current.webview.ofType("memory")[0].notice, undefined);
+	});
+
+	test("a failing save broadcasts the notice", async () => {
+		const memoryStore = new FakeMemoryStore();
+		memoryStore.fail = "Memory content is too long (5000 chars, limit 4096).";
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, { memoryStore });
+		harness = current;
+
+		current.webview.receive({
+			type: "saveMemory",
+			entry: { title: "Long", content: "x".repeat(5_000), kind: "other", scope: "global", pinned: false },
+		});
+		await waitFor(() => current.webview.ofType("memory").length === 1, "notice broadcast");
+		assert.strictEqual(current.webview.ofType("memory")[0].notice, memoryStore.fail);
+		assert.deepStrictEqual(memoryStore.saved, []);
+	});
+
+	test("deleteMemory removes an entry and broadcasts the result", async () => {
+		const memoryStore = new FakeMemoryStore();
+		memoryStore.entries = [{
+			id: "m1",
+			title: "Remove me",
+			content: "Gone.",
+			kind: "other",
+			scope: "global",
+			pinned: false,
+			tags: [],
+			updatedAt: 1,
+			expired: false,
+		}];
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, { memoryStore });
+		harness = current;
+
+		current.webview.receive({ type: "deleteMemory", id: "m1" });
+		await waitFor(() => current.webview.ofType("memory").length === 1, "memory broadcast");
+		assert.deepStrictEqual(memoryStore.removed, ["m1"]);
+		assert.deepStrictEqual(current.webview.ofType("memory")[0].entries, []);
+	});
+
+	test("a hidden delete reports the entry as not visible", async () => {
+		const memoryStore = new FakeMemoryStore();
+		memoryStore.removeResult = false;
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, { memoryStore });
+		harness = current;
+
+		current.webview.receive({ type: "deleteMemory", id: "other-project" });
+		await waitFor(() => current.webview.ofType("memory").length === 1, "memory notice");
+		assert.strictEqual(current.webview.ofType("memory")[0].notice, "This entry is not visible in this project.");
+	});
+
+	test("a store change broadcasts once after coalescing", async () => {
+		const memoryStore = new FakeMemoryStore();
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, { memoryStore });
+		harness = current;
+
+		memoryStore.fire();
+		memoryStore.fire();
+		memoryStore.fire();
+		await waitFor(() => current.webview.ofType("memory").length === 1, "coalesced memory broadcast");
+		await new Promise<void>(resolve => setTimeout(resolve, 200));
+		assert.strictEqual(current.webview.ofType("memory").length, 1);
+
+		memoryStore.fire();
+		await waitFor(() => current.webview.ofType("memory").length === 2, "next memory broadcast");
+	});
+
 	test("answers with an error notice instead of starting a turn when no model is available", async () => {
 		const current = createHarness(root, new FakeBackend([], []));
 		harness = current;
@@ -1631,6 +1829,17 @@ suite("chat controller", () => {
 			{ type: "answerQuestions", id: "q1", answers: [{ header: "A" }] },
 			{ type: "answerQuestions", id: "q1", answers: [{ header: "A", selected: ["x"], freeform: 7 }] },
 			{ type: "answerQuestions", id: "q1", answers: Array.from({ length: 6 }, () => ({ header: "A", selected: [] })) },
+			{ type: "saveMemory" },
+			{ type: "saveMemory", entry: [] },
+			{ type: "saveMemory", entry: { title: "T", content: "C", kind: "other", scope: "device", pinned: false } },
+			{ type: "saveMemory", entry: { title: "T", content: "C", kind: "other", scope: "global", pinned: "yes" } },
+			{ type: "saveMemory", entry: { title: "T", content: "C", kind: 7, scope: "global", pinned: false } },
+			{ type: "saveMemory", entry: { title: "x".repeat(CHAT_MEMORY_TITLE_MAX_CHARS + 1), content: "C", kind: "other", scope: "global", pinned: false } },
+			{ type: "saveMemory", entry: { title: "T", content: "x".repeat(CHAT_MEMORY_CONTENT_MAX_CHARS + 1), kind: "other", scope: "global", pinned: false } },
+			{ type: "saveMemory", entry: { id: 7, title: "T", content: "C", kind: "other", scope: "global", pinned: false } },
+			{ type: "deleteMemory" },
+			{ type: "deleteMemory", id: 7 },
+			{ type: "deleteMemory", id: "" },
 		];
 		for (const message of malformed) {
 			current.webview.receive(message);
