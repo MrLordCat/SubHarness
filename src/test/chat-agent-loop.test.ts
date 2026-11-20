@@ -3,8 +3,9 @@ import * as vscode from "vscode";
 import { MAX_TOOL_RESULT_CHARS, runAgentTurn, type AgentTurnSink, type ChatToolExecutor } from "../chat/agent-loop";
 import { toLanguageModelMessages } from "../chat/lm-messages";
 import { groupModels } from "../chat/shared/model-groups";
-import type { ChatMessage, ChatPart, ChatStructuredPart, ChatUsage, ChatUsageTotals } from "../chat/shared/protocol";
-import { limitSignalPart } from "../providers/limit-signal";
+import type { ChatMessage, ChatPart, ChatPromptCache, ChatStructuredPart, ChatUsage, ChatUsageTotals } from "../chat/shared/protocol";
+import { limitSignalPart, LIMIT_SIGNAL_OPTION } from "../providers/limit-signal";
+import { promptCacheSignalPart, PROMPT_CACHE_OPTION } from "../providers/prompt-cache-signal";
 
 const none: vscode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) };
 const model: vscode.LanguageModelChatInformation = {
@@ -55,13 +56,14 @@ function fakeBackend(rounds: Round[]): { requests: Request[]; provider: Pick<vsc
 	};
 }
 
-function recorder(): { sink: AgentTurnSink; events: string[]; parts: ChatStructuredPart[]; usage: ChatUsage[]; totals: ChatUsageTotals[] } {
-	const events: string[] = [], parts: ChatStructuredPart[] = [], usage: ChatUsage[] = [], totals: ChatUsageTotals[] = [];
+function recorder(): { sink: AgentTurnSink; events: string[]; parts: ChatStructuredPart[]; usage: ChatUsage[]; totals: ChatUsageTotals[]; promptCache: ChatPromptCache[] } {
+	const events: string[] = [], parts: ChatStructuredPart[] = [], usage: ChatUsage[] = [], totals: ChatUsageTotals[] = [], promptCache: ChatPromptCache[] = [];
 	return {
 		events,
 		parts,
 		usage,
 		totals,
+		promptCache,
 		sink: {
 			text: (kind, text) => events.push(`text:${kind}:${text}`),
 			part: part => {
@@ -72,6 +74,11 @@ function recorder(): { sink: AgentTurnSink; events: string[]; parts: ChatStructu
 				usage.push(value);
 				totals.push(total);
 				events.push("usage");
+			},
+			promptCache: (value, total) => {
+				promptCache.push(value);
+				totals.push(total);
+				events.push("promptCache");
 			},
 		},
 	};
@@ -374,10 +381,43 @@ suite("chat agent loop", () => {
 			{ promptTokens: 1200, completionTokens: 60, totalTokens: 1260, cachedTokens: 1100 },
 		]);
 		assert.deepStrictEqual(totals, [
-			{ requests: 1, promptTokens: 100, cachedTokens: 0, completionTokens: 5, cacheReported: 0 },
-			{ requests: 1, promptTokens: 1000, cachedTokens: 800, completionTokens: 50, cacheReported: 1 },
-			{ requests: 2, promptTokens: 2200, cachedTokens: 1900, completionTokens: 110, cacheReported: 2 },
+			{ requests: 1, promptTokens: 100, cachedTokens: 0, completionTokens: 5, cacheReported: 0, cachedPromptTokens: 0 },
+			{ requests: 1, promptTokens: 1000, cachedTokens: 800, completionTokens: 50, cacheReported: 1, cachedPromptTokens: 1000 },
+			{ requests: 2, promptTokens: 2200, cachedTokens: 1900, completionTokens: 110, cacheReported: 2, cachedPromptTokens: 2200 },
 		]);
+	});
+
+	test("keeps context usage apart and adds a prompt-cache part to the totals", async () => {
+		const fake = fakeBackend([progress => {
+			progress.report(usagePart({ prompt_tokens: 1000, total_tokens: 1000 }));
+			progress.report(promptCacheSignalPart({
+				promptTokens: 900, cachedTokens: 700, cacheWriteTokens: 100, completionTokens: 50, requests: 1,
+			}));
+			progress.report(new vscode.LanguageModelTextPart("Done."));
+		}]);
+		const { sink, usage, totals, promptCache } = recorder();
+		const result = await runAgentTurn({
+			backend: fake.provider,
+			model,
+			history: [chatMessage("user", [{ kind: "text", text: "Go" }])],
+			conversationId: "chat-prompt-cache",
+			turn: 1,
+			tools: tools(async () => ({ text: "", isError: false })),
+			sink,
+			token: none,
+		});
+		assert.deepStrictEqual(result, { rounds: 1, stopReason: "done" });
+		assert.deepStrictEqual(usage, [{ promptTokens: 1000, totalTokens: 1000 }]);
+		assert.deepStrictEqual(promptCache, [
+			{ promptTokens: 900, cachedTokens: 700, cacheWriteTokens: 100, completionTokens: 50, requests: 1 },
+		]);
+		assert.deepStrictEqual(totals, [
+			{ requests: 1, promptTokens: 1000, cachedTokens: 0, completionTokens: 0, cacheReported: 0, cachedPromptTokens: 0 },
+			{ requests: 2, promptTokens: 1900, cachedTokens: 700, completionTokens: 50, cacheReported: 1, cachedPromptTokens: 900 },
+		]);
+		const options = fake.requests[0].options.modelOptions!;
+		assert.strictEqual(options[PROMPT_CACHE_OPTION], true);
+		assert.strictEqual(options[LIMIT_SIGNAL_OPTION], true);
 	});
 
 	test("turns a limit signal into one notice and swallows the repeated text", async () => {

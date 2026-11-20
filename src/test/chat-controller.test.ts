@@ -33,6 +33,7 @@ import { ASK_QUESTIONS_TOOL_NAME, createAskQuestionsTool, createTodoTool, TODO_T
 import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
 import { createToolAccessTools, LIST_TOOLS_TOOL_NAME, REQUEST_TOOLS_TOOL_NAME } from "../chat/tools/tool-access-tools";
 import type { ChatTool } from "../chat/tools/types";
+import { promptCacheSignalPart } from "../providers/prompt-cache-signal";
 
 function withThinking(
 	model: vscode.LanguageModelChatInformation,
@@ -639,7 +640,7 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(current.webview.ofType("usage").map(message => message.usage), [
 			{ promptTokens: 10, completionTokens: 5, totalTokens: 15 },
 		]);
-		const totals = { requests: 1, promptTokens: 10, cachedTokens: 0, completionTokens: 5, cacheReported: 0 };
+		const totals = { requests: 1, promptTokens: 10, cachedTokens: 0, completionTokens: 5, cacheReported: 0, cachedPromptTokens: 0 };
 		assert.deepStrictEqual(current.webview.ofType("usage").map(message => message.totals), [totals]);
 		assert.deepStrictEqual(current.webview.ofType("run").map(message => message.run.running), [true, false]);
 
@@ -656,6 +657,49 @@ suite("chat controller", () => {
 			applyHostUpdate(replayed, message);
 		}
 		assert.deepStrictEqual(replayed, persisted);
+	});
+
+	test("keeps context usage apart and persists the prompt-cache counters", async () => {
+		const backend = new FakeBackend([progress => {
+			progress.report(new vscode.LanguageModelDataPart(new TextEncoder().encode(JSON.stringify({
+				prompt_tokens: 1000,
+				total_tokens: 1000,
+			})), "usage"));
+			progress.report(promptCacheSignalPart({ promptTokens: 900, cachedTokens: 700, cacheWriteTokens: 100, completionTokens: 50, requests: 1 }));
+			progress.report(new vscode.LanguageModelTextPart("Done."));
+		}]);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Cache check" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+
+		const updates = current.webview.ofType("usage");
+		assert.deepStrictEqual(updates.map(update => update.usage), [
+			{ promptTokens: 1000, totalTokens: 1000 },
+			{ promptTokens: 1000, totalTokens: 1000 },
+		]);
+		const promptCache = { promptTokens: 900, cachedTokens: 700, cacheWriteTokens: 100, completionTokens: 50, requests: 1 };
+		const totals = { requests: 2, promptTokens: 1900, cachedTokens: 700, completionTokens: 50, cacheReported: 1, cachedPromptTokens: 900 };
+		assert.deepStrictEqual(updates.at(-1)?.promptCache, promptCache);
+		assert.deepStrictEqual(updates.at(-1)?.totals, totals);
+		assert.deepStrictEqual(updates.at(-1)?.usage, { promptTokens: 1000, totalTokens: 1000 });
+		const replayed: ChatMessage[] = [];
+		for (const message of current.webview.messages) {
+			applyHostUpdate(replayed, message);
+		}
+		const assistant = replayed.find(message => message.role === "assistant");
+		assert.deepStrictEqual(assistant?.usage, { promptTokens: 1000, totalTokens: 1000 });
+		assert.deepStrictEqual(assistant?.usageTotals, totals);
+		assert.deepStrictEqual(assistant?.promptCache, promptCache);
+
+		await current.store.flush();
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		if (!sessionId) {
+			throw new Error("no active session");
+		}
+		const persisted = (await new ChatSessionStore(root).load(sessionId)).find(message => message.role === "assistant");
+		assert.deepStrictEqual(persisted?.usageTotals, totals);
+		assert.deepStrictEqual(persisted?.promptCache, promptCache);
 	});
 
 	test("stops a running turn with an info notice", async () => {

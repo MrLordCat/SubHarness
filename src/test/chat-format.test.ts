@@ -1,6 +1,7 @@
 import * as assert from "node:assert";
 import type { ChatMessage, ChatProviderQuota, ChatUsageTotals } from "../chat/shared/protocol";
-import { describeToolCall, exhaustedWindow, formatAge, formatCacheHit, formatQuotaExhausted, formatQuotaSummary, formatReset, modelCacheStats, parseUriList, sessionGroup } from "../chat/webview/format";
+import { describeToolCall, exhaustedWindow, formatAge, formatCacheHit, formatQuotaExhausted, formatQuotaSummary, formatReset, modelCacheStats, parseUriList, selectedModelProvider, sessionGroup } from "../chat/webview/format";
+import { groupModels } from "../chat/shared/model-groups";
 
 function time(date: Date): string {
 	return date.toLocaleString([], { hour: "2-digit", minute: "2-digit" });
@@ -78,7 +79,7 @@ suite("Chat webview quota formatting", () => {
 suite("Chat webview cache stats", () => {
 	let seq = 0;
 
-	function message(role: ChatMessage["role"], modelId?: string, usage?: ChatMessage["usage"], totals?: ChatUsageTotals): ChatMessage {
+	function message(role: ChatMessage["role"], modelId?: string, usage?: ChatMessage["usage"], totals?: ChatUsageTotals, promptCache?: ChatMessage["promptCache"]): ChatMessage {
 		seq += 1;
 		return {
 			id: `m${seq}`,
@@ -89,11 +90,12 @@ suite("Chat webview cache stats", () => {
 			...(modelId !== undefined ? { modelId } : {}),
 			...(usage ? { usage } : {}),
 			...(totals ? { usageTotals: totals } : {}),
+			...(promptCache ? { promptCache } : {}),
 		};
 	}
 
-	function totals(requests: number, promptTokens: number, cachedTokens: number, cacheReported: number): ChatUsageTotals {
-		return { requests, promptTokens, cachedTokens, completionTokens: 0, cacheReported };
+	function totals(requests: number, promptTokens: number, cachedTokens: number, cacheReported: number, cachedPromptTokens?: number): ChatUsageTotals {
+		return { requests, promptTokens, cachedTokens, completionTokens: 0, cacheReported, ...(cachedPromptTokens !== undefined ? { cachedPromptTokens } : {}) };
 	}
 
 	test("counts the newest streak of the model, skipping user messages and stopping at another model", () => {
@@ -110,6 +112,7 @@ suite("Chat webview cache stats", () => {
 			promptTokens: 2000,
 			cachedTokens: 1700,
 			cacheReported: 2,
+			cachedPromptTokens: 2000,
 			lastHitPercent: 92,
 		});
 	});
@@ -125,6 +128,7 @@ suite("Chat webview cache stats", () => {
 			promptTokens: 100,
 			cachedTokens: 80,
 			cacheReported: 1,
+			cachedPromptTokens: 100,
 			lastHitPercent: 80,
 		});
 	});
@@ -139,6 +143,7 @@ suite("Chat webview cache stats", () => {
 			promptTokens: 1000,
 			cachedTokens: 850,
 			cacheReported: 1,
+			cachedPromptTokens: 1000,
 			lastHitPercent: 85,
 		});
 	});
@@ -158,6 +163,7 @@ suite("Chat webview cache stats", () => {
 			promptTokens: 1_400_000,
 			cachedTokens: 1_218_000,
 			cacheReported: 34,
+			cachedPromptTokens: 1_400_000,
 			lastHitPercent: 92,
 		});
 		assert.strictEqual(label.text, "cache 87%");
@@ -175,6 +181,7 @@ suite("Chat webview cache stats", () => {
 			promptTokens: 1000,
 			cachedTokens: 0,
 			cacheReported: 0,
+			cachedPromptTokens: 0,
 		});
 		assert.strictEqual(label.text, "cache n/a");
 		assert.strictEqual(label.title, "The provider does not report cached tokens for this model.");
@@ -188,6 +195,7 @@ suite("Chat webview cache stats", () => {
 			promptTokens: 1000,
 			cachedTokens: 250,
 			cacheReported: 3,
+			cachedPromptTokens: 1000,
 		});
 		assert.strictEqual(label.text, "cache 25%");
 		assert.strictEqual(label.level, "low");
@@ -201,7 +209,73 @@ suite("Chat webview cache stats", () => {
 			promptTokens: 1000,
 			cachedTokens: 100,
 			cacheReported: 2,
+			cachedPromptTokens: 1000,
 		}).level, "normal");
+	});
+
+	test("divides by the prompt tokens of the requests that reported cache", () => {
+		const stats = modelCacheStats([
+			message("assistant", "m1", { promptTokens: 9000 }, { requests: 4, promptTokens: 9000, cachedTokens: 500, completionTokens: 20, cacheReported: 1, cachedPromptTokens: 1000 }),
+		], "m1");
+		assert.deepStrictEqual(stats, {
+			modelId: "m1",
+			requests: 4,
+			promptTokens: 9000,
+			cachedTokens: 500,
+			cacheReported: 1,
+			cachedPromptTokens: 1000,
+		});
+		const label = formatCacheHit(stats!);
+		assert.strictEqual(label.text, "cache 50%");
+		assert.match(label.title, /50% \(500 of 1k prompt tokens, 1 request\)/);
+	});
+
+	test("ignores old totals whose requests only partly reported cache", () => {
+		const partial = modelCacheStats([
+			message("assistant", "m1", undefined, { requests: 2, promptTokens: 2000, cachedTokens: 100, completionTokens: 0, cacheReported: 1 }),
+		], "m1");
+		assert.deepStrictEqual(partial, {
+			modelId: "m1",
+			requests: 2,
+			promptTokens: 2000,
+			cachedTokens: 0,
+			cacheReported: 0,
+			cachedPromptTokens: 0,
+		});
+		assert.strictEqual(formatCacheHit(partial!).text, "cache n/a");
+		const complete = modelCacheStats([
+			message("assistant", "m1", undefined, { requests: 2, promptTokens: 2000, cachedTokens: 500, completionTokens: 0, cacheReported: 2 }),
+		], "m1");
+		assert.strictEqual(formatCacheHit(complete!).text, "cache 25%");
+	});
+
+	test("uses the newest prompt cache for the last request", () => {
+		const stats = modelCacheStats([
+			message("assistant", "m1", { promptTokens: 5000 },
+				{ requests: 2, promptTokens: 6000, cachedTokens: 900, completionTokens: 50, cacheReported: 1, cachedPromptTokens: 1000 },
+				{ promptTokens: 1000, cachedTokens: 900, completionTokens: 50, requests: 1 }),
+		], "m1");
+		assert.strictEqual(stats?.lastHitPercent, 90);
+		assert.match(formatCacheHit(stats!).title, /Last request: 90%\./);
+	});
+
+	test("explains the Coco delay instead of claiming no cache counters", () => {
+		const stats = {
+			modelId: "coco::auto",
+			requests: 2,
+			promptTokens: 4000,
+			cachedTokens: 0,
+			cacheReported: 0,
+			cachedPromptTokens: 0,
+		};
+		assert.strictEqual(formatCacheHit(stats, "Coco").title, "Coco reports prompt cache counters when its turn ends; this answer has none yet.");
+		assert.strictEqual(formatCacheHit(stats, "DeepSeek").title, "The provider does not report cached tokens for this model.");
+	});
+
+	test("finds the provider label of the selected model", () => {
+		const models = groupModels([{ id: "coco::auto", name: "Auto (Coco)", maxInputTokens: 1000 }]);
+		assert.strictEqual(selectedModelProvider(models, "coco::auto"), "Coco");
+		assert.strictEqual(selectedModelProvider(models, "missing"), undefined);
 	});
 });
 

@@ -13,6 +13,17 @@ export interface ChatUsageTotals {
 	cachedTokens: number;
 	completionTokens: number;
 	cacheReported: number;
+	/** Prompt tokens of the requests that reported cached tokens; the cache-hit denominator. */
+	cachedPromptTokens?: number;
+}
+
+/** Counters of a provider prompt that reports cache separately from context occupancy. */
+export interface ChatPromptCache {
+	promptTokens: number;
+	cachedTokens?: number;
+	cacheWriteTokens?: number;
+	completionTokens: number;
+	requests: number;
 }
 
 export type ChatTextKind = "text" | "thinking";
@@ -105,6 +116,8 @@ export interface ChatMessage {
 	usage?: ChatUsage;
 	/** Sums over every request of this answer; the last request alone is `usage`. */
 	usageTotals?: ChatUsageTotals;
+	/** Newest prompt-cache counters when the provider reports them apart from context usage. */
+	promptCache?: ChatPromptCache;
 	/** Host context sent with this user message (date, active file); kept so every later request repeats it byte for byte. */
 	hostContext?: string;
 	/** Shared memory block sent before this user message; kept so later requests repeat it byte for byte. */
@@ -335,7 +348,7 @@ export type HostMessage =
 	| { type: "messageAdded"; message: ChatMessage }
 	| { type: "partAdded"; messageId: string; part: ChatStructuredPart }
 	| { type: "textDelta"; messageId: string; kind: ChatTextKind; text: string }
-	| { type: "usage"; messageId: string; usage: ChatUsage; totals?: ChatUsageTotals }
+	| { type: "usage"; messageId: string; usage?: ChatUsage; totals?: ChatUsageTotals; promptCache?: ChatPromptCache }
 	/** The message and everything after it were removed (an earlier message was edited). */
 	| { type: "truncated"; messageId: string }
 	| { type: "run"; run: ChatRunState }
@@ -425,9 +438,14 @@ export function applyHostUpdate(messages: ChatMessage[], update: HostMessage): v
 		case "usage": {
 			const message = find(update.messageId);
 			if (message) {
-				message.usage = update.usage;
+				if (update.usage) {
+					message.usage = update.usage;
+				}
 				if (update.totals) {
 					message.usageTotals = update.totals;
+				}
+				if (update.promptCache) {
+					message.promptCache = update.promptCache;
 				}
 			}
 			break;

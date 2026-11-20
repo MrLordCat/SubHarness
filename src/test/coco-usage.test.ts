@@ -7,6 +7,7 @@ import { resolveSharedContextLimit } from "../context/provider-handoff";
 import { CocoResponseStream } from "../coco/response-stream";
 import { CocoTurnBridge } from "../coco/turn-bridge";
 import { createCocoNativeContextUsage, parseCocoContextUsage } from "../coco/usage-adapter";
+import { parsePromptCacheSignal, PROMPT_CACHE_MIME, PROMPT_CACHE_OPTION } from "../providers/prompt-cache-signal";
 
 suite("Coco context usage", () => {
 	const update = (used = 62_229, size = 1_000_000) => ({ sessionUpdate: "usage_update", used, size });
@@ -98,5 +99,116 @@ suite("Coco context usage", () => {
 			await bridge.start(async () => ({ usage: { inputTokens: 1_000_000, outputTokens: 300 } }), { report: part => parts.push(part) }, token.token);
 			assert.deepStrictEqual(usageParts(parts), []);
 		} finally { bridge.dispose(); token.dispose(); }
+	});
+});
+
+suite("Coco prompt cache counters", () => {
+	const usage = { inputTokens: 100, outputTokens: 20, cachedReadTokens: 80, cachedWriteTokens: 5 };
+	const expected = { promptTokens: 185, cachedTokens: 80, cacheWriteTokens: 5, completionTokens: 20, requests: 1 };
+	const cacheParts = (parts: vscode.LanguageModelResponsePart[]) => parts
+		.filter((part): part is vscode.LanguageModelDataPart => part instanceof vscode.LanguageModelDataPart && part.mimeType === PROMPT_CACHE_MIME)
+		.map(part => parsePromptCacheSignal(part));
+	const contextParts = (parts: vscode.LanguageModelResponsePart[]) => parts
+		.filter((part): part is vscode.LanguageModelDataPart => part instanceof vscode.LanguageModelDataPart && part.mimeType === "usage")
+		.map(part => JSON.parse(Buffer.from(part.data).toString("utf8")) as Record<string, number>);
+
+	function provider(result: Record<string, unknown>): CocoChatModelProvider {
+		return new CocoChatModelProvider({
+			isEnabled: () => true,
+			resolveCli: () => "mock",
+			createClient: (_exe, _cwd, _connection, _model, handlers) => ({
+				initialize: async () => undefined,
+				newSession: async () => ({ sessionId: "prompt-cache-session" }),
+				prompt: async () => {
+					handlers?.onUpdate?.({ sessionUpdate: "usage_update", used: 50_000, size: 100_000 });
+					handlers?.onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done" } });
+					return result;
+				},
+				cancel: () => undefined,
+				dispose: () => undefined,
+			}) as unknown as CocoAcpClient,
+		});
+	}
+
+	async function run(provider: CocoChatModelProvider, modelOptions?: Record<string, unknown>): Promise<vscode.LanguageModelResponsePart[]> {
+		const token = new vscode.CancellationTokenSource(), parts: vscode.LanguageModelResponsePart[] = [];
+		try {
+			await provider.provideLanguageModelChatResponse(mapCocoModel({ id: "auto", name: "Auto" }), [vscode.LanguageModelChatMessage.User("Hi")],
+				{ toolMode: vscode.LanguageModelChatToolMode.Auto, ...(modelOptions ? { modelOptions } : {}) }, { report: part => parts.push(part) }, token.token);
+		} finally {
+			token.dispose();
+			provider.dispose();
+		}
+		return parts;
+	}
+
+	test("reports the prompt result usage as a chat-only part when asked", async () => {
+		const parts = await run(provider({ stopReason: "end_turn", usage }), { [PROMPT_CACHE_OPTION]: true });
+		assert.deepStrictEqual(cacheParts(parts), [expected]);
+		assert.deepStrictEqual(contextParts(parts), [{ prompt_tokens: 50_000, total_tokens: 50_000 }], "context usage stays unchanged");
+	});
+
+	test("reports nothing extra without the marker", async () => {
+		const parts = await run(provider({ stopReason: "end_turn", usage }));
+		assert.deepStrictEqual(cacheParts(parts), []);
+		assert.deepStrictEqual(contextParts(parts), [{ prompt_tokens: 50_000, total_tokens: 50_000 }]);
+	});
+
+	test("skips a prompt result without usable usage", async () => {
+		const parts = await run(provider({ stopReason: "end_turn" }), { [PROMPT_CACHE_OPTION]: true });
+		assert.deepStrictEqual(cacheParts(parts), []);
+		assert.deepStrictEqual(contextParts(parts), [{ prompt_tokens: 50_000, total_tokens: 50_000 }]);
+	});
+
+	test("does not invent cache reads that the prompt result omitted", async () => {
+		const parts = await run(provider({ stopReason: "end_turn", usage: { inputTokens: 100, outputTokens: 20 } }), { [PROMPT_CACHE_OPTION]: true });
+		assert.deepStrictEqual(cacheParts(parts), [{ promptTokens: 100, completionTokens: 20, requests: 1 }]);
+	});
+
+	test("reports on the final tool segment, where the native prompt resolves", async () => {
+		let alias = "";
+		const provider = new CocoChatModelProvider({
+			isEnabled: () => true,
+			resolveCli: () => "mock",
+			createClient: (_exe, _cwd, _connection, _model, handlers) => ({
+				initialize: async () => undefined,
+				newSession: async (_cwd: string, tools: Array<Record<string, unknown>>) => {
+					alias = String(tools[0]?.name);
+					return { sessionId: "prompt-cache-tools" };
+				},
+				prompt: async () => {
+					handlers?.onUpdate?.({ sessionUpdate: "usage_update", used: 50_000, size: 100_000 });
+					handlers?.onUpdate?.({ sessionUpdate: "tool_call", title: alias, kind: "other" });
+					await handlers?.onClientTool?.(alias, { value: "x" }, "native-call");
+					handlers?.onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done" } });
+					return { stopReason: "end_turn", usage };
+				},
+				cancel: () => undefined,
+				dispose: () => undefined,
+			}) as unknown as CocoAcpClient,
+		});
+		const tool: vscode.LanguageModelChatTool = { name: "probe", description: "Probe", inputSchema: { type: "object" } };
+		const options = { toolMode: vscode.LanguageModelChatToolMode.Auto, tools: [tool], modelOptions: { [PROMPT_CACHE_OPTION]: true } };
+		const token = new vscode.CancellationTokenSource();
+		try {
+			const first: vscode.LanguageModelResponsePart[] = [];
+			await provider.provideLanguageModelChatResponse(mapCocoModel({ id: "auto", name: "Auto" }), [vscode.LanguageModelChatMessage.User("Work")],
+				options, { report: part => first.push(part) }, token.token);
+			const call = first.find((part): part is vscode.LanguageModelToolCallPart => part instanceof vscode.LanguageModelToolCallPart);
+			assert.ok(call, "the first segment reports the native tool call");
+			assert.deepStrictEqual(cacheParts(first), [], "the prompt has not finished in the first segment");
+
+			const last: vscode.LanguageModelResponsePart[] = [];
+			await provider.provideLanguageModelChatResponse(mapCocoModel({ id: "auto", name: "Auto" }), [
+				vscode.LanguageModelChatMessage.Assistant([call]),
+				vscode.LanguageModelChatMessage.User([new vscode.LanguageModelToolResultPart(call.callId, [new vscode.LanguageModelTextPart("ok")])]),
+			], options, { report: part => last.push(part) }, token.token);
+			assert.deepStrictEqual(cacheParts(last), [expected]);
+			assert.deepStrictEqual(contextParts(last), [{ prompt_tokens: 50_000, total_tokens: 50_000 }]);
+			assert.ok(last.some(part => part instanceof vscode.LanguageModelTextPart && part.value === "Done"));
+		} finally {
+			token.dispose();
+			provider.dispose();
+		}
 	});
 });

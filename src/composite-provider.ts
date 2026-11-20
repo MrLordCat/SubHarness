@@ -7,6 +7,7 @@ import type { ConversationHistory } from "./providers/conversation-history";
 import { detectLimitError, formatLimitNotice, type LimitProvider, type LimitMatch } from "./providers/limit-errors";
 import { detectBalanceError, formatBalanceNotice } from "./providers/balance-errors";
 import { balanceSignal, isLimitSignalPart, LIMIT_SIGNAL_OPTION, limitSignal, limitSignalPart } from "./providers/limit-signal";
+import { isPromptCacheSignalPart, PROMPT_CACHE_OPTION } from "./providers/prompt-cache-signal";
 import { PROVIDER_SWITCH_OPTION } from "./providers/provider-switch";
 import { ChatMarkdownLinkStream } from "./providers/markdown-links";
 
@@ -109,9 +110,14 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 		// Copilot Chat would ignore the signal at best; it is neither history nor shown text.
 		const wantsSignals = options.modelOptions?.[LIMIT_SIGNAL_OPTION] === true;
 		const signal = (part: vscode.LanguageModelDataPart): void => { if (wantsSignals) { emitText(links.flush()); progress.report(part); } };
+		const wantsPromptCache = options.modelOptions?.[PROMPT_CACHE_OPTION] === true;
 		// A non-text part must not jump ahead of buffered prose.
 		const report = (part: vscode.LanguageModelResponsePart): void => {
 			if (isLimitSignalPart(part)) { signal(part); return; }
+			if (isPromptCacheSignalPart(part)) {
+				if (wantsPromptCache) { emitText(links.flush()); progress.report(part); }
+				return;
+			}
 			if (part instanceof vscode.LanguageModelTextPart) { emitText(links.push(part.value)); return; }
 			emitText(links.flush());
 			emit(part);

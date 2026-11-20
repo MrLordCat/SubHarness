@@ -282,6 +282,11 @@ export class CocoTurnBridge implements vscode.Disposable {
 			+ "Retry using the supplied VS Code Chat tools so permissions and execution appear in the chat."));
 	}
 
+	/** Reports a provider part on the Chat segment attached now; tool rounds replace it. */
+	reportPart(part: vscode.LanguageModelResponsePart): void {
+		this.progress?.report(part);
+	}
+
 	dispose(): void { this.finish(new vscode.CancellationError()); }
 
 	private attach(progress: vscode.Progress<vscode.LanguageModelResponsePart>, token: vscode.CancellationToken): Promise<void> {

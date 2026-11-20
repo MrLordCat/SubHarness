@@ -81,6 +81,24 @@ suite("Chat session store", () => {
 		assert.strictEqual(meta?.modelId, "model-a");
 	});
 
+	test("persists the cache denominator and the newest prompt-cache counters", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		const user = textMessage("m1", "user", "Cache");
+		const assistant = textMessage("m2", "assistant", "Cached");
+		await store.appendMessage(session.id, user);
+		await store.appendMessage(session.id, assistant);
+		const promptCache = { promptTokens: 900, cachedTokens: 700, cacheWriteTokens: 100, completionTokens: 50, requests: 1 };
+		const totals = { requests: 2, promptTokens: 1900, cachedTokens: 700, completionTokens: 50, cacheReported: 1, cachedPromptTokens: 900 };
+		await store.setUsage(session.id, "m2", undefined, totals, promptCache);
+		await store.flush();
+
+		const loaded = (await new ChatSessionStore(root).load(session.id)).find(message => message.id === "m2");
+		assert.deepStrictEqual(loaded?.usageTotals, totals);
+		assert.deepStrictEqual(loaded?.promptCache, promptCache);
+		assert.strictEqual(loaded?.usage, undefined);
+	});
+
 	test("loads a usage line with malformed totals without totals", async () => {
 		const store = new ChatSessionStore(root);
 		const session = await store.create();

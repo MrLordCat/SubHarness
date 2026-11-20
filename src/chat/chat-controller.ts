@@ -29,6 +29,7 @@ import type {
 	ChatMemorySaveInput,
 	ChatMessage,
 	ChatPart,
+	ChatPromptCache,
 	ChatProviderQuota,
 	ChatQueuedMessage,
 	ChatQuestion,
@@ -1074,8 +1075,21 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			usage: (usage, totals) => {
 				running.message.usage = usage;
 				running.message.usageTotals = totals;
-				void this._persistUsage(running, usage, totals);
-				this._emit(runtime, { type: "usage", messageId: running.message.id, usage, totals });
+				void this._persistUsage(running, usage, totals, running.message.promptCache);
+				this._emit(runtime, {
+					type: "usage", messageId: running.message.id, usage, totals,
+					...(running.message.promptCache ? { promptCache: running.message.promptCache } : {}),
+				});
+			},
+			promptCache: (promptCache, totals) => {
+				running.message.promptCache = promptCache;
+				running.message.usageTotals = totals;
+				void this._persistUsage(running, running.message.usage, totals, promptCache);
+				this._emit(runtime, {
+					type: "usage", messageId: running.message.id,
+					...(running.message.usage ? { usage: running.message.usage } : {}),
+					totals, promptCache,
+				});
 			},
 		};
 		const source = this._deps.tools;
@@ -1431,9 +1445,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
-	private async _persistUsage(running: RunningTurn, usage: ChatUsage, totals: ChatUsageTotals): Promise<void> {
+	private async _persistUsage(running: RunningTurn, usage: ChatUsage | undefined, totals: ChatUsageTotals, promptCache?: ChatPromptCache): Promise<void> {
 		try {
-			await this._deps.store.setUsage(running.sessionId, running.message.id, usage, totals);
+			await this._deps.store.setUsage(running.sessionId, running.message.id, usage, totals, promptCache);
 		} catch (error) {
 			this._log("chat.persist.usage_failed", { message: errorMessage(error) });
 		}

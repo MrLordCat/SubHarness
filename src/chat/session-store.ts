@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { ChatMessage, ChatPart, ChatSessionMeta, ChatUsage, ChatUsageTotals } from "./shared/protocol";
+import type { ChatMessage, ChatPart, ChatPromptCache, ChatSessionMeta, ChatUsage, ChatUsageTotals } from "./shared/protocol";
 
 export const DEFAULT_CHAT_TITLE = "New chat";
 
@@ -17,7 +17,7 @@ const INDEX_THROTTLE_MS = 1_000;
 type LogEvent =
 	| { t: "message"; message: ChatMessage }
 	| { t: "part"; messageId: string; part: ChatPart }
-	| { t: "usage"; messageId: string; usage: ChatUsage; totals?: ChatUsageTotals }
+	| { t: "usage"; messageId: string; usage?: ChatUsage; totals?: ChatUsageTotals; promptCache?: ChatPromptCache }
 	/** The turn finished, so a later load does not take the answer for a half-written one. */
 	| { t: "end"; messageId: string }
 	/** Drops the message and everything after it; an earlier message was edited. */
@@ -138,9 +138,14 @@ export class ChatSessionStore {
 		});
 	}
 
-	async setUsage(sessionId: string, messageId: string, usage: ChatUsage, totals?: ChatUsageTotals): Promise<void> {
+	async setUsage(sessionId: string, messageId: string, usage: ChatUsage | undefined, totals?: ChatUsageTotals, promptCache?: ChatPromptCache): Promise<void> {
 		assertSessionId(sessionId);
-		const event: LogEvent = { t: "usage", messageId, usage, ...(totals ? { totals } : {}) };
+		const event: LogEvent = {
+			t: "usage", messageId,
+			...(usage ? { usage } : {}),
+			...(totals ? { totals } : {}),
+			...(promptCache ? { promptCache } : {}),
+		};
 		const line = `${JSON.stringify(event)}\n`;
 		await this._enqueue(async () => {
 			await this._ensureIndex();
@@ -457,9 +462,14 @@ function replayEvents(raw: string): ReplayResult {
 		} else {
 			const message = byId.get(event.messageId);
 			if (message) {
-				message.usage = event.usage;
+				if (event.usage) {
+					message.usage = event.usage;
+				}
 				if (event.totals) {
 					message.usageTotals = event.totals;
+				}
+				if (event.promptCache) {
+					message.promptCache = event.promptCache;
 				}
 			}
 		}
@@ -499,9 +509,18 @@ function asLogEvent(line: string): LogEvent | undefined {
 	if (value.t === "part" && typeof value.messageId === "string" && isChatPart(value.part)) {
 		return { t: "part", messageId: value.messageId, part: value.part };
 	}
-	if (value.t === "usage" && typeof value.messageId === "string" && isChatUsage(value.usage)) {
-		const totals = value.totals === undefined || isChatUsageTotals(value.totals) ? value.totals : undefined;
-		return { t: "usage", messageId: value.messageId, usage: value.usage, ...(totals ? { totals } : {}) };
+	if (value.t === "usage" && typeof value.messageId === "string"
+		&& (value.usage === undefined || isChatUsage(value.usage))
+		&& (value.totals === undefined || isChatUsageTotals(value.totals))
+		&& (value.promptCache === undefined || isChatPromptCache(value.promptCache))) {
+		const totals = value.totals === undefined ? undefined : isChatUsageTotals(value.totals) ? value.totals : undefined;
+		const promptCache = value.promptCache === undefined ? undefined : isChatPromptCache(value.promptCache) ? value.promptCache : undefined;
+		return {
+			t: "usage", messageId: value.messageId,
+			...(value.usage ? { usage: value.usage } : {}),
+			...(totals ? { totals } : {}),
+			...(promptCache ? { promptCache } : {}),
+		};
 	}
 	if (value.t === "end" && typeof value.messageId === "string") {
 		return { t: "end", messageId: value.messageId };
@@ -529,7 +548,8 @@ function isChatMessage(value: unknown): value is ChatMessage {
 		&& (value.attachments === undefined || (Array.isArray(value.attachments) && value.attachments.every(isChatAttachment)))
 		&& (value.attachmentContext === undefined || typeof value.attachmentContext === "string")
 		&& (value.usage === undefined || isChatUsage(value.usage))
-		&& (value.usageTotals === undefined || isChatUsageTotals(value.usageTotals));
+		&& (value.usageTotals === undefined || isChatUsageTotals(value.usageTotals))
+		&& (value.promptCache === undefined || isChatPromptCache(value.promptCache));
 }
 
 function isChatAttachment(value: unknown): boolean {
@@ -633,11 +653,25 @@ function isChatUsageTotals(value: unknown): value is ChatUsageTotals {
 	if (!isRecord(value)) {
 		return false;
 	}
+	const optional = (entry: unknown): boolean => entry === undefined || typeof entry === "number" && Number.isFinite(entry) && entry >= 0;
 	return ["requests", "promptTokens", "cachedTokens", "completionTokens", "cacheReported"]
 		.every(key => {
 			const entry = value[key];
 			return typeof entry === "number" && Number.isFinite(entry) && entry >= 0;
-		});
+		})
+		&& optional(value.cachedPromptTokens);
+}
+
+function isChatPromptCache(value: unknown): value is ChatPromptCache {
+	if (!isRecord(value)) {
+		return false;
+	}
+	const token = (entry: unknown): boolean => typeof entry === "number" && Number.isSafeInteger(entry) && entry >= 0;
+	return token(value.promptTokens)
+		&& token(value.completionTokens)
+		&& token(value.requests) && (value.requests as number) >= 1
+		&& (value.cachedTokens === undefined || token(value.cachedTokens))
+		&& (value.cacheWriteTokens === undefined || token(value.cacheWriteTokens));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

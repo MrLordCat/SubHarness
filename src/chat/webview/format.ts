@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatModelGroup, ChatProviderQuota, ChatQuotaWindow, ChatUsage } from "../shared/protocol";
+import { modelProvider } from "../shared/model-groups";
 
 /** 312000 → "312k", 1_200_000 → "1.2M"; used wherever token counts are shown. */
 export function formatTokens(value: number): string {
@@ -38,7 +39,23 @@ export interface ModelCacheStats {
 	promptTokens: number;
 	cachedTokens: number;
 	cacheReported: number;
+	/** Prompt tokens of the requests that reported cached tokens; the hit-rate denominator. */
+	cachedPromptTokens: number;
 	lastHitPercent?: number;
+}
+
+/** The provider label of the selected model, as groupModels would show it. */
+export function selectedModelProvider(models: readonly ChatModelGroup[], modelId: string | undefined): string | undefined {
+	if (modelId === undefined) {
+		return undefined;
+	}
+	for (const group of models) {
+		const model = group.models.find(candidate => candidate.id === modelId);
+		if (model) {
+			return modelProvider(model);
+		}
+	}
+	return undefined;
 }
 
 /** Cache hits of the selected model over its turns in this chat, newest streak only. */
@@ -46,7 +63,7 @@ export function modelCacheStats(messages: readonly ChatMessage[], modelId: strin
 	if (modelId === undefined) {
 		return undefined;
 	}
-	const stats: ModelCacheStats = { modelId, requests: 0, promptTokens: 0, cachedTokens: 0, cacheReported: 0 };
+	const stats: ModelCacheStats = { modelId, requests: 0, promptTokens: 0, cachedTokens: 0, cacheReported: 0, cachedPromptTokens: 0 };
 	let included = 0;
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
 		const message = messages[index];
@@ -60,21 +77,34 @@ export function modelCacheStats(messages: readonly ChatMessage[], modelId: strin
 			continue;
 		}
 		const usage = message.usage;
-		if (included === 0 && usage?.promptTokens !== undefined && usage.promptTokens > 0 && usage.cachedTokens !== undefined) {
-			stats.lastHitPercent = Math.round(usage.cachedTokens / usage.promptTokens * 100);
+		if (included === 0) {
+			const cache = message.promptCache;
+			if (cache && cache.promptTokens > 0 && cache.cachedTokens !== undefined) {
+				stats.lastHitPercent = Math.round(cache.cachedTokens / cache.promptTokens * 100);
+			} else if (usage?.promptTokens !== undefined && usage.promptTokens > 0 && usage.cachedTokens !== undefined) {
+				stats.lastHitPercent = Math.round(usage.cachedTokens / usage.promptTokens * 100);
+			}
 		}
 		included += 1;
 		if (message.usageTotals) {
-			stats.requests += message.usageTotals.requests;
-			stats.promptTokens += message.usageTotals.promptTokens;
-			stats.cachedTokens += message.usageTotals.cachedTokens;
-			stats.cacheReported += message.usageTotals.cacheReported;
+			const totals = message.usageTotals;
+			stats.requests += totals.requests;
+			stats.promptTokens += totals.promptTokens;
+			// Old totals without the denominator are usable only when every request reported cache.
+			const cachedPromptTokens = totals.cachedPromptTokens
+				?? (totals.cacheReported === totals.requests ? totals.promptTokens : undefined);
+			if (cachedPromptTokens !== undefined) {
+				stats.cachedTokens += totals.cachedTokens;
+				stats.cacheReported += totals.cacheReported;
+				stats.cachedPromptTokens += cachedPromptTokens;
+			}
 		} else if (usage?.promptTokens !== undefined) {
 			stats.requests += 1;
 			stats.promptTokens += usage.promptTokens;
-			stats.cachedTokens += usage.cachedTokens ?? 0;
 			if (usage.cachedTokens !== undefined) {
+				stats.cachedTokens += usage.cachedTokens;
 				stats.cacheReported += 1;
+				stats.cachedPromptTokens += usage.promptTokens;
 			}
 		}
 	}
@@ -90,20 +120,22 @@ export interface CacheHitLabel {
 	level: "normal" | "low";
 }
 
-export function formatCacheHit(stats: ModelCacheStats): CacheHitLabel {
+export function formatCacheHit(stats: ModelCacheStats, provider?: string): CacheHitLabel {
 	if (stats.cacheReported === 0) {
 		return {
 			text: "cache n/a",
-			title: "The provider does not report cached tokens for this model.",
+			title: provider === "Coco"
+				? "Coco reports prompt cache counters when its turn ends; this answer has none yet."
+				: "The provider does not report cached tokens for this model.",
 			level: "normal",
 		};
 	}
-	const percent = Math.round(stats.cachedTokens / stats.promptTokens * 100);
+	const percent = stats.cachedPromptTokens > 0 ? Math.round(stats.cachedTokens / stats.cachedPromptTokens * 100) : 0;
 	const last = stats.lastHitPercent === undefined ? "" : ` Last request: ${stats.lastHitPercent}%.`;
 	return {
 		text: `cache ${percent}%`,
-		title: `Prompt cache hits for this model since it took over this chat: ${percent}% (${formatTokens(stats.cachedTokens)} of ${formatTokens(stats.promptTokens)} prompt tokens, ${stats.requests} ${stats.requests === 1 ? "request" : "requests"}).${last}`,
-		level: percent < 30 && stats.requests >= 3 ? "low" : "normal",
+		title: `Prompt cache hits for this model since it took over this chat: ${percent}% (${formatTokens(stats.cachedTokens)} of ${formatTokens(stats.cachedPromptTokens)} prompt tokens, ${stats.cacheReported} ${stats.cacheReported === 1 ? "request" : "requests"}).${last}`,
+		level: percent < 30 && stats.cacheReported >= 3 ? "low" : "normal",
 	};
 }
 

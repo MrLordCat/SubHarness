@@ -7,7 +7,7 @@ import { ChangesPanel } from "./changes-panel";
 import { ChatHistory } from "./chat-history";
 import { Composer } from "./composer";
 import { useComposerActions } from "./composer-actions";
-import { contextIndicator, formatCacheHit, modelCacheStats } from "./format";
+import { contextIndicator, formatCacheHit, modelCacheStats, selectedModelProvider } from "./format";
 import { MemoryPanel } from "./memory-panel";
 import { MessageList } from "./message-list";
 import { QueuedMessages } from "./queued-messages";
@@ -49,7 +49,7 @@ export function App({ store }: { store: ChatStore }) {
 	const title = store.session?.title ?? "Chat";
 	const context = contextIndicator(store.latestUsage, store.models, store.selectedModelId);
 	const cacheStats = modelCacheStats(store.messages, store.selectedModelId);
-	const cache = cacheStats ? formatCacheHit(cacheStats) : undefined;
+	const cache = cacheStats ? formatCacheHit(cacheStats, selectedModelProvider(store.models, store.selectedModelId)) : undefined;
 
 	return (
 		<div class="chat-root">

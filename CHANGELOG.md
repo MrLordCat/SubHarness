@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.21.33 (development patch) - 2026-11-20
+
+- Fixed: the bridge chat never showed a prompt cache hit for Coco models
+  (always "cache n/a"). Coco's per-request usage is the context size only; its
+  real counters (cache reads and writes) come once, when the native answer
+  ends. Coco now sends them to the bridge chat as a separate part; Copilot
+  chats do not get it, and Coco's context usage is unchanged.
+- Fixed: the chat's cache percentage counted requests that report no cached
+  tokens, which lowered the rate. Only requests with cache counters count now.
+  Older saved chats are read as before when all their requests reported cache.
+
 ## 1.21.32 (development patch) - 2026-11-20
 
 - Fixed: Coco asked for a Snowflake sign-in after every window reload and every

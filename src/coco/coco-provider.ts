@@ -4,6 +4,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { resolveProviderSwitchContextTokens, resolveSharedContextLimit, sharedContextBudget } from "../context/provider-handoff";
 import { isProviderSwitch } from "../providers/provider-switch";
+import { promptCacheSignalPart, PROMPT_CACHE_OPTION } from "../providers/prompt-cache-signal";
 
 import { CocoAcpClient, type CocoSessionClient, type CocoAcpHandlers, type CocoPromptContent } from "./acp-client";
 import { CocoSdkClient, cocoSdkAvailable, cocoSdkError } from "./sdk-client";
@@ -15,7 +16,7 @@ import {
 import { CocoTurnBridge, collectCocoToolResults, COCO_CHAT_TOOL_POLICY, COCO_TOOL_IMAGE_ROUNDS } from "./turn-bridge";
 import { cocoToolImageNote } from "./tool-policy";
 import { estimateCocoTokens } from "./message-adapter";
-import { parseCocoContextUsage } from "./usage-adapter";
+import { parseCocoContextUsage, parseCocoTokenUsage } from "./usage-adapter";
 import { CocoSessionStore, cocoUserAnchors } from "./session-store";
 import { CocoHistoryArchive } from "./history-transfer";
 import { CocoTurnMetrics, type CocoLiveTurn, type CocoRecordedUsage } from "./turn-metrics";
@@ -554,6 +555,18 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 				const prompt = async (content: typeof transfer.prompt | string) => {
 					const result = await client.prompt(sessionId, typeof content === "string" || content.some(part => part.type === "image") ? content : content.map(part => part.type === "text" ? part.text : "").join(""));
 					metrics.result(result);
+					if (options.modelOptions?.[PROMPT_CACHE_OPTION] === true) {
+						const usage = parseCocoTokenUsage(result);
+						if (usage) {
+							bridge.reportPart(promptCacheSignalPart({
+								promptTokens: usage.inputTokens,
+								...(usage.cachedInputTokens !== undefined ? { cachedTokens: usage.cachedInputTokens } : {}),
+								...(usage.cacheWriteInputTokens !== undefined ? { cacheWriteTokens: usage.cacheWriteInputTokens } : {}),
+								completionTokens: usage.outputTokens,
+								requests: 1,
+							}));
+						}
+					}
 					if (result?.stopReason === "cancelled" || bridge.isTerminal) { throw new vscode.CancellationError(); }
 					return result?.stopReason;
 				};

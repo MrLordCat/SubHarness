@@ -423,7 +423,7 @@ export class ChatStore {
 					this.versions.set(update.message.id, this.nextVersion());
 					this.todoList = latestTodoList(this.messages);
 				} else {
-					if (update.type === "usage") {
+					if (update.type === "usage" && update.usage) {
 						this.latestUsage = update.usage;
 					}
 					this.bump(update.messageId);

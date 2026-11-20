@@ -1,12 +1,15 @@
 import * as vscode from "vscode";
 import { LIMIT_SIGNAL_OPTION, parseLimitSignal, type LimitSignal } from "../providers/limit-signal";
+import { parsePromptCacheSignal, PROMPT_CACHE_OPTION } from "../providers/prompt-cache-signal";
 import { toLanguageModelMessages } from "./lm-messages";
-import { appendChatText, type ChatMessage, type ChatPart, type ChatStructuredPart, type ChatTextKind, type ChatToolImage, type ChatUsage, type ChatUsageTotals } from "./shared/protocol";
+import { appendChatText, type ChatMessage, type ChatPart, type ChatPromptCache, type ChatStructuredPart, type ChatTextKind, type ChatToolImage, type ChatUsage, type ChatUsageTotals } from "./shared/protocol";
 
 export interface AgentTurnSink {
 	text(kind: ChatTextKind, text: string): void;
 	part(part: ChatStructuredPart): void;
 	usage(usage: ChatUsage, totals: ChatUsageTotals): void;
+	/** Cache counters of a provider prompt that reports them apart from context usage. */
+	promptCache?(cache: ChatPromptCache, totals: ChatUsageTotals): void;
 }
 
 export interface ChatToolExecutor {
@@ -93,10 +96,22 @@ function addUsage(totals: ChatUsageTotals, usage: ChatUsage): void {
 	}
 	totals.requests += 1;
 	totals.promptTokens += usage.promptTokens;
-	totals.cachedTokens += usage.cachedTokens ?? 0;
 	totals.completionTokens += usage.completionTokens ?? 0;
 	if (usage.cachedTokens !== undefined) {
+		totals.cachedTokens += usage.cachedTokens;
 		totals.cacheReported += 1;
+		totals.cachedPromptTokens = (totals.cachedPromptTokens ?? 0) + usage.promptTokens;
+	}
+}
+
+function addPromptCache(totals: ChatUsageTotals, cache: ChatPromptCache): void {
+	totals.requests += cache.requests;
+	totals.promptTokens += cache.promptTokens;
+	totals.completionTokens += cache.completionTokens;
+	if (cache.cachedTokens !== undefined) {
+		totals.cachedTokens += cache.cachedTokens;
+		totals.cacheReported += cache.requests;
+		totals.cachedPromptTokens = (totals.cachedPromptTokens ?? 0) + cache.promptTokens;
 	}
 }
 
@@ -115,11 +130,22 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 	const maxRounds = request.maxRounds ?? DEFAULT_MAX_ROUNDS;
 	const parts: ChatPart[] = [...(request.initialParts ?? [])];
 	const assistant: ChatMessage = { id: "agent-message", role: "assistant", turn: request.turn, createdAt: Date.now(), parts };
-	const completed: ChatUsageTotals = { requests: 0, promptTokens: 0, cachedTokens: 0, completionTokens: 0, cacheReported: 0 };
+	const completed: ChatUsageTotals = { requests: 0, promptTokens: 0, cachedTokens: 0, completionTokens: 0, cacheReported: 0, cachedPromptTokens: 0 };
 	let roundUsage: ChatUsage | undefined;
 	for (let round = 1; round <= maxRounds; round++) {
 		roundUsage = undefined;
+		const roundCache: ChatPromptCache[] = [];
 		const calls: Array<{ callId: string; name: string; input: unknown }> = [];
+		const roundTotals = (usage = roundUsage): ChatUsageTotals => {
+			const totals = { ...completed };
+			if (usage) {
+				addUsage(totals, usage);
+			}
+			for (const cache of roundCache) {
+				addPromptCache(totals, cache);
+			}
+			return totals;
+		};
 		// The notice text that follows a limit signal is already shown by the notice part.
 		let signalledText = "";
 		const progress: vscode.Progress<vscode.LanguageModelResponsePart> = {
@@ -153,12 +179,16 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 						signalledText = signal.text;
 						return;
 					}
+					const cache = parsePromptCacheSignal(part);
+					if (cache) {
+						roundCache.push(cache);
+						request.sink.promptCache?.(cache, roundTotals());
+						return;
+					}
 					const usage = parseUsage(part);
 					if (usage) {
 						roundUsage = usage;
-						const totals = { ...completed };
-						addUsage(totals, usage);
-						request.sink.usage(usage, totals);
+						request.sink.usage(usage, roundTotals(usage));
 					}
 				} else if (THINKING_PART && part instanceof THINKING_PART) {
 					const text = thinkingText(part);
@@ -172,10 +202,13 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 		await request.backend.provideLanguageModelChatResponse(request.model, toLanguageModelMessages([...request.history, assistant], { system: request.system }), {
 			toolMode: vscode.LanguageModelChatToolMode.Auto,
 			tools: request.tools.tools,
-			modelOptions: { ...request.modelOptions, _conversationId: request.conversationId, _copilotTurnIndex: request.turn, [LIMIT_SIGNAL_OPTION]: true },
+			modelOptions: { ...request.modelOptions, _conversationId: request.conversationId, _copilotTurnIndex: request.turn, [LIMIT_SIGNAL_OPTION]: true, [PROMPT_CACHE_OPTION]: true },
 		}, progress, request.token);
 		if (roundUsage) {
 			addUsage(completed, roundUsage);
+		}
+		for (const cache of roundCache) {
+			addPromptCache(completed, cache);
 		}
 		if (calls.length === 0) {
 			return { rounds: round, stopReason: "done" };

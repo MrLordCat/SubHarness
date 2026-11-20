@@ -32,8 +32,10 @@ tab show the same chat.
 - **cache N%** is the share of prompt tokens the provider served from its
   prompt cache, summed over the selected model's turns since it took over the
   chat. It starts again after a model switch and updates after every request;
-  hover it for token counts and the last request. `cache n/a` means the
-  provider does not report cached tokens.
+  hover it for token counts and the last request. Only requests that report
+  cached tokens count. `cache n/a` means the provider does not report them.
+  Coco reports its counters once, when its whole answer ends (tool rounds
+  included), so during a Coco answer the label shows the earlier answers.
 
 ## Attachments
 
