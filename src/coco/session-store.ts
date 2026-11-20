@@ -17,13 +17,15 @@ export function cocoUserAnchors(messages: readonly vscode.LanguageModelChatReque
 	return canonicalConversationUserAnchors(messages);
 }
 
-interface SavedSession { key: string; identity: string; sessionId: string; users: string[]; updatedAt: number; contextWindow?: number; inflight?: boolean; completedUsers?: string[] }
+interface SavedSession { key: string; identity: string; sessionId: string; users: string[]; updatedAt: number; contextWindow?: number; inflight?: boolean; completedUsers?: string[]; instructions?: string }
 export interface CocoSession {
 	key: string; identity: string; persistent: boolean; client: CocoSessionClient;
 	sessionId?: string; users: string[]; initialized?: CocoInitializeResult;
 	ready: boolean; fresh: boolean; busy: boolean; closed: boolean; forward: boolean; importing: boolean;
 	mode: "new" | "warm" | "restored" | "resume-fallback";
 	reason?: string; deltaStart: number; toolSignature?: string; contextWindow?: number;
+	/** sha256 of the system instructions the native session has already received. */
+	instructions?: string;
 	handlers: CocoAcpHandlers; touchedAt: number; idle?: ReturnType<typeof setTimeout>;
 	promptSent?: boolean; beforePrompt?: SavedSession;
 	promptPrepared?: boolean;
@@ -48,7 +50,7 @@ export class CocoSessionStore {
 				|| typeof value.sessionId !== "string" || !/^[\w-]{1,160}$/.test(value.sessionId)
 				|| !Array.isArray(value.users) || value.users.length > 10_000 || !value.users.every(s => typeof s === "string" && /^[a-f0-9]{64}$/.test(s))
 				|| !Number.isFinite(value.updatedAt) || Date.now() - value.updatedAt > MAX_AGE) { continue; }
-			this.saved.set(value.key, value);
+			this.saved.set(value.key, typeof value.instructions === "string" && /^[a-f0-9]{64}$/.test(value.instructions) ? value : { ...value, instructions: undefined });
 		}
 	}
 	private async load(): Promise<void> {
@@ -119,7 +121,7 @@ export class CocoSessionStore {
 			const record: CocoSession = {
 				key, identity, persistent, client: undefined!, sessionId: checkpoint?.sessionId, users: checkpoint?.users ?? [],
 				ready: false, fresh: true, busy: true, closed: false, forward: false, importing: false,
-				mode: checkpoint ? "restored" : "new", reason, deltaStart: 0, handlers, touchedAt: Date.now(), contextWindow: checkpoint?.contextWindow,
+				mode: checkpoint ? "restored" : "new", reason, deltaStart: 0, handlers, touchedAt: Date.now(), contextWindow: checkpoint?.contextWindow, instructions: checkpoint?.instructions,
 			};
 			record.client = create({
 				onUpdate: update => { if (record.forward && !record.closed) { record.handlers.onUpdate?.(update); } },
@@ -176,18 +178,19 @@ export class CocoSessionStore {
 		session.beforePrompt = this.saved.get(session.key);
 		if (session.persistent && session.sessionId) {
 			this.saved.set(session.key, { key: session.key, identity: session.identity, sessionId: session.sessionId,
-				users: anchors.map(a => a.key), completedUsers: session.users, updatedAt: Date.now(), contextWindow: session.contextWindow, inflight: true });
+				users: anchors.map(a => a.key), completedUsers: session.users, updatedAt: Date.now(), contextWindow: session.contextWindow, instructions: session.instructions, inflight: true });
 			await this.flush(true);
 		}
 		session.promptSent = true;
 	}
 
-	async checkpoint(session: CocoSession, anchors: readonly CocoUserAnchor[]): Promise<void> {
+	async checkpoint(session: CocoSession, anchors: readonly CocoUserAnchor[], instructions?: string): Promise<void> {
 		if (session.closed || !session.sessionId) { return; }
 		session.fresh = false;
 		session.users = anchors.map(a => a.key);
+		if (instructions !== undefined) { session.instructions = instructions; }
 		if (session.persistent && session.users.length <= 10_000) {
-			this.saved.set(session.key, { key: session.key, identity: session.identity, sessionId: session.sessionId, users: session.users, updatedAt: Date.now(), contextWindow: session.contextWindow });
+			this.saved.set(session.key, { key: session.key, identity: session.identity, sessionId: session.sessionId, users: session.users, updatedAt: Date.now(), contextWindow: session.contextWindow, instructions: session.instructions });
 			await this.flush(true);
 		}
 	}

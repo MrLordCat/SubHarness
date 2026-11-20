@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.21.35 (development patch) - 2026-11-20
+
+- Fixed: Coco and Cursor sessions that continued, even after a window reload,
+  never received changed system instructions, such as new base rules of the
+  bridge chat or an edited AGENTS.md: only the environment blocks were sent
+  again. The bridge now saves a hash of the instructions with the session and
+  sends them once more when they change. Sessions saved by an older version
+  get them once.
+- Fixed: the subagent model list put every model from an API profile into the
+  local group, so Cursor models (Opus 5.5, GPT-5.6 Sol and others) were offered
+  as free local models "without token or rate limits". The group now follows
+  the model's source: llama.cpp servers, local addresses and llama.cpp behind a
+  gateway are local; DeepSeek is DeepSeek; other API profiles form a new paid
+  group that comes last and is used only on request. It has its own branch in
+  the Subagents tree.
+- Fixed: a model name that appeared twice (two Cursor "Auto" models) was
+  listed twice for subagents; it is listed once.
+
 ## 1.21.34 (development patch) - 2026-11-20
 
 - Fixed: Coco saw only the first 500 characters of each tool description (a

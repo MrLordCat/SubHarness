@@ -221,6 +221,49 @@ suite("Coco conversation continuity", () => {
 			assert.strictEqual(f.stats().sessions, 1); assert.match(f.prompts[1], /terminal NEW/); assert.ok(!f.prompts[1].includes("RULE"));
 		} finally { await f.dispose(); }
 	});
+	test("resends changed system instructions once to a warm session", async () => {
+		const f = await fixture();
+		try {
+			const system = (base: string, env: string) => new vscode.LanguageModelChatMessage(3 as vscode.LanguageModelChatMessageRole, [new vscode.LanguageModelTextPart(`${base}\n<environment_info>${env}</environment_info>`)]);
+			const p = f.make(); await f.send(p, [system("BASE_V1", "ENV_A"), user("Q1")]);
+			const second = [user("Q1"), assistant("Visible answer"), user("Q2")];
+			await f.send(p, [system("BASE_V1", "ENV_B"), ...second]);
+			assert.match(f.prompts[1], /ENV_B/); assert.ok(!f.prompts[1].includes("BASE_V1")); assert.ok(!f.prompts[1].includes("Current VS Code instructions"));
+			const third = [...second, assistant("Visible answer"), user("Q3")];
+			await f.send(p, [system("BASE_V2", "ENV_B"), ...third]);
+			assert.match(f.prompts[2], /Current VS Code instructions \(updated/); assert.match(f.prompts[2], /BASE_V2/); assert.ok(!f.prompts[2].includes("Q1"));
+			await f.send(p, [system("BASE_V2", "ENV_B"), ...third, assistant("Visible answer"), user("Q4")]);
+			assert.ok(!f.prompts[3].includes("BASE_V2")); assert.strictEqual(f.stats().sessions, 1); assert.strictEqual(f.prompts.length, 4);
+		} finally { await f.dispose(); }
+	});
+	test("after reload resends only instructions that changed since the checkpoint", async () => {
+		const f = await fixture();
+		try {
+			const system = (base: string) => new vscode.LanguageModelChatMessage(3 as vscode.LanguageModelChatMessageRole, [new vscode.LanguageModelTextPart(base)]);
+			const first = f.make(); await f.send(first, [system("BASE_V1"), user("Q1")]); first.dispose();
+			assert.ok(!JSON.stringify([...f.data]).includes("BASE_V1"));
+			const second = [user("Q1"), assistant("Visible answer"), user("Q2")];
+			const restored = f.make(); await f.send(restored, [system("BASE_V1"), ...second]); restored.dispose();
+			assert.ok(!f.prompts[1].includes("BASE_V1"));
+			await f.send(f.make(), [system("BASE_V2"), ...second, assistant("Visible answer"), user("Q3")]);
+			assert.match(f.prompts[2], /BASE_V2/); assert.strictEqual(f.stats().sessions, 1); assert.strictEqual(f.stats().loads, 2);
+		} finally { await f.dispose(); }
+	});
+	test("a checkpoint saved without an instructions digest resends them once", async () => {
+		const f = await fixture();
+		try {
+			const system = new vscode.LanguageModelChatMessage(3 as vscode.LanguageModelChatMessageRole, [new vscode.LanguageModelTextPart("BASE_LEGACY")]);
+			const first = f.make(); await f.send(first, [system, user("Q1")]); first.dispose();
+			const file = path.join(f.root, "sessions.json"), document = JSON.parse(await fs.readFile(file, "utf8")) as { sessions: Array<Record<string, unknown>> };
+			assert.match(String(document.sessions[0].instructions), /^[a-f0-9]{64}$/);
+			const legacy = document.sessions.map(session => { const copy = { ...session }; delete copy.instructions; return copy; });
+			await fs.writeFile(file, JSON.stringify({ ...document, sessions: legacy })); f.data.set("llamacpp.coco.sessions.v1", legacy);
+			const second = [user("Q1"), assistant("Visible answer"), user("Q2")];
+			const restored = f.make(); await f.send(restored, [system, ...second]);
+			await f.send(restored, [system, ...second, assistant("Visible answer"), user("Q3")]);
+			assert.match(f.prompts[1], /BASE_LEGACY/); assert.ok(!f.prompts[2].includes("BASE_LEGACY")); assert.strictEqual(f.stats().sessions, 1);
+		} finally { await f.dispose(); }
+	});
 	test("hands off a large fitting history in exactly one native prompt without ACK requests", async () => {
 		const f = await fixture();
 		try {

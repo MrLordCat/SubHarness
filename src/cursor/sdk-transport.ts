@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { resolveProviderSwitchContextTokens, sharedContextBudget } from "../context/provider-handoff";
+import { hostContextSnapshot, updatedInstructionsMessage } from "../providers/host-context";
 import { isProviderSwitch } from "../providers/provider-switch";
 import type { AgentOptions, SendOptions, SDKUserMessage, TokenUsage } from "@cursor/sdk";
 import type { ChatModelSource } from "../model-sources/source-routing";
@@ -157,13 +158,12 @@ export class CursorSdkTransport implements vscode.Disposable {
 				}
 			}
 			if (bridge.isTerminal) { return; }
-			const host = new Map<string, string>();
-			if (session.deltaStart > 0) {
-				const current = (messages[0]?.content ?? []).filter(part => part instanceof vscode.LanguageModelTextPart).map(part => (part as vscode.LanguageModelTextPart).value).join("");
-				for (const match of current.matchAll(/<(context|environment_info|workspace_info|attachments|reminderInstructions)>[\s\S]*?<\/\1>/g)) { host.set(match[1], match[0]); }
-			}
+			const snapshot = hostContextSnapshot(messages[0]);
+			const host = session.deltaStart > 0 ? snapshot.blocks : new Map<string, string>();
+			const instructionsUpdated = session.deltaStart > 0 && snapshot.instructions !== undefined && snapshot.instructionsDigest !== session.instructions;
+			session.nextInstructions = snapshot.instructionsDigest ?? session.instructions;
 			const replay = cursorRecoveryReplay(messages, session.replayCallIds ?? [], session.deltaStart);
-			const delta = [...(host.size ? [vscode.LanguageModelChatMessage.User(`Current VS Code environment (updated snapshot):\n${[...host.values()].join("\n")}`)] : []), ...replay, ...messages.slice(session.deltaStart)];
+			const delta = [...(instructionsUpdated ? [updatedInstructionsMessage(snapshot.instructions!)] : []), ...(host.size ? [vscode.LanguageModelChatMessage.User(`Current VS Code environment (updated snapshot):\n${[...host.values()].join("\n")}`)] : []), ...replay, ...messages.slice(session.deltaStart)];
 			const input = maximumChars === undefined && !replay.length ? typeof prompt === "function" ? prompt() : prompt : cursorTranscript(delta);
 			const toolChars = JSON.stringify(options.tools ?? []).length;
 			const budget = (maximumChars ?? 550_000) - 49_152 - toolChars;

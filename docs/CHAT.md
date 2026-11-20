@@ -152,6 +152,10 @@ model from the bridge's subagent list. The task runs with the same tools, but
 without its own subagents. Its card shows the model, the task and the current
 step; expand it for the prompt, every step and the report.
 
+Models from API profiles (Cursor and other OpenAI-compatible gateways) are
+listed last and marked as paid per use; local llama.cpp servers stay in the
+local group.
+
 ## Long chats
 
 When another model takes over a chat that is larger than

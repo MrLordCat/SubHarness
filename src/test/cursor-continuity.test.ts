@@ -307,6 +307,21 @@ suite("Cursor conversation continuity", () => {
 			assert.strictEqual(f.created.length, 1); assert.match(f.sent[1].input.text, /terminal NEW/); assert.ok(!f.sent[1].input.text.includes("RULE"));
 		} finally { await f.dispose(); }
 	});
+	test("resends changed system instructions once to a continuing native agent", async () => {
+		const f = await fixture();
+		try {
+			const system = (base: string) => new vscode.LanguageModelChatMessage(3 as vscode.LanguageModelChatMessageRole, [new vscode.LanguageModelTextPart(`${base}\n<environment_info>ENV</environment_info>`)]);
+			await f.respond([system("BASE_V1"), user("FIRST")]);
+			const second = [user("FIRST"), assistant("Cursor continued."), user("SECOND")];
+			await f.respond([system("BASE_V1"), ...second]);
+			assert.ok(!f.sent[1].input.text.includes("BASE_V1")); assert.ok(!f.sent[1].input.text.includes("Current VS Code instructions"));
+			const third = [...second, assistant("Cursor continued."), user("THIRD")];
+			f.reload(); await f.respond([system("BASE_V2"), ...third]);
+			assert.match(f.sent[2].input.text, /Current VS Code instructions \(updated/); assert.match(f.sent[2].input.text, /BASE_V2/); assert.ok(!f.sent[2].input.text.includes("FIRST"));
+			await f.respond([system("BASE_V2"), ...third, assistant("Cursor continued."), user("FOURTH")]);
+			assert.ok(!f.sent[3].input.text.includes("BASE_V2")); assert.strictEqual(f.created.length, 1);
+		} finally { await f.dispose(); }
+	});
 	test("keeps a warm native agent and sends only new own and foreign-provider turns", async () => {
 		const f = await fixture();
 		try {

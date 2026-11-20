@@ -1,5 +1,6 @@
 import { PROVIDER_VENDOR } from "./constants";
-import { isDeepSeekVisionModel } from "./model-sources/source-routing";
+import { isDeepSeekVisionModel, isLoopbackServerUrl, type ChatModelSource } from "./model-sources/source-routing";
+import { isDeepSeekEndpoint } from "./transport/openai-http";
 
 /**
  * VS Code resolves runSubagent.model with `matchesQualifiedName`: only the
@@ -9,7 +10,10 @@ export function subagentModelReference(label: string): string {
 	return `${label} (${PROVIDER_VENDOR})`;
 }
 
-type SubagentProvider = "local" | "deepseek" | "codex" | "claude";
+export type SubagentProvider = "local" | "deepseek" | "codex" | "claude" | "api";
+
+/** Advertised catalog order, cheapest first; paid API profiles come last. */
+const SUBAGENT_PROVIDER_ORDER: readonly SubagentProvider[] = ["local", "deepseek", "codex", "claude", "api"];
 
 export interface SubagentModelProfile {
 	id: string;
@@ -21,6 +25,17 @@ export interface SubagentModelProfile {
 	availabilityReason?: string;
 	availabilityCheckedAt?: number;
 	unavailableUntil?: string;
+}
+
+/** Subagent group of an HTTP model source: self-hosted llama.cpp servers are local, DeepSeek is its own tier, other API profiles (Cursor, gateways) are paid per use. */
+export function subagentProviderForSource(source: Pick<ChatModelSource, "protocol" | "serverUrl" | "llamaCppCompat">): "local" | "deepseek" | "api" {
+	if (source.protocol === "deepseek" || isDeepSeekEndpoint(source.serverUrl)) {
+		return "deepseek";
+	}
+	if (source.protocol === "llamacpp" || source.llamaCppCompat === true || isLoopbackServerUrl(source.serverUrl)) {
+		return "local";
+	}
+	return "api";
 }
 
 const catalogs = new Map<SubagentProvider, SubagentModelProfile[]>();
@@ -65,8 +80,21 @@ export function setSubagentModelProfiles(
 }
 
 export function getSubagentModelProfiles(): SubagentModelProfile[] {
-	return ["local", "deepseek", "codex", "claude"]
-		.flatMap(provider => catalogs.get(provider as SubagentProvider) ?? []);
+	// API catalogs can expose the same display name more than once (for example
+	// two Cursor ids named "Auto"); a subagent is selected by label, so keep the
+	// first one instead of advertising a duplicate that can never be chosen.
+	const seenLabels = new Set<string>();
+	const profiles: SubagentModelProfile[] = [];
+	for (const provider of SUBAGENT_PROVIDER_ORDER) {
+		for (const profile of catalogs.get(provider) ?? []) {
+			if (seenLabels.has(profile.label)) {
+				continue;
+			}
+			seenLabels.add(profile.label);
+			profiles.push(profile);
+		}
+	}
+	return profiles;
 }
 
 /** Profiles a subagent may start with now; exhausted subscriptions are left out. */
@@ -172,10 +200,23 @@ function buildBudgetRoutingPolicy(profiles: readonly SubagentModelProfile[]): st
 		}
 		tiers.push(`premium — ${premiumModels.join("; ")}; Sol is excluded from subagent use to conserve premium quota. Use only for repository-wide, cross-file, or high-stakes reasoning the cheaper tiers cannot satisfy`);
 	}
+	if (has("api")) {
+		// Paid API profiles (Cursor and other gateways) bill every request, so
+		// they must never look like another cheap default tier.
+		tiers.push("paid API — models from API profiles (for example Cursor) are billed per use: route there only when the user names the model or no tier above can run the task");
+	}
 	if (tiers.length <= 1) {
 		return "";
 	}
-	return `Budget routing policy — pick the cheapest capable tier and escalate only when it is genuinely insufficient: ${tiers.join("; ")}. Preferred subagent order: local (cheapest, unlimited) → DeepSeek (non-vision reasoning) → Codex Terra → Codex Luna → Claude Opus 5 (last resort).`;
+	const preferredOrder = [
+		"local (cheapest, unlimited)",
+		"DeepSeek (non-vision reasoning)",
+		"Codex Terra",
+		"Codex Luna",
+		"Claude Opus 5 (last resort)",
+		...(has("api") ? ["paid API profiles (only on request)"] : []),
+	].join(" → ");
+	return `Budget routing policy — pick the cheapest capable tier and escalate only when it is genuinely insufficient: ${tiers.join("; ")}. Preferred subagent order: ${preferredOrder}.`;
 }
 
 let _cachedGuidance: string | undefined;

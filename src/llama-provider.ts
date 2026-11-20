@@ -89,7 +89,7 @@ import { LlamaLogSink } from "./logger";
 import { buildMemoryQuery, injectAppendOnlySharedMemoryContext } from "./memory/prompt";
 import { getCurrentWorkspaceScopeId } from "./memory/scope";
 import type { SharedMemoryContextProvider, SharedMemoryPromptContext } from "./memory/types";
-import { setSubagentModelProfiles } from "./subagent-guidance";
+import { setSubagentModelProfiles, subagentProviderForSource } from "./subagent-guidance";
 import {
     createModelSources,
     encodeProviderModelId,
@@ -4060,9 +4060,21 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         }).catch(error => { this.logError("models.source.fetch_error", error, { source: source.key }); })));
 
         const sortedEntries = allEntries.sort((a, b) => a.name.localeCompare(b.name));
-        const localProfiles = sortedEntries
-            .map(entry => ({ entry, parsed: parseProviderModelId(entry.id) }))
-            .filter(({ parsed }) => parsed.sourceKey !== "deepseek" && !parsed.modelId.toLowerCase().includes("deepseek"))
+        // Attribute every discovered model to the profile it came from: a Cursor
+        // or gateway model is billed per use and must not be advertised as local.
+        const sourceByKey = new Map(sources.map(source => [source.key, source] as const));
+        const classifiedEntries = sortedEntries.map(entry => {
+            const parsed = parseProviderModelId(entry.id);
+            const source = parsed.sourceKey ? sourceByKey.get(parsed.sourceKey) : undefined;
+            const provider: "local" | "deepseek" | "api" = source
+                ? subagentProviderForSource(source)
+                : parsed.modelId.toLowerCase().includes("deepseek")
+                    ? "deepseek"
+                    : "local";
+            return { entry, parsed, provider };
+        });
+        const localProfiles = classifiedEntries
+            .filter(({ provider }) => provider === "local")
             .map(({ entry, parsed }) => ({
                 id: entry.id,
                 label: entry.name,
@@ -4074,9 +4086,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     ? "Prefer for narrow, inexpensive, independently verifiable tasks"
                     : "Use for focused local work when subscription budget should be preserved",
             }));
-        const deepSeekProfiles = sortedEntries
-            .map(entry => ({ entry, parsed: parseProviderModelId(entry.id) }))
-            .filter(({ parsed }) => parsed.sourceKey === "deepseek" || parsed.modelId.toLowerCase().includes("deepseek"))
+        const deepSeekProfiles = classifiedEntries
+            .filter(({ provider }) => provider === "deepseek")
             .map(({ entry }) => ({
                 id: entry.id,
                 label: entry.name,
@@ -4089,8 +4100,20 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     ? "Preferred DeepSeek V4 Pro profile for focused complex tasks"
                     : "Use for focused complex tasks that need more reasoning than Qwen",
             }));
+        const apiProfiles = classifiedEntries
+            .filter(({ provider }) => provider === "api")
+            .map(({ entry }) => ({
+                id: entry.id,
+                label: entry.name,
+                provider: "api" as const,
+                availability: "available" as const,
+                availabilityReason: "Model was discovered from a configured API profile",
+                availabilityCheckedAt: Date.now(),
+                useWhen: "Paid API model, billed per use; use only when the user names it or no cheaper tier fits",
+            }));
         setSubagentModelProfiles("local", localProfiles);
         setSubagentModelProfiles("deepseek", deepSeekProfiles);
+        setSubagentModelProfiles("api", apiProfiles);
         return sortedEntries;
     }
 

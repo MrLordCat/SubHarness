@@ -23,6 +23,13 @@ another provider that continued the same Chat. Compatible completed sessions
 resume after a VS Code reload. Rewinding/editing history creates a fresh native
 branch; interrupted tool cycles are cancelled rather than reused.
 
+A continuing session gets only the new entries plus the current environment
+blocks. Since 1.21.35 the bridge also keeps a hash of the system instructions
+(the system message without its environment blocks, for example the chat's
+base rules and AGENTS.md). When they change, they go once more at the start of
+the next entries, marked as replacing the earlier ones. Cursor sessions work
+the same way. Sessions saved by an older version get them once.
+
 Since 1.18.8, `llamacpp.cocoTransport=auto` uses the Snowflake `/code` SDK on
 Node 22.22+ and ACP on older hosts. Explicit `sdk` and `acp` choices are available.
 The CLI owns conversation history; the bridge preserves its native session ID.

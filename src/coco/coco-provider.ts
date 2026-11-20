@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { resolveProviderSwitchContextTokens, resolveSharedContextLimit, sharedContextBudget } from "../context/provider-handoff";
+import { hostContextSnapshot, updatedInstructionsMessage } from "../providers/host-context";
 import { isProviderSwitch } from "../providers/provider-switch";
 import { promptCacheSignalPart, PROMPT_CACHE_OPTION } from "../providers/prompt-cache-signal";
 
@@ -520,16 +521,11 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 				if (effort !== undefined && thinking) {
 					await client.setSessionConfigOption(sessionId, thinking.configId, effort);
 				}
-				const hostBlocks = new Map<string, string>();
-				if (!slot.fresh) {
-					for (const part of messages[0]?.content ?? []) {
-						if (part instanceof vscode.LanguageModelTextPart) {
-							for (const match of part.value.matchAll(/<(context|environment_info|workspace_info|attachments|reminderInstructions)>[\s\S]*?<\/\1>/g)) { hostBlocks.set(match[1], match[0]); }
-						}
-					}
-				}
-				const host = [...hostBlocks.values()].join("\n");
-				const delta = slot.fresh ? messages : [...(host ? [vscode.LanguageModelChatMessage.User(`Current VS Code environment (updated snapshot):\n${host}`)] : []), ...messages.slice(slot.deltaStart)];
+				const snapshot = hostContextSnapshot(messages[0]);
+				const host = slot.fresh ? "" : [...snapshot.blocks.values()].join("\n");
+				const instructionsUpdated = !slot.fresh && snapshot.instructions !== undefined && snapshot.instructionsDigest !== slot.instructions;
+				const delta = slot.fresh ? messages : [...(instructionsUpdated ? [updatedInstructionsMessage(snapshot.instructions!)] : []),
+					...(host ? [vscode.LanguageModelChatMessage.User(`Current VS Code environment (updated snapshot):\n${host}`)] : []), ...messages.slice(slot.deltaStart)];
 				const tokenBudget = Math.min(sharedContextBudget(model.maxInputTokens + model.maxOutputTokens, options.tools),
 					providerSwitched ? resolveProviderSwitchContextTokens() : Number.POSITIVE_INFINITY);
 				const preparingHistory = Date.now();
@@ -546,7 +542,7 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 				metrics.setSession(slot.mode, slot.key, slot.reason, client.transport === "sdk" && transfer.prompt.some(part => part.type === "image") ? "acp (same native session)" : client.transport ?? "acp");
 				this.diagnostic("coco.request.prepared",{
 					requestId:metrics.requestId,modelId,transport:client.transport ?? "acp",sessionMode:slot.mode,reason:slot.reason,
-					sessionPrepareMs,historyPrepareMs,
+					sessionPrepareMs,historyPrepareMs,instructionsUpdated,
 					historyTokenBudget: tokenBudget, estimatedHistoryTokens: transfer.estimatedTokens,
 					toolCount:bridge.clientTools.length,cutToolDescriptions:bridge.cutToolDescriptions,maxSdkWireToolNameLength:Math.max(0,...bridge.clientTools.map(tool => (COCO_SDK_TOOL_PREFIX + tool.name).length)),
 					promptChars:transfer.prompt.reduce((n,part) => n + (part.type === "text" ? part.text.length : 0),0),
@@ -599,7 +595,7 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 				if (bridge.awaitingOutput) {
 					throw new Error(`Coco ended its turn after reasoning without text or a tool call${stopReason ? ` (stop reason: ${stopReason})` : ""}.`);
 				}
-				await this.sessions.checkpoint(slot, anchors);
+				await this.sessions.checkpoint(slot, anchors, snapshot.instructionsDigest);
 			}, progress, token);
 		} catch (error) {
 			this.diagnostic("coco.request.failed",{requestId:metrics.requestId,modelId,transport:client.transport ?? "acp",promptSent:slot.promptSent,error:cocoSdkError(error).message});

@@ -5,6 +5,7 @@ import {
 	enhanceSubagentToolDescription,
 	getSubagentModelProfiles,
 	setSubagentModelProfiles,
+	subagentProviderForSource,
 	withRequiredSubagentModel,
 } from "../subagent-guidance";
 
@@ -175,6 +176,7 @@ suite("subagent model guidance", () => {
 			id: "gpt-5.6-codex", label: "GPT-5.6 Codex", provider: "codex", defaultEffort: "high", useWhen: "Repo work",
 		}]);
 		setSubagentModelProfiles("claude", []);
+		setSubagentModelProfiles("api", []);
 		const guidance = buildSubagentToolGuidance();
 		const cheapest = guidance.indexOf("cheapest —");
 		const mid = guidance.indexOf("mid —");
@@ -189,6 +191,7 @@ suite("subagent model guidance", () => {
 			id: "gpt-5.6-codex", label: "GPT-5.6 Codex", provider: "codex", defaultEffort: "high", useWhen: "Repo work",
 		}]);
 		setSubagentModelProfiles("claude", []);
+		setSubagentModelProfiles("api", []);
 		const guidance = buildSubagentToolGuidance();
 		assert.ok(!guidance.includes("Budget routing policy"));
 		assert.ok(guidance.includes("Never omit runSubagent.model"));
@@ -201,6 +204,7 @@ suite("subagent model guidance", () => {
 		setSubagentModelProfiles("deepseek", []);
 		setSubagentModelProfiles("codex", []);
 		setSubagentModelProfiles("claude", []);
+		setSubagentModelProfiles("api", []);
 		const guidance = buildSubagentToolGuidance();
 		assert.ok(guidance.includes("Vision delegation:"));
 		assert.ok(guidance.includes("The subagent has access to view_image and terminal tools"));
@@ -214,6 +218,7 @@ suite("subagent model guidance", () => {
 		}]);
 		setSubagentModelProfiles("codex", []);
 		setSubagentModelProfiles("claude", []);
+		setSubagentModelProfiles("api", []);
 		const guidance = buildSubagentToolGuidance();
 		assert.ok(!guidance.includes("Vision delegation:"));
 		assert.ok(!guidance.includes("unlimited tokens and no rate limits"), "no local model is promised when none exists");
@@ -229,6 +234,7 @@ suite("subagent model guidance", () => {
 			{ id: "gpt-5.6-terra", label: "GPT-5.6 Terra (Codex)", provider: "codex", useWhen: "Subagent tasks" },
 		]);
 		setSubagentModelProfiles("claude", []);
+		setSubagentModelProfiles("api", []);
 		const profiles = getSubagentModelProfiles();
 		const terraIndex = profiles.findIndex(profile => profile.id === "gpt-5.6-terra");
 		const lunaIndex = profiles.findIndex(profile => profile.id === "gpt-5.6-luna");
@@ -249,8 +255,85 @@ suite("subagent model guidance", () => {
 			id: "gpt-5.6-codex", label: "GPT-5.6 Codex", provider: "codex", defaultEffort: "high", useWhen: "Repo work",
 		}]);
 		setSubagentModelProfiles("claude", []);
+		setSubagentModelProfiles("api", []);
 		const guidance = buildSubagentToolGuidance();
 		assert.ok(guidance.includes("DeepSeek Flash accepts image input"));
 		assert.ok(!guidance.includes("DeepSeek cannot process image input"));
+	});
+
+	test("classifies HTTP model sources into local, DeepSeek and paid API groups", () => {
+		assert.strictEqual(
+			subagentProviderForSource({ protocol: "cursor", serverUrl: "https://api.cursor.com" }),
+			"api",
+			"Cursor models are billed per use"
+		);
+		assert.strictEqual(
+			subagentProviderForSource({ protocol: "openai", serverUrl: "https://gateway.example.com/v1" }),
+			"api",
+			"a remote OpenAI-compatible gateway is a paid API profile"
+		);
+		assert.strictEqual(
+			subagentProviderForSource({ protocol: "openai", serverUrl: "http://127.0.0.1:1234" }),
+			"local",
+			"a loopback endpoint is self-hosted"
+		);
+		assert.strictEqual(
+			subagentProviderForSource({ protocol: "llamacpp", serverUrl: "https://llama.example.com" }),
+			"local",
+			"the llama.cpp protocol marks a self-hosted server"
+		);
+		assert.strictEqual(
+			subagentProviderForSource({ protocol: "openai", serverUrl: "https://gateway.example.com/v1", llamaCppCompat: true }),
+			"local",
+			"llama.cpp behind an OpenAI-compatible gateway is still self-hosted"
+		);
+		assert.strictEqual(
+			subagentProviderForSource({ protocol: "deepseek", serverUrl: "https://api.deepseek.com" }),
+			"deepseek"
+		);
+		assert.strictEqual(
+			subagentProviderForSource({ protocol: "openai", serverUrl: "https://api.deepseek.com" }),
+			"deepseek",
+			"the DeepSeek URL alone identifies the tier"
+		);
+	});
+
+	test("advertises paid API profiles last and as billed per use", () => {
+		setSubagentModelProfiles("local", [{
+			id: "local::qwen3-coder", label: "Qwen 3 Coder", provider: "local", useWhen: "Narrow tasks",
+		}]);
+		setSubagentModelProfiles("deepseek", []);
+		setSubagentModelProfiles("codex", []);
+		setSubagentModelProfiles("claude", []);
+		setSubagentModelProfiles("api", [{
+			id: "cursor::claude-opus-5-5",
+			label: "Opus 5.5 (Cursor)",
+			provider: "api",
+			availability: "available",
+			useWhen: "Paid API model, billed per use; use only when the user names it or no cheaper tier fits",
+		}]);
+		const profiles = getSubagentModelProfiles();
+		assert.deepStrictEqual(profiles.map(profile => profile.provider), ["local", "api"], "paid API profiles come last");
+		const guidance = buildSubagentToolGuidance();
+		assert.ok(guidance.includes("paid API — models from API profiles (for example Cursor) are billed per use"));
+		assert.ok(guidance.includes("route there only when the user names the model or no tier above can run the task"));
+		assert.ok(guidance.includes("paid API profiles (only on request)"));
+		assert.ok(guidance.includes('model="Opus 5.5 (Cursor) (llamacpp)": Paid API model, billed per use'));
+		setSubagentModelProfiles("api", []);
+	});
+
+	test("lists a duplicated API label once", () => {
+		setSubagentModelProfiles("local", []);
+		setSubagentModelProfiles("deepseek", []);
+		setSubagentModelProfiles("codex", []);
+		setSubagentModelProfiles("claude", []);
+		setSubagentModelProfiles("api", [
+			{ id: "cursor::auto-a", label: "Auto", provider: "api", useWhen: "Automatic routing" },
+			{ id: "cursor::auto-b", label: "Auto", provider: "api", useWhen: "Automatic routing" },
+		]);
+		const profiles = getSubagentModelProfiles();
+		assert.strictEqual(profiles.length, 1, "a label can be selected only once");
+		assert.strictEqual(profiles[0].provider, "api");
+		setSubagentModelProfiles("api", []);
 	});
 });

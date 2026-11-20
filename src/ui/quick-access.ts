@@ -1141,6 +1141,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 				profileGroup("deepseek", "DeepSeek", "V4 Pro preferred · high"),
 				profileGroup("codex", "Codex", "high by default"),
 				profileGroup("claude", "Claude", "inherits selected effort"),
+				profileGroup("api", "API profiles", "paid per use · on request"),
 			],
 		});
 
