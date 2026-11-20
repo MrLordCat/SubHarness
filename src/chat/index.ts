@@ -17,7 +17,7 @@ import { ChatPromptSource } from "./prompt/instructions";
 import { ChatSessionStore } from "./session-store";
 import { createChatToolSource } from "./tool-executor";
 import { ChatToolCatalog } from "./tools/catalog";
-import { getSubagentModelProfiles } from "../subagent-guidance";
+import { availableSubagentModelProfiles } from "../subagent-guidance";
 import { createCoreTools } from "./tools/core-tools";
 import { createAskQuestionsTool, createTodoTool } from "./tools/interaction-tools";
 import { createSubagentTool } from "./tools/subagent-tool";
@@ -121,9 +121,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 			...createChatTerminalTools({ manager: terminals, rules: () => configuredDangerousCommandRules(reportInvalidRule) }),
 			createSubagentTool({
 				// The bridge's subagent catalog: cheapest first, premium flagships and exhausted subscriptions left out.
-				models: () => getSubagentModelProfiles()
-					.filter(profile => profile.availability !== "unavailable")
-					.map(profile => ({ id: profile.id, label: profile.label, useWhen: profile.useWhen })),
+				models: () => availableSubagentModelProfiles().map(profile => ({ id: profile.id, label: profile.label, useWhen: profile.useWhen })),
 			}),
 		],
 		state: context.globalState,

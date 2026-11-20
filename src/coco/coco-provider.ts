@@ -548,7 +548,7 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 					requestId:metrics.requestId,modelId,transport:client.transport ?? "acp",sessionMode:slot.mode,reason:slot.reason,
 					sessionPrepareMs,historyPrepareMs,
 					historyTokenBudget: tokenBudget, estimatedHistoryTokens: transfer.estimatedTokens,
-					toolCount:bridge.clientTools.length,maxSdkWireToolNameLength:Math.max(0,...bridge.clientTools.map(tool => (COCO_SDK_TOOL_PREFIX + tool.name).length)),
+					toolCount:bridge.clientTools.length,cutToolDescriptions:bridge.cutToolDescriptions,maxSdkWireToolNameLength:Math.max(0,...bridge.clientTools.map(tool => (COCO_SDK_TOOL_PREFIX + tool.name).length)),
 					promptChars:transfer.prompt.reduce((n,part) => n + (part.type === "text" ? part.text.length : 0),0),
 					imageCount:transfer.prompt.filter(part => part.type === "image").length,compacted:Boolean(transfer.compacted),
 				});

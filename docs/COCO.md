@@ -87,6 +87,12 @@ for the turn, including private Copilot tools, to the native Chat tool loop.
 Chat controls approvals (including Allow All), execution cards and results.
 The same ACP prompt stays alive while Chat executes each tool and returns its
 result. Tool aliases distinguish these client tools from Cortex built-ins.
+The Cortex CLI shows the model only the first 500 characters of a tool
+description. The bridge sends each description with collapsed whitespace and,
+when it is longer, cut at the last sentence end that fits. The bridge chat's
+`subagent` tool also lists the model names in its `model` parameter, because
+the list at the end of its description would be cut. Log entry
+`coco.request.prepared` counts the cut descriptions (`cutToolDescriptions`).
 The bridge stops built-in Cortex actions that attempt to bypass Chat, reporting
 the problem in Chat instead of opening a separate permission picker.
 Cortex's own system prompt asks Coco to sign commits and pull requests with

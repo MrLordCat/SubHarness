@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/ai-agent-bridge.git"
 	},
-	"version": "1.21.33",
+	"version": "1.21.34",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -974,7 +974,7 @@
 				"name": "llamacpp_store_memory",
 				"displayName": "Store Shared Memory",
 				"toolReferenceName": "storeSharedMemory",
-				"modelDescription": "Create or update a durable user-approved memory entry. You MUST choose scope explicitly: global only for information useful to agents in every project, or workspace for information useful only in the current project. Prefer workspace for repository paths, commands, architecture, decisions, and project-specific environment facts. Use global for stable cross-project user preferences and reusable workflows. Do not store secrets, transient chat details, or guesses.",
+				"modelDescription": "Create or update a durable, user-approved memory entry. Choose scope explicitly: workspace for this project's paths, commands, architecture, decisions and environment; global only for what helps in every project, such as stable user preferences and reusable workflows. Do not store secrets, transient chat details or guesses.",
 				"userDescription": "Save durable context globally or only for the current project.",
 				"canBeReferencedInPrompt": true,
 				"icon": "$(database)",
@@ -1129,7 +1129,7 @@
 				"name": "llamacpp_coco_run_in_terminal",
 				"displayName": "Run in Coco Terminal",
 				"toolReferenceName": "cocoRunInTerminal",
-				"modelDescription": "Run a shell command in a normal interactive VS Code terminal visible in the terminal panel. Automatically reuses the last idle Coco terminal and preserves its shell state. When cwd names another directory the reused terminal changes into it, so a chat does not open one terminal per command; a new terminal is created only when none is idle or newTerminal is true. Prefer sync for finite commands (waits up to timeoutMs, default 120000); async for servers/watchers (returns after 1 second). Returns terminalId, state, exitCode and bounded output. If state is running, read that terminal instead of rerunning the command. The user can type, press Ctrl+C, or close it; respect their interruption. Uses the configured default terminal shell; shell integration must be enabled.",
+				"modelDescription": "Run a shell command in a VS Code terminal the user can see. Reuses the last idle Coco terminal and its shell state; cwd changes its directory first, and a new terminal opens only when none is idle or newTerminal is true. mode sync waits up to timeoutMs (default 120000); async returns after a second, for servers and watchers. If state is running, read that terminal instead of rerunning. The user may type, interrupt or close it; respect that. Shell integration must be enabled.",
 				"userDescription": "Run a command in an interactive VS Code terminal.",
 				"canBeReferencedInPrompt": true,
 				"icon": "$(terminal)",
@@ -1280,7 +1280,7 @@
 				"name": "llamacpp_wait_for_terminal",
 				"displayName": "Wait for Terminal Command",
 				"toolReferenceName": "waitForTerminal",
-				"modelDescription": "Wait until the next terminal command finishes. Call this right after starting a command (e.g. run_in_terminal) instead of sleeping with a guessed duration; the tool returns as soon as a terminal command notification arrives. Returns the command line, exit code and duration. timeoutMs is only a safety net (default 10 min). Do not call this tool for a command that already finished - no future notification will arrive and only the safety timeout would resolve.",
+				"modelDescription": "Wait until the next terminal command finishes; returns its command line, exit code and duration. Call it right after starting a command instead of sleeping for a guessed time. timeoutMs is only a safety net (default 10 min). Do not call it for a command that already finished: no notification will arrive, so only the timeout would end the wait.",
 				"userDescription": "Wait for a running terminal command finished notification.",
 				"canBeReferencedInPrompt": true,
 				"icon": "$(watch)",

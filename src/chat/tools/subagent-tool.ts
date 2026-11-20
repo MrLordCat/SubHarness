@@ -4,10 +4,9 @@ import { CHAT_TOOL_GROUPS, type ChatTool, type SubagentModelOption, type Subagen
 export const SUBAGENT_TOOL_NAME = "subagent";
 
 const DESCRIPTION_HEAD = [
-	"Delegate one bounded, independently verifiable subtask to another model that works with the same workspace tools.",
-	"The subagent starts without this conversation: put everything it needs into prompt (goal, relevant files, constraints, what to change or only report, the expected output).",
-	"It returns only its final report; its file changes join the same Keep/Undo set.",
-	"Pick the cheapest model that can do the task reliably and check its report before relying on it.",
+	"Delegate one bounded, independently verifiable subtask to the cheapest model that can do it reliably; it gets the same workspace tools.",
+	"It starts without this conversation, so the prompt must hold everything: goal, files, constraints, whether to change or only report, the expected output.",
+	"It returns only its final report, and its file changes join the same Keep/Undo set; check the report before relying on it.",
 ].join(" ");
 
 export interface SubagentToolOptions {

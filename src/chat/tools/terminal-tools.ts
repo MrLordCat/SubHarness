@@ -72,7 +72,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 		{
 			name: "run_in_terminal",
 			group: CHAT_TOOL_GROUPS.terminal,
-			description: "Run a shell command in an interactive VS Code terminal that the user can see. Reuses the last idle chat terminal and keeps its shell state; when cwd names another directory the terminal changes into it first. Use mode sync for finite commands (waits up to timeoutMs, default 120000) and async for servers and watchers (returns after about a second). Returns terminalId, state, exitCode and bounded output; if state is running, read that terminal instead of rerunning. Uses the default terminal shell (PowerShell on Windows).",
+			description: "Run a shell command in a VS Code terminal the user can see. Reuses the last idle chat terminal and its shell state; cwd changes its directory first. mode sync waits up to timeoutMs (default 120000); async returns after about a second, for servers and watchers. If the result's state is running, read that terminal instead of rerunning.",
 			inputSchema: {
 				type: "object",
 				properties: {

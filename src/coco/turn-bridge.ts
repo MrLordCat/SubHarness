@@ -3,7 +3,8 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import type { CocoPermissionRequest } from "./acp-client";
 import { DelegatedTurnState } from "../tools/delegated-turn-state";
-import { enhanceSubagentToolDescription, withRequiredSubagentModel } from "../subagent-guidance";
+import { SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
+import { availableSubagentModelProfiles, enhanceSubagentToolDescription, withRequiredSubagentModel } from "../subagent-guidance";
 import { stripCocoAttributionFromInput } from "./attribution";
 import { CocoResponseStream } from "./response-stream";
 import { selectCocoChatTools } from "./terminal-tools";
@@ -28,6 +29,24 @@ export const COCO_TOOL_IMAGE_LIMITS = Object.freeze({ count: 4, bytes: 4 * 1024 
  * Each round costs one native turn: Coco ends its turn to receive the image, then continues.
  */
 export const COCO_TOOL_IMAGE_ROUNDS = 8;
+
+/** Cortex CLI shows the model only this many characters of a client tool description. */
+export const COCO_TOOL_DESCRIPTION_LIMIT = 500;
+
+/** Fits a description into the CLI budget, cutting at a sentence end when one is close enough to it. */
+export function fitCocoToolDescription(text: string, limit = COCO_TOOL_DESCRIPTION_LIMIT): string {
+	const flat = text.replace(/\s+/g, " ").trim();
+	if (flat.length <= limit) { return flat; }
+	for (let index = limit - 1; index >= 0; index--) {
+		const endsSentence = flat[index] === "." || flat[index] === "!" || flat[index] === "?";
+		if (!endsSentence || index + 1 !== flat.length && flat[index + 1] !== " ") { continue; }
+		if (index + 1 >= limit / 2) { return flat.slice(0, index + 1); }
+		break;
+	}
+	const head = flat.slice(0, limit - 1).replace(/\s+$/, "");
+	const space = head.lastIndexOf(" ");
+	return `${space > 0 ? head.slice(0, space).replace(/\s+$/, "") : head}…`;
+}
 
 /**
  * Image parts of a tool result, as prompt blocks. The CLI turns every client-tool result into text
@@ -80,6 +99,21 @@ function hasVisibleText(update: JsonObject): boolean {
 	return update.sessionUpdate === "agent_message_chunk" && typeof content?.text === "string" && content.text.trim().length > 0;
 }
 
+/** The CLI cuts the description before the model list, so the names go into the parameter. */
+function cocoSubagentSchema(tool: vscode.LanguageModelChatTool): object | undefined {
+	const schema = tool.inputSchema as JsonObject | undefined;
+	const properties = schema?.properties as JsonObject | undefined;
+	const model = properties?.model as JsonObject | undefined;
+	if (tool.name !== SUBAGENT_TOOL_NAME || !schema || typeof schema !== "object" || Array.isArray(schema)
+		|| !properties || typeof properties !== "object" || Array.isArray(properties)
+		|| !model || typeof model !== "object" || Array.isArray(model) || Array.isArray(model.enum) && model.enum.length > 0) {
+		return undefined;
+	}
+	const labels = availableSubagentModelProfiles().map(profile => JSON.stringify(profile.label));
+	if (labels.length === 0) { return undefined; }
+	return { ...schema, properties: { ...properties, model: { ...model, description: `Exact model name, one of: ${labels.join(", ")}.` } } };
+}
+
 /** Keep native Chat call IDs and their ACP promises alive across model-provider requests. */
 export class CocoTurnBridge implements vscode.Disposable {
 	private readonly tools = new Map<string, vscode.LanguageModelChatTool>();
@@ -124,10 +158,18 @@ export class CocoTurnBridge implements vscode.Disposable {
 	get clientTools(): JsonObject[] {
 		return [...this.tools].map(([alias, tool]) => ({
 			name: alias,
-			description: enhanceSubagentToolDescription(tool.name,
-				`VS Code Chat tool ${tool.name}. ${tool.description}`).slice(0, 8_000),
-			inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
+			description: fitCocoToolDescription(enhanceSubagentToolDescription(tool.name, tool.description)),
+			inputSchema: cocoSubagentSchema(tool) ?? tool.inputSchema ?? { type: "object", properties: {} },
 		}));
+	}
+
+	/** How many advertised descriptions the CLI would cut, after whitespace collapsing. */
+	get cutToolDescriptions(): number {
+		let cut = 0;
+		for (const tool of this.tools.values()) {
+			if (enhanceSubagentToolDescription(tool.name, tool.description).replace(/\s+/g, " ").trim().length > COCO_TOOL_DESCRIPTION_LIMIT) { cut++; }
+		}
+		return cut;
 	}
 
 	get isTerminal(): boolean { return this.terminal; }

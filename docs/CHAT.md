@@ -65,7 +65,8 @@ the input as **Todos done/total**; click it for the whole list. With
 input and waits: pick an option, type an answer, or **Skip**. Sending a message
 instead also skips the questions, and the agent reads your message next.
 
-The agent can also look for tools you have not turned on. `list_tools` shows
+The agent can also look for tools you have not turned on; its instructions
+tell it to do so when the enabled tools are not enough. `list_tools` shows
 every tool the chat can offer, including disabled MCP and extension tools, and
 `request_tools` asks you to enable some of them: a card lists the tools with
 the agent's reason, all checked. **Enable** turns on the ones you leave

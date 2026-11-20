@@ -3,7 +3,8 @@ import * as vscode from "vscode";
 import { CocoAcpClient } from "../coco/acp-client";
 import { CocoChatModelProvider } from "../coco/coco-provider";
 import { mapCocoModel } from "../coco/model-adapter";
-import { CocoTurnBridge, collectCocoToolResults, convertCocoToolResult } from "../coco/turn-bridge";
+import { COCO_TOOL_DESCRIPTION_LIMIT, CocoTurnBridge, collectCocoToolResults, convertCocoToolResult, fitCocoToolDescription } from "../coco/turn-bridge";
+import { setSubagentModelProfiles } from "../subagent-guidance";
 import { CompositeChatModelProvider } from "../composite-provider";
 
 suite("Coco native Chat tools", () => {
@@ -346,5 +347,59 @@ suite("Coco native Chat tools", () => {
 			await provider.provideLanguageModelChatResponse(model, continuation(callFrom(parts[1]), "two"), options, { report: () => undefined }, token.token);
 			assert.strictEqual(spawns, 2);
 		} finally { provider.dispose(); token.dispose(); }
+	});
+});
+
+suite("Coco client tool descriptions", () => {
+	test("fits a description into the CLI budget on a sentence end or a word boundary", () => {
+		assert.strictEqual(fitCocoToolDescription("a\n\n  b"), "a b");
+		const sentences = "This sentence explains the tool. ".repeat(40);
+		const fitted = fitCocoToolDescription(sentences);
+		assert.ok(fitted.length <= COCO_TOOL_DESCRIPTION_LIMIT);
+		assert.ok(fitted.endsWith("."), "a sentence end close enough to the limit wins");
+		assert.ok(sentences.startsWith(fitted), "the fitted text is a prefix of the collapsed text");
+		const words = fitCocoToolDescription("word ".repeat(300));
+		assert.ok(words.length <= COCO_TOOL_DESCRIPTION_LIMIT);
+		assert.ok(words.endsWith("…"), "a text without sentence ends is cut at a word boundary");
+	});
+
+	test("advertises short descriptions without the chat prefix and counts the cuts", () => {
+		const bridge = new CocoTurnBridge([{ name: "long_tool", description: "Sentence one. ".repeat(200), inputSchema: { type: "object" } }], () => undefined);
+		try {
+			const descriptions = bridge.clientTools.map(candidate => String(candidate.description));
+			assert.strictEqual(descriptions.length, 1);
+			for (const description of descriptions) {
+				assert.ok(description.length <= COCO_TOOL_DESCRIPTION_LIMIT);
+				assert.ok(!description.startsWith("VS Code Chat tool"));
+			}
+			assert.strictEqual(bridge.cutToolDescriptions, 1);
+		} finally { bridge.dispose(); }
+	});
+
+	test("names the available subagent models in the model parameter without changing the caller's schema", () => {
+		setSubagentModelProfiles("deepseek", [
+			{ id: "deepseek::flash", label: "deepseek-flash (DeepSeek)", provider: "deepseek", useWhen: "cheap", availability: "available" },
+			{ id: "deepseek::pro", label: "deepseek-pro (DeepSeek)", provider: "deepseek", useWhen: "hard", availability: "unavailable" },
+		]);
+		const inputSchema = {
+			type: "object",
+			properties: { model: { type: "string", description: "x" }, prompt: { type: "string" } },
+			required: ["model"],
+		};
+		const bridge = new CocoTurnBridge([{ name: "subagent", description: "Delegate.", inputSchema }], () => undefined);
+		const other = new CocoTurnBridge([{ name: "read_file", description: "Read a file.", inputSchema }], () => undefined);
+		try {
+			const schema = bridge.clientTools[0].inputSchema as { properties: { model: { description: string }; prompt: unknown }; required: unknown };
+			assert.match(schema.properties.model.description, /"deepseek-flash \(DeepSeek\)"/);
+			assert.doesNotMatch(schema.properties.model.description, /deepseek-pro/);
+			assert.deepStrictEqual(schema.properties.prompt, { type: "string" });
+			assert.deepStrictEqual(schema.required, ["model"]);
+			assert.strictEqual(inputSchema.properties.model.description, "x", "the caller's schema is not mutated");
+			assert.deepStrictEqual(other.clientTools[0].inputSchema, inputSchema, "only the subagent tool gains the model names");
+		} finally {
+			other.dispose();
+			bridge.dispose();
+			setSubagentModelProfiles("deepseek", []);
+		}
 	});
 });

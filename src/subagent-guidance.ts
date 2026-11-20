@@ -69,6 +69,11 @@ export function getSubagentModelProfiles(): SubagentModelProfile[] {
 		.flatMap(provider => catalogs.get(provider as SubagentProvider) ?? []);
 }
 
+/** Profiles a subagent may start with now; exhausted subscriptions are left out. */
+export function availableSubagentModelProfiles(): SubagentModelProfile[] {
+	return getSubagentModelProfiles().filter(profile => profile.availability !== "unavailable");
+}
+
 function isSubagentToolName(name: string): boolean {
 	const normalized = name.toLowerCase().replace(/[^a-z0-9]/g, "");
 	return normalized === "runsubagent"

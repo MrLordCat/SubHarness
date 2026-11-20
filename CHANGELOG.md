@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.21.34 (development patch) - 2026-11-20
+
+- Fixed: Coco saw only the first 500 characters of each tool description (a
+  Cortex CLI limit), so long ones stopped mid-word and the bridge chat's
+  `subagent` tool lost its whole model list. Descriptions now go without the
+  "VS Code Chat tool …" prefix, with collapsed whitespace, and a longer one is
+  cut at the last sentence end that fits. Under Coco the `subagent` tool names
+  its models in the `model` parameter.
+- Changed: shorter descriptions for the chat's `run_in_terminal`, `subagent`
+  and the extension's `llamacpp_coco_run_in_terminal`,
+  `llamacpp_wait_for_terminal` and `llamacpp_store_memory`; every one fits in
+  500 characters, and a test keeps it so.
+- Changed: the bridge chat's instructions tell the agent to use `list_tools`
+  and `request_tools` when the enabled tools are not enough; subagents are told
+  they cannot enable tools. Coco's policy does the same when those tools are
+  offered, and otherwise still asks it to explain the limitation.
+
 ## 1.21.33 (development patch) - 2026-11-20
 
 - Fixed: the bridge chat never showed a prompt cache hit for Coco models
