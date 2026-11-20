@@ -266,6 +266,8 @@ suite("Chat webview tool call descriptions", () => {
 			{ title: "Read message.tsx", detail: "lines 10–20" },
 		);
 		assert.deepStrictEqual(describeToolCall("read_file", { filePath: "C:\\work\\a\\store.ts" }), { title: "Read store.ts" });
+		assert.deepStrictEqual(describeToolCall("view_image", { filePath: "docs/screens/shot.png" }), { title: "Viewed shot.png" });
+		assert.deepStrictEqual(describeToolCall("view_image", {}), { title: "view_image", detail: "{}" });
 	});
 
 	test("describes directory and file searches", () => {

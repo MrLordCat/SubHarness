@@ -1,4 +1,13 @@
 import type * as vscode from "vscode";
+import type { ChatToolImage } from "../shared/protocol";
+
+export interface ChatToolOutput {
+	text: string;
+	images?: ChatToolImage[];
+}
+
+/** Largest image a tool result may carry; view_image and external tools share it. */
+export const MAX_IMAGE_BYTES = 3_750_000;
 
 /** Shown to the user before a call that the approval policy holds back. */
 export interface ChatToolConfirmation {
@@ -44,7 +53,7 @@ export interface ChatTool {
 	needsConfirmation?(input: unknown): ChatToolConfirmation | undefined;
 	/** False hides the tool from the model and the picker, e.g. when no model can serve it. */
 	available?(): boolean;
-	invoke(input: unknown, token: vscode.CancellationToken, context?: ChatToolInvokeContext): Promise<string>;
+	invoke(input: unknown, token: vscode.CancellationToken, context?: ChatToolInvokeContext): Promise<string | ChatToolOutput>;
 }
 
 export const CHAT_TOOL_GROUPS = {

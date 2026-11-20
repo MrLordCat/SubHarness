@@ -11,6 +11,14 @@ export function formatTokens(value: number): string {
 	return `${Math.round(value)}`;
 }
 
+/** 512 → "512 B", 41_000 → "40.0 KB", 3_750_000 → "3.6 MB". */
+export function formatBytes(value: number): string {
+	if (value < 1024) {
+		return `${Math.round(value)} B`;
+	}
+	return value < 1024 * 1024 ? `${(value / 1024).toFixed(1)} KB` : `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** Prompt tokens of the last reply over the selected model's window; absent until both are known. */
 export function contextIndicator(latestUsage: ChatUsage | undefined, models: ChatModelGroup[], selectedModelId: string | undefined): string | undefined {
 	const promptTokens = latestUsage?.promptTokens;
@@ -149,6 +157,10 @@ export function describeToolCall(name: string, input: unknown): ToolCallDescript
 			case "list_dir": {
 				const path = textField(record, "path");
 				return { title: `Listed ${path ?? "workspace"}` };
+			}
+			case "view_image": {
+				const file = textField(record, "filePath");
+				return file === undefined ? fallbackDescription(name, input) : { title: `Viewed ${baseName(file)}` };
 			}
 			case "file_search": {
 				const query = textField(record, "query");

@@ -6,7 +6,7 @@ import { createChatToolSource, DENIED_TOOL_RESULT } from "../chat/tool-executor"
 import { ChatToolCatalog, isCopilotOnlyTool, TOOL_OVERRIDES_KEY, type ToolRegistry } from "../chat/tools/catalog";
 import { compileDangerousCommandRules, DEFAULT_DANGEROUS_COMMANDS, findDangerousCommand } from "../chat/tools/danger";
 import { createChatTerminalTools } from "../chat/tools/terminal-tools";
-import type { ChatTool } from "../chat/tools/types";
+import { MAX_IMAGE_BYTES, type ChatTool, type ChatToolOutput } from "../chat/tools/types";
 import type { CocoTerminalRunInput, CocoTerminalSnapshot } from "../coco/terminal-manager";
 
 const RULES = compileDangerousCommandRules(DEFAULT_DANGEROUS_COMMANDS);
@@ -144,6 +144,11 @@ function fakeRegistry(
 
 const token = (): vscode.CancellationToken => new vscode.CancellationTokenSource().token;
 
+async function text(result: Promise<string | ChatToolOutput>): Promise<string> {
+	const value = await result;
+	return typeof value === "string" ? value : value.text;
+}
+
 suite("chat tool policy", () => {
 	test("default rules hold every dangerous command", () => {
 		const missed = DANGEROUS.filter(command => !findDangerousCommand(command, RULES));
@@ -228,7 +233,7 @@ suite("chat tool policy", () => {
 		assert.strictEqual(await run.invoke({ command: "noisy", maxChars: 500 }, token()),
 			"Terminal: Chat 2 (terminalId: term-2)\nState: running\nOutput (the last 500 characters; earlier output was cut, so redirect long output to a file and read it with read_file):\ntail");
 		assert.deepStrictEqual(calls[0], ["run", 500]);
-		assert.match(await read.invoke({ terminalId: "term-2", maxChars: 500 }, token()), /the last 500 characters/);
+		assert.match(await text(read.invoke({ terminalId: "term-2", maxChars: 500 }, token())), /the last 500 characters/);
 		assert.deepStrictEqual(calls[1], ["read", "term-2", undefined, 500]);
 
 		const empty: CocoTerminalSnapshot = {
@@ -249,9 +254,9 @@ suite("chat tool policy", () => {
 		const tools = new Map(terminalTools(snapshot, calls).map(tool => [tool.name, tool]));
 		const send = tools.get("send_to_terminal"), kill = tools.get("kill_terminal");
 		assert.ok(send); assert.ok(kill);
-		assert.match(await send.invoke({ terminalId: "term-4", text: "y" }, token()), /the last 12,000 characters/);
+		assert.match(await text(send.invoke({ terminalId: "term-4", text: "y" }, token())), /the last 12,000 characters/);
 		assert.deepStrictEqual(calls[0], ["send", "term-4", "y", true]);
-		assert.match(await kill.invoke({ terminalId: "term-4" }, token()), /the last 12,000 characters/);
+		assert.match(await text(kill.invoke({ terminalId: "term-4" }, token())), /the last 12,000 characters/);
 		assert.deepStrictEqual(calls[1], ["kill", "term-4"]);
 	});
 
@@ -292,10 +297,30 @@ suite("chat tool policy", () => {
 		const catalog = new ChatToolCatalog({ builtins: [], state: new FakeMemento(), registry });
 		await catalog.setEnabled(["mcp_github_search"], true);
 		const tools = new Map(catalog.enabledTools().map(tool => [tool.name, tool]));
-		assert.strictEqual(await tools.get("llamacpp_store_memory")?.invoke({ title: "t" }, token()), "bridge ran");
+		assert.deepStrictEqual(await tools.get("llamacpp_store_memory")?.invoke({ title: "t" }, token()), { text: "bridge ran" });
 		assert.deepStrictEqual(bridgeInput, { title: "t" });
-		assert.strictEqual(await tools.get("mcp_github_search")?.invoke({}, token()), "external mcp_github_search");
+		assert.deepStrictEqual(await tools.get("mcp_github_search")?.invoke({}, token()), { text: "external mcp_github_search" });
 		assert.deepStrictEqual(registry.invoked, ["mcp_github_search"]);
+	});
+
+	test("external tool images pass through and oversized ones stay omitted text", async () => {
+		const bytes = Buffer.from([1, 2, 3]);
+		const registry: ToolRegistry = {
+			tools: () => [info("mcp_image"), info("mcp_oversized")],
+			invoke: async name => name === "mcp_image"
+				? new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart("look"), vscode.LanguageModelDataPart.image(bytes, "image/png")])
+				: new vscode.LanguageModelToolResult([vscode.LanguageModelDataPart.image(new Uint8Array(MAX_IMAGE_BYTES + 1), "image/png")]),
+			local: () => undefined,
+		};
+		const catalog = new ChatToolCatalog({ builtins: [], state: new FakeMemento(), registry });
+		await catalog.setEnabled(["mcp_image", "mcp_oversized"], true);
+		const tools = new Map(catalog.enabledTools().map(tool => [tool.name, tool]));
+		const output = await tools.get("mcp_image")?.invoke({}, token());
+		assert.ok(typeof output === "object" && output !== null);
+		assert.strictEqual(output.text, "look");
+		assert.deepStrictEqual(output.images, [{ mimeType: "image/png", data: bytes.toString("base64"), byteLength: 3 }]);
+		const oversized = await tools.get("mcp_oversized")?.invoke({}, token());
+		assert.strictEqual(typeof oversized === "object" && oversized !== null ? oversized.text : oversized, "[non-text output omitted]");
 	});
 
 	test("Copilot and chat-session tools disappear from groups, enabled tools and toggles", async () => {

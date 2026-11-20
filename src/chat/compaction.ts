@@ -153,10 +153,12 @@ export function toOpenAIMessages(messages: readonly ChatMessage[]): OpenAIChatMe
 				case "toolCall":
 					calls.push({ id: part.callId, type: "function", function: { name: part.name, arguments: stringifyInput(part.input) } });
 					break;
-				case "toolResult":
+				case "toolResult": {
 					flush();
-					converted.push({ role: "tool", tool_call_id: part.callId, content: part.text });
+					const images = (part.images ?? []).map(image => `[image: ${image.name ?? image.mimeType}]`);
+					converted.push({ role: "tool", tool_call_id: part.callId, content: [part.text, ...images].filter(text => text.length > 0).join("\n") });
 					break;
+				}
 				default:
 					break;
 			}

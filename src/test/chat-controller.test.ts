@@ -10,7 +10,7 @@ import type { ChatCompactionPlan } from "../chat/compaction";
 import { compactionSummaryText } from "../chat/lm-messages";
 import { ChatSessionStore } from "../chat/session-store";
 import { groupModels } from "../chat/shared/model-groups";
-import { applyHostUpdate, WEBVIEW_THINKING_PREVIEW_CHARS, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatAttachment, type ChatChangeSet, type ChatMessage, type ChatProviderQuota, type ChatToolGroup, type HostMessage } from "../chat/shared/protocol";
+import { applyHostUpdate, WEBVIEW_THINKING_PREVIEW_CHARS, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatAttachment, type ChatChangeSet, type ChatMessage, type ChatProviderQuota, type ChatToolGroup, type ChatToolImage, type HostMessage } from "../chat/shared/protocol";
 import { createChatToolSource, DENIED_TOOL_RESULT, type ChatToolSource } from "../chat/tool-executor";
 import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
 import type { ChatTool } from "../chat/tools/types";
@@ -234,7 +234,7 @@ interface Harness {
 	store: ChatSessionStore;
 }
 
-function fakeTools(handler: (name: string, input: unknown) => { text: string; isError: boolean }): { executor: ChatToolSource; invocations: Array<{ name: string; input: unknown }> } {
+function fakeTools(handler: (name: string, input: unknown) => { text: string; isError: boolean; images?: ChatToolImage[] }): { executor: ChatToolSource; invocations: Array<{ name: string; input: unknown }> } {
 	const invocations: Array<{ name: string; input: unknown }> = [];
 	return {
 		invocations,
@@ -749,6 +749,43 @@ suite("chat controller", () => {
 		}
 		assert.strictEqual(persistedResult.text, full);
 		assert.strictEqual(persistedResult.preview, undefined);
+	});
+
+	test("webview views of a tool result keep image labels but never the base64", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-img", "llamacpp_view", {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Seen.")),
+		]);
+		const data = Buffer.from([1, 2, 3]).toString("base64");
+		const current = createHarness(root, backend, fakeTools(() => ({
+			text: "Image a.png",
+			isError: false,
+			images: [{ mimeType: "image/png", data, byteLength: 3, name: "a.png" }],
+		})).executor);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Look" });
+		await waitFor(() => current.webview.ofType("partAdded").some(message => message.part.kind === "toolResult"), "tool result broadcast");
+		const broadcast = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "toolResult");
+		if (!broadcast || broadcast.kind !== "toolResult") {
+			throw new Error("expected a tool result");
+		}
+		assert.deepStrictEqual(broadcast.images, [{ mimeType: "image/png", byteLength: 3, name: "a.png" }]);
+
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "running init");
+		const initResult = current.webview.ofType("init")[0].messages.flatMap(message => message.parts).find(part => part.kind === "toolResult");
+		if (initResult?.kind !== "toolResult") {
+			throw new Error("expected a tool result in init");
+		}
+		assert.deepStrictEqual(initResult.images, [{ mimeType: "image/png", byteLength: 3, name: "a.png" }]);
+
+		await waitFor(() => backend.requests.length === 2, "second request");
+		const sent = backend.requests[1].messages.flatMap(message => message.content).find(part => part instanceof vscode.LanguageModelToolResultPart);
+		assert.ok(sent instanceof vscode.LanguageModelToolResultPart);
+		assert.strictEqual(sent.content.length, 2);
+		const image = sent.content[1];
+		assert.ok(image instanceof vscode.LanguageModelDataPart);
+		assert.strictEqual(image.mimeType, "image/png");
 	});
 
 	test("init trims long thinking to its tail and loads the full text on request", async () => {

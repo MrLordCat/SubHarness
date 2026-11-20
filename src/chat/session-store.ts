@@ -554,7 +554,8 @@ function isChatPart(value: unknown): value is ChatPart {
 		case "toolResult":
 			return typeof value.callId === "string"
 				&& typeof value.text === "string"
-				&& (value.fullLength === undefined || typeof value.fullLength === "number");
+				&& (value.fullLength === undefined || typeof value.fullLength === "number")
+				&& (value.images === undefined || (Array.isArray(value.images) && value.images.every(isChatToolImage)));
 		case "notice":
 			return (value.level === "info" || value.level === "warning" || value.level === "error")
 				&& typeof value.text === "string"
@@ -580,6 +581,14 @@ function isChatPart(value: unknown): value is ChatPart {
 		default:
 			return false;
 	}
+}
+
+function isChatToolImage(value: unknown): boolean {
+	return isRecord(value)
+		&& typeof value.mimeType === "string"
+		&& typeof value.byteLength === "number"
+		&& (value.data === undefined || typeof value.data === "string")
+		&& (value.name === undefined || typeof value.name === "string");
 }
 
 function isSubagentStep(value: unknown): boolean {

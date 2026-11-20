@@ -6,7 +6,7 @@ import { SUBAGENT_TOOL_NAME } from "../tools/subagent-tool";
 import { postMessage } from "./api";
 import { EditComposer } from "./edit-composer";
 import { OPEN_MODEL_PICKER_EVENT } from "./events";
-import { describeToolCall, formatReset, formatTokens, summarizeInput, toolCommand } from "./format";
+import { describeToolCall, formatBytes, formatReset, formatTokens, summarizeInput, toolCommand } from "./format";
 import { Markdown } from "./markdown";
 import type { ChatStore } from "./store";
 
@@ -463,6 +463,9 @@ function ToolResultDetails({ part, messageId, store, report, openByDefault }: To
 		>
 			<summary>{toolResultLabel(part, markdown)}</summary>
 			{markdown ? <div class="tool-report"><Markdown text={part.text} /></div> : <pre class="tool-output">{part.text}</pre>}
+			{part.images?.map((image, index) => (
+				<div class="tool-result-image" key={`${index}-${image.name ?? image.mimeType}`}>🖼 {image.name ?? image.mimeType} · {formatBytes(image.byteLength)}</div>
+			))}
 			{loading && part.preview ? <div class="part-loading">Loading full output…</div> : null}
 		</details>
 	);

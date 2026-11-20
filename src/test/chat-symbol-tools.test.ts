@@ -225,7 +225,8 @@ suite("Chat symbol tools", () => {
 	async function invoke(name: string, input: unknown): Promise<string> {
 		const source = new vscode.CancellationTokenSource();
 		tokens.push(source);
-		return tool(name).invoke(input, source.token);
+		const result = await tool(name).invoke(input, source.token);
+		return typeof result === "string" ? result : result.text;
 	}
 
 	test("list_code_usages uses the line content to pick the occurrence", async () => {

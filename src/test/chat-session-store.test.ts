@@ -410,6 +410,27 @@ suite("Chat session store", () => {
 		assert.deepStrictEqual((await reopened.load(session.id))[0].parts, [valid]);
 	});
 
+	test("round-trips tool result images and drops malformed ones", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		const valid: ChatPart = {
+			kind: "toolResult",
+			callId: "c1",
+			text: "Image a.png",
+			images: [{ mimeType: "image/png", data: "iVBORw0KGgo=", byteLength: 8, name: "a.png" }],
+		};
+		await store.appendMessage(session.id, chatMessage("a1", "assistant", [valid]));
+		await store.flush();
+		const lines = [
+			JSON.stringify({ t: "part", messageId: "a1", part: { kind: "toolResult", callId: "c2", text: "bad size", images: [{ mimeType: "image/png", byteLength: "8" }] } }),
+			JSON.stringify({ t: "part", messageId: "a1", part: { kind: "toolResult", callId: "c3", text: "not a list", images: "png" } }),
+		];
+		await fs.appendFile(path.join(root, `${session.id}.jsonl`), `${lines.join("\n")}\n`, "utf8");
+
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual((await reopened.load(session.id))[0].parts, [valid]);
+	});
+
 	test("endMessage marks an answer complete", async () => {
 		const store = new ChatSessionStore(root);
 		const session = await store.create();

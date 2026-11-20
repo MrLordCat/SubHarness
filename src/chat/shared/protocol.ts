@@ -17,13 +17,22 @@ export interface ChatUsageTotals {
 
 export type ChatTextKind = "text" | "thinking";
 
+export interface ChatToolImage {
+	mimeType: string;
+	/** Base64; left out of webview views. */
+	data?: string;
+	byteLength: number;
+	/** File name or label shown in the chat. */
+	name?: string;
+}
+
 export type ChatPart =
 	/** Only the tail of a long thinking text; the full text loads on request. */
 	| { kind: "text"; text: string; preview?: boolean }
 	| { kind: "thinking"; text: string; preview?: boolean }
 	| { kind: "toolCall"; callId: string; name: string; input: unknown }
 	/** truncated: the model received a cut result; preview: the webview holds only the first WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, fullLength its full length. */
-	| { kind: "toolResult"; callId: string; text: string; isError?: boolean; truncated?: boolean; preview?: boolean; fullLength?: number }
+	| { kind: "toolResult"; callId: string; text: string; isError?: boolean; truncated?: boolean; preview?: boolean; fullLength?: number; images?: ChatToolImage[] }
 	/** Shows Retry when the notice is in the last answer. */
 	| { kind: "notice"; level: "info" | "warning" | "error"; text: string; limit?: ChatLimitInfo; retryable?: boolean }
 	/** Messages before keepFromMessageId reach the model only as this summary. */

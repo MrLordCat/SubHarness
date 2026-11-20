@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import type { ChatMessage, ChatPart } from "./shared/protocol";
+import type { ChatMessage, ChatPart, ChatToolImage } from "./shared/protocol";
 
 const STOPPED_TOOL_RESULT = "Not executed: the turn was stopped before this tool ran.";
 /** LanguageModelChatMessageRole.System is proposed API; the bridge's providers read any other role as system. */
@@ -44,8 +44,14 @@ export function userRequestText(message: ChatMessage): string {
 	return `${context.join("\n")}\n<userRequest>\n${text}\n</userRequest>`;
 }
 
-function toolResult(callId: string, text: string): vscode.LanguageModelToolResultPart {
-	return new vscode.LanguageModelToolResultPart(callId, [new vscode.LanguageModelTextPart(text)]);
+function toolResult(callId: string, text: string, images?: readonly ChatToolImage[]): vscode.LanguageModelToolResultPart {
+	const content: Array<vscode.LanguageModelTextPart | vscode.LanguageModelDataPart> = [new vscode.LanguageModelTextPart(text)];
+	for (const image of images ?? []) {
+		if (image.data !== undefined) {
+			content.push(vscode.LanguageModelDataPart.image(Buffer.from(image.data, "base64"), image.mimeType));
+		}
+	}
+	return new vscode.LanguageModelToolResultPart(callId, content);
 }
 
 function toolInput(input: unknown): object {
@@ -128,7 +134,7 @@ export function renderChatMessage(message: ChatMessage): vscode.LanguageModelCha
 				break;
 			case "toolResult":
 				flushAssistant();
-				results.push(toolResult(part.callId, part.text));
+				results.push(toolResult(part.callId, part.text, part.images));
 				break;
 			default:
 				break;

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { CHAT_TOOL_GROUPS, type ChatTool, type ChatToolConfirmation } from "./types";
+import { CHAT_TOOL_GROUPS, MAX_IMAGE_BYTES, type ChatTool, type ChatToolConfirmation, type ChatToolOutput } from "./types";
 import {
 	displayPath,
 	isInsideWorkspace,
@@ -109,6 +109,76 @@ function readFailure(error: unknown, shown: string): Error {
 	}
 	const message = error instanceof Error ? error.message : String(error);
 	return new Error(`Cannot read ${shown}: ${message}`);
+}
+
+function formatSize(bytes: number): string {
+	if (bytes < 1024) {
+		return `${bytes} B`;
+	}
+	return bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+interface ImageSize {
+	width?: number;
+	height?: number;
+}
+
+function jpegSize(buffer: Buffer): ImageSize {
+	let offset = 2;
+	while (offset + 9 < buffer.length) {
+		if (buffer[offset] !== 0xff || buffer[offset + 1] === 0xff) {
+			offset += 1;
+			continue;
+		}
+		const marker = buffer[offset + 1];
+		if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+			offset += 2;
+			continue;
+		}
+		if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+			return { width: buffer.readUInt16BE(offset + 7), height: buffer.readUInt16BE(offset + 5) };
+		}
+		const length = buffer.readUInt16BE(offset + 2);
+		if (length < 2) {
+			break;
+		}
+		offset += 2 + length;
+	}
+	return {};
+}
+
+function webpSize(buffer: Buffer): ImageSize {
+	const chunk = buffer.toString("latin1", 12, 16);
+	if (chunk === "VP8 " && buffer.length >= 30 && buffer[23] === 0x9d && buffer[24] === 0x01 && buffer[25] === 0x2a) {
+		return { width: buffer.readUInt16LE(26) & 0x3fff, height: buffer.readUInt16LE(28) & 0x3fff };
+	}
+	if (chunk === "VP8L" && buffer.length >= 25 && buffer[20] === 0x2f) {
+		const bits = buffer.readUInt32LE(21);
+		return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
+	}
+	if (chunk === "VP8X" && buffer.length >= 30) {
+		return { width: buffer.readUIntLE(24, 3) + 1, height: buffer.readUIntLE(27, 3) + 1 };
+	}
+	return {};
+}
+
+function imageInfo(buffer: Buffer): (ImageSize & { mimeType: string }) | undefined {
+	if (buffer.length >= 8 && buffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
+		return { mimeType: "image/png", ...(buffer.length >= 24 ? { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) } : {}) };
+	}
+	if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+		return { mimeType: "image/jpeg", ...jpegSize(buffer) };
+	}
+	const head = buffer.toString("latin1", 0, 6);
+	if (head === "GIF87a" || head === "GIF89a") {
+		return { mimeType: "image/gif", ...(buffer.length >= 10 ? { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) } : {}) };
+	}
+	if (buffer.length >= 12 && buffer.toString("latin1", 0, 4) === "RIFF" && buffer.toString("latin1", 8, 12) === "WEBP") {
+		return { mimeType: "image/webp", ...webpSize(buffer) };
+	}
+	return undefined;
 }
 
 export function checkCancellation(token: vscode.CancellationToken): void {
@@ -628,6 +698,48 @@ export function createCoreTools(options: {
 		},
 	};
 
+	const viewImage: ChatTool = {
+		name: "view_image",
+		group: CHAT_TOOL_GROUPS.files,
+		readOnly: true,
+		description: "Shows an image file (PNG, JPEG, GIF or WebP, up to 3.75 MB) to the model, e.g. a screenshot or a diagram in the workspace. Use read_file for text files.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				filePath: { type: "string", description: "Absolute path or a path relative to the workspace folder." },
+			},
+			required: ["filePath"],
+		},
+		async invoke(input: unknown, token: vscode.CancellationToken): Promise<ChatToolOutput> {
+			checkCancellation(token);
+			const record = inputRecord(input);
+			const file = resolveToolPath(record.filePath, roots());
+			const shown = displayPath(file, roots());
+			const stats = await fsp.stat(file).catch((error: unknown) => {
+				throw readFailure(error, shown);
+			});
+			if (stats.isDirectory()) {
+				throw new Error(`${shown} is a directory; use list_dir to list it.`);
+			}
+			if (stats.size > MAX_IMAGE_BYTES) {
+				throw new Error(`${shown} is ${formatSize(stats.size)}; view_image accepts up to 3.75 MB.`);
+			}
+			const buffer = await fsp.readFile(file).catch((error: unknown) => {
+				throw readFailure(error, shown);
+			});
+			checkCancellation(token);
+			const image = imageInfo(buffer);
+			if (!image) {
+				throw new Error(`${shown} is not a PNG, JPEG, GIF or WebP image.`);
+			}
+			const dimensions = image.width !== undefined && image.height !== undefined ? ` (${image.width}×${image.height})` : "";
+			return {
+				text: `Image ${shown}: ${image.mimeType}, ${formatSize(buffer.byteLength)}${dimensions}.`,
+				images: [{ mimeType: image.mimeType, data: buffer.toString("base64"), byteLength: buffer.byteLength, name: path.basename(file) }],
+			};
+		},
+	};
+
 	const listDir: ChatTool = {
 		name: "list_dir",
 		group: CHAT_TOOL_GROUPS.files,
@@ -1099,5 +1211,5 @@ export function createCoreTools(options: {
 		},
 	};
 
-	return [readFile, listDir, fileSearch, grepSearch, createFile, replaceString, multiReplaceString, deleteFile, getErrors];
+	return [readFile, viewImage, listDir, fileSearch, grepSearch, createFile, replaceString, multiReplaceString, deleteFile, getErrors];
 }

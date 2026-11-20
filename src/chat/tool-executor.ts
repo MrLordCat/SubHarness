@@ -1,5 +1,5 @@
 import type * as vscode from "vscode";
-import type { ChatToolGroup } from "./shared/protocol";
+import type { ChatToolGroup, ChatToolImage } from "./shared/protocol";
 import type { ChatTool, ChatToolConfirmation, ChatToolInvokeContext } from "./tools/types";
 
 export interface ChatToolCallContext extends ChatToolInvokeContext {
@@ -10,7 +10,7 @@ export interface ChatToolCallContext extends ChatToolInvokeContext {
 /** What the chat controller needs from the tool layer; groups and setEnabled feed the tool picker. */
 export interface ChatToolSource {
 	readonly tools: readonly vscode.LanguageModelChatTool[];
-	invoke(name: string, input: unknown, token: vscode.CancellationToken, context?: ChatToolCallContext): Promise<{ text: string; isError: boolean }>;
+	invoke(name: string, input: unknown, token: vscode.CancellationToken, context?: ChatToolCallContext): Promise<{ text: string; isError: boolean; images?: ChatToolImage[] }>;
 	groups?(): ChatToolGroup[];
 	setEnabled?(names: readonly string[], enabled: boolean): Promise<void>;
 	/** True when the tool never changes files; unknown tools count as writing. */
@@ -51,7 +51,9 @@ export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSour
 			if (confirmation && !(context && await context.approve(confirmation))) {
 				return { text: DENIED_TOOL_RESULT, isError: true };
 			}
-			return { text: await tool.invoke(input, token, { callId: context?.callId, runSubagent: context?.runSubagent }), isError: false };
+			const output = await tool.invoke(input, token, { callId: context?.callId, runSubagent: context?.runSubagent });
+			const result = typeof output === "string" ? { text: output } : output;
+			return { text: result.text, isError: false, ...(result.images && result.images.length > 0 ? { images: result.images } : {}) };
 		},
 		groups: () => catalog.groups(),
 		setEnabled: (names, enabled) => catalog.setEnabled(names, enabled),

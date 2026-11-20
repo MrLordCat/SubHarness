@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { createCoreTools, findBundledRipgrep } from "../chat/tools/core-tools";
-import type { ChatTool } from "../chat/tools/types";
+import { MAX_IMAGE_BYTES, type ChatTool, type ChatToolOutput } from "../chat/tools/types";
 import { displayPath, isInsideWorkspace, resolveToolPath } from "../chat/tools/workspace-paths";
 
 suite("Chat core tools", () => {
@@ -31,9 +31,14 @@ suite("Chat core tools", () => {
 	}
 
 	async function invoke(name: string, input: unknown): Promise<string> {
+		return (await invokeOutput(name, input)).text;
+	}
+
+	async function invokeOutput(name: string, input: unknown): Promise<ChatToolOutput> {
 		const source = new vscode.CancellationTokenSource();
 		tokens.push(source);
-		return tool(name).invoke(input, source.token);
+		const result = await tool(name).invoke(input, source.token);
+		return typeof result === "string" ? { text: result } : result;
 	}
 
 	test("resolveToolPath resolves absolute and relative paths and rejects bad values", () => {
@@ -87,6 +92,32 @@ suite("Chat core tools", () => {
 		await assert.rejects(invoke("read_file", { filePath: "missing.txt" }), /File not found/);
 		await fsp.mkdir(path.join(tmpDir, "folder"));
 		await assert.rejects(invoke("read_file", { filePath: "folder" }), /use list_dir/);
+	});
+
+	test("view_image returns a PNG as text and base64 image data", async () => {
+		const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+		await fsp.writeFile(path.join(tmpDir, "pixel.png"), png);
+		const output = await invokeOutput("view_image", { filePath: "pixel.png" });
+		assert.strictEqual(output.text, `Image pixel.png: image/png, ${png.byteLength} B (1×1).`);
+		assert.deepStrictEqual(output.images?.map(image => [image.mimeType, image.byteLength, image.name]), [["image/png", png.byteLength, "pixel.png"]]);
+		assert.deepStrictEqual(Buffer.from(output.images?.[0].data ?? "", "base64"), png);
+	});
+
+	test("view_image detects JPEG, GIF and WebP by magic bytes and reads GIF dimensions", async () => {
+		await fsp.writeFile(path.join(tmpDir, "photo.jpeg"), Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]));
+		await fsp.writeFile(path.join(tmpDir, "anim.gif"), Buffer.concat([Buffer.from("GIF89a", "latin1"), Buffer.from([0x02, 0x00, 0x03, 0x00])]));
+		await fsp.writeFile(path.join(tmpDir, "picture.webp"), Buffer.from("RIFF\x10\x00\x00\x00WEBP", "latin1"));
+		assert.match((await invokeOutput("view_image", { filePath: "photo.jpeg" })).text, /^Image photo\.jpeg: image\/jpeg, 6 B\.$/);
+		assert.match((await invokeOutput("view_image", { filePath: "anim.gif" })).text, /: image\/gif, 10 B \(2×3\)\.$/);
+		assert.match((await invokeOutput("view_image", { filePath: "picture.webp" })).text, /: image\/webp, 12 B\.$/);
+	});
+
+	test("view_image rejects text files, missing files and oversized images", async () => {
+		await fsp.writeFile(path.join(tmpDir, "notes.txt"), "plain text", "utf8");
+		await assert.rejects(invoke("view_image", { filePath: "notes.txt" }), /is not a PNG, JPEG, GIF or WebP image/);
+		await assert.rejects(invoke("view_image", { filePath: "missing.png" }), /File not found/);
+		await fsp.writeFile(path.join(tmpDir, "huge.png"), Buffer.alloc(MAX_IMAGE_BYTES + 1));
+		await assert.rejects(invoke("view_image", { filePath: "huge.png" }), /is 3\.6 MB; view_image accepts up to 3\.75 MB/);
 	});
 
 	test("list_dir sorts directories first and marks them with a slash", async () => {

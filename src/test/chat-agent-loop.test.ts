@@ -166,6 +166,32 @@ suite("chat message conversion", () => {
 		]);
 		assert.deepStrictEqual(converted, []);
 	});
+
+	test("renders tool result images as data parts and skips images without data", () => {
+		const bytes = Buffer.from([1, 2, 3, 4]);
+		const converted = toLanguageModelMessages([chatMessage("assistant", [
+			{ kind: "toolCall", callId: "with-image", name: "read", input: {} },
+			{ kind: "toolResult", callId: "with-image", text: "Image", images: [{ mimeType: "image/png", data: bytes.toString("base64"), byteLength: 4, name: "a.png" }] },
+			{ kind: "toolCall", callId: "without-data", name: "read", input: {} },
+			{ kind: "toolResult", callId: "without-data", text: "Image", images: [{ mimeType: "image/png", byteLength: 4, name: "b.png" }] },
+		])]);
+		assert.deepStrictEqual(converted.map(message => message.role), [
+			vscode.LanguageModelChatMessageRole.Assistant,
+			vscode.LanguageModelChatMessageRole.User,
+			vscode.LanguageModelChatMessageRole.Assistant,
+			vscode.LanguageModelChatMessageRole.User,
+		]);
+		const withImage = converted[1].content[0];
+		assert.ok(withImage instanceof vscode.LanguageModelToolResultPart);
+		assert.strictEqual(withImage.content.length, 2);
+		const image = withImage.content[1];
+		assert.ok(image instanceof vscode.LanguageModelDataPart);
+		assert.strictEqual(image.mimeType, "image/png");
+		assert.deepStrictEqual([...image.data], [...bytes]);
+		const withoutData = converted[3].content[0];
+		assert.ok(withoutData instanceof vscode.LanguageModelToolResultPart);
+		assert.strictEqual(withoutData.content.length, 1);
+	});
 });
 
 suite("chat agent loop", () => {
@@ -230,6 +256,43 @@ suite("chat agent loop", () => {
 		const body = resultPart.content[0];
 		assert.ok(body instanceof vscode.LanguageModelTextPart);
 		assert.strictEqual(body.value, "file body");
+	});
+
+	test("carries tool images into the result part and the next request", async () => {
+		const bytes = Buffer.from([9, 8, 7, 6, 5]);
+		const fake = fakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-image", "read", { path: "a.png" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("Seen it.")),
+		]);
+		const { sink, parts } = recorder();
+		const result = await runAgentTurn({
+			backend: fake.provider,
+			model,
+			history: [chatMessage("user", [{ kind: "text", text: "Look at a.png" }])],
+			conversationId: "chat-image",
+			turn: 1,
+			tools: tools(async () => ({
+				text: "Image a.png: image/png, 5 B.",
+				isError: false,
+				images: [{ mimeType: "image/png", data: bytes.toString("base64"), byteLength: bytes.byteLength, name: "a.png" }],
+			})),
+			sink,
+			token: none,
+		});
+		assert.deepStrictEqual(result, { rounds: 2, stopReason: "done" });
+		const resultPart = parts.find(part => part.kind === "toolResult");
+		if (!resultPart || resultPart.kind !== "toolResult") {
+			throw new Error("expected a tool result");
+		}
+		assert.deepStrictEqual(resultPart.images, [{ mimeType: "image/png", data: bytes.toString("base64"), byteLength: 5, name: "a.png" }]);
+		const next = fake.requests[1].messages;
+		const toolResultPart = next[2].content[0];
+		assert.ok(toolResultPart instanceof vscode.LanguageModelToolResultPart);
+		assert.strictEqual(toolResultPart.content.length, 2);
+		const image = toolResultPart.content[1];
+		assert.ok(image instanceof vscode.LanguageModelDataPart);
+		assert.strictEqual(image.mimeType, "image/png");
+		assert.deepStrictEqual([...image.data], [...bytes]);
 	});
 
 	test("yields after the round's tools when the user queued a message", async () => {

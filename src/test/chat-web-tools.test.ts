@@ -64,10 +64,11 @@ suite("Chat web tools", () => {
 		return createWebTools()[0];
 	}
 
-	function invoke(input: unknown): Promise<string> {
+	async function invoke(input: unknown): Promise<string> {
 		const source = new vscode.CancellationTokenSource();
 		tokens.push(source);
-		return tool().invoke(input, source.token);
+		const result = await tool().invoke(input, source.token);
+		return typeof result === "string" ? result : result.text;
 	}
 
 	test("htmlToText keeps the title and headings", () => {

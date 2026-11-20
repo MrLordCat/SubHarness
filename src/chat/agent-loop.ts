@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { LIMIT_SIGNAL_OPTION, parseLimitSignal, type LimitSignal } from "../providers/limit-signal";
 import { toLanguageModelMessages } from "./lm-messages";
-import { appendChatText, type ChatMessage, type ChatPart, type ChatStructuredPart, type ChatTextKind, type ChatUsage, type ChatUsageTotals } from "./shared/protocol";
+import { appendChatText, type ChatMessage, type ChatPart, type ChatStructuredPart, type ChatTextKind, type ChatToolImage, type ChatUsage, type ChatUsageTotals } from "./shared/protocol";
 
 export interface AgentTurnSink {
 	text(kind: ChatTextKind, text: string): void;
@@ -11,7 +11,7 @@ export interface AgentTurnSink {
 
 export interface ChatToolExecutor {
 	readonly tools: readonly vscode.LanguageModelChatTool[];
-	invoke(name: string, input: unknown, token: vscode.CancellationToken, callId?: string): Promise<{ text: string; isError: boolean }>;
+	invoke(name: string, input: unknown, token: vscode.CancellationToken, callId?: string): Promise<{ text: string; isError: boolean; images?: ChatToolImage[] }>;
 }
 
 export interface AgentTurnRequest {
@@ -184,19 +184,21 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 			if (request.token.isCancellationRequested) {
 				throw new vscode.CancellationError();
 			}
-			let outcome: { text: string; isError: boolean };
+			let outcome: { text: string; isError: boolean; images?: ChatToolImage[] };
 			try {
 				outcome = await request.tools.invoke(call.name, call.input, request.token, call.callId);
 			} catch (error) {
 				outcome = { text: error instanceof Error ? error.message : String(error), isError: true };
 			}
 			const truncated = outcome.text.length > MAX_TOOL_RESULT_CHARS;
+			const images = outcome.images && outcome.images.length > 0 ? outcome.images : undefined;
 			const result: ChatStructuredPart = {
 				kind: "toolResult",
 				callId: call.callId,
 				text: truncated ? `${outcome.text.slice(0, MAX_TOOL_RESULT_CHARS)}${TRUNCATION_NOTE}` : outcome.text,
 				isError: outcome.isError,
 				...(truncated ? { truncated: true } : {}),
+				...(images ? { images } : {}),
 			};
 			request.sink.part(result);
 			parts.push(result);

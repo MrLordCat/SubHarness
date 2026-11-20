@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.21.27 (development patch) - 2026-11-20
+
+- Added: the bridge chat's view_image tool shows a PNG, JPEG, GIF or WebP file
+  (up to 3.75 MB) to the model. Images returned by MCP and extension tools now
+  reach the model too instead of being dropped; the chat shows each image's
+  name and size under the tool result.
+
 ## 1.21.26 (development patch) - 2026-11-19
 
 - Added: native bridge chat tools that replace Copilot's:

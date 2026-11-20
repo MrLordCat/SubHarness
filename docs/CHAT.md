@@ -50,10 +50,12 @@ editor content. Each file is capped at 60,000 characters and a message at
 ## Tools and approvals
 
 The chat's own tools read, search, create, edit (`replace_string_in_file`,
-`multi_replace_string_in_file`) and delete files, run terminals, fetch web
+`multi_replace_string_in_file`) and delete files, show images to the model
+(`view_image`: PNG, JPEG, GIF or WebP up to 3.75 MB), run terminals, fetch web
 pages (`fetch_webpage`), work with symbols through the language servers
 (`list_code_usages`, `rename_symbol`, `workspace_symbols`), report problems and
-start subagents.
+start subagents. Images returned by MCP and extension tools also reach the
+model; the chat shows their name and size.
 
 The model runs tools without asking, with one exception: a terminal command
 that matches a rule in `llamacpp.chat.dangerousCommands` waits for your

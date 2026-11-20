@@ -116,8 +116,10 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<stri
 			} else if (part.kind === "toolResult") {
 				const step = toolSteps.get(part.callId);
 				if (step) {
-					step.output = part.text.slice(0, MAX_OUTPUT_CHARS);
-					step.outputChars = part.text.length;
+					const images = (part.images ?? []).map(image => `[image: ${image.name ?? image.mimeType}]`);
+					const output = [part.text, ...images].filter(text => text.length > 0).join("\n");
+					step.output = output.slice(0, MAX_OUTPUT_CHARS);
+					step.outputChars = output.length;
 					if (part.isError) {
 						step.isError = true;
 					}

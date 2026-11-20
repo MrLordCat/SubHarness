@@ -2,8 +2,8 @@ import * as vscode from "vscode";
 import { COCO_TERMINAL_TOOLS } from "../../coco/terminal-tools";
 import { getLocalTool } from "../../tools/local-tools";
 import { WAIT_TERMINAL_TOOL_NAME } from "../../tools/wait-terminal";
-import type { ChatToolGroup } from "../shared/protocol";
-import { CHAT_TOOL_GROUPS, type ChatTool } from "./types";
+import type { ChatToolGroup, ChatToolImage } from "../shared/protocol";
+import { CHAT_TOOL_GROUPS, MAX_IMAGE_BYTES, type ChatTool, type ChatToolOutput } from "./types";
 
 export const TOOL_OVERRIDES_KEY = "llamacpp.chat.toolOverrides";
 
@@ -99,17 +99,23 @@ interface CatalogEntry {
 	external: boolean;
 }
 
-function resultText(result: vscode.LanguageModelToolResult): string {
+function resultText(result: vscode.LanguageModelToolResult): ChatToolOutput {
 	const decoder = new TextDecoder();
-	return result.content.map(part => {
+	const texts: string[] = [];
+	const images: ChatToolImage[] = [];
+	for (const part of result.content) {
 		if (part instanceof vscode.LanguageModelTextPart) {
-			return part.value;
+			texts.push(part.value);
+		} else if (part instanceof vscode.LanguageModelDataPart && /^(?:text\/|application\/json)/.test(part.mimeType)) {
+			texts.push(decoder.decode(part.data));
+		} else if (part instanceof vscode.LanguageModelDataPart && part.mimeType.startsWith("image/") && part.data.byteLength <= MAX_IMAGE_BYTES) {
+			images.push({ mimeType: part.mimeType, data: Buffer.from(part.data).toString("base64"), byteLength: part.data.byteLength });
+		} else {
+			texts.push("[non-text output omitted]");
 		}
-		if (part instanceof vscode.LanguageModelDataPart && /^(?:text\/|application\/json)/.test(part.mimeType)) {
-			return decoder.decode(part.data);
-		}
-		return "[non-text output omitted]";
-	}).join("\n");
+	}
+	const text = texts.join("\n");
+	return images.length > 0 ? { text, images } : { text };
 }
 
 function inputObject(input: unknown): object {

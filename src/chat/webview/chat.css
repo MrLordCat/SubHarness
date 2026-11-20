@@ -598,6 +598,12 @@ body {
 	border-left: 2px solid var(--vscode-textBlockQuote-border);
 }
 
+.tool-result-image {
+	margin-top: 2px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
 .part-loading {
 	margin-top: 4px;
 	color: var(--vscode-descriptionForeground);

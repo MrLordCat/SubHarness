@@ -323,13 +323,16 @@ function maxTurn(messages: readonly ChatMessage[]): number {
 function viewPart(part: ChatStructuredPart, keepFull?: boolean): ChatStructuredPart;
 function viewPart(part: ChatPart, keepFull?: boolean): ChatPart;
 function viewPart(part: ChatPart, keepFull?: boolean): ChatPart {
-	if (!keepFull && part.kind === "toolResult" && part.text.length > WEBVIEW_TOOL_RESULT_PREVIEW_CHARS) {
-		return { ...part, text: part.text.slice(0, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS), preview: true, fullLength: part.text.length };
+	const view: ChatPart = part.kind === "toolResult" && part.images
+		? { ...part, images: part.images.map(image => ({ mimeType: image.mimeType, byteLength: image.byteLength, ...(image.name === undefined ? {} : { name: image.name }) })) }
+		: { ...part };
+	if (!keepFull && view.kind === "toolResult" && view.text.length > WEBVIEW_TOOL_RESULT_PREVIEW_CHARS) {
+		return { ...view, text: view.text.slice(0, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS), preview: true, fullLength: view.text.length };
 	}
-	if (!keepFull && part.kind === "thinking" && part.text.length > WEBVIEW_THINKING_PREVIEW_CHARS) {
-		return { ...part, text: part.text.slice(-WEBVIEW_THINKING_PREVIEW_CHARS), preview: true };
+	if (!keepFull && view.kind === "thinking" && view.text.length > WEBVIEW_THINKING_PREVIEW_CHARS) {
+		return { ...view, text: view.text.slice(-WEBVIEW_THINKING_PREVIEW_CHARS), preview: true };
 	}
-	return { ...part };
+	return view;
 }
 
 function viewMessage(message: ChatMessage, keepFull = false): ChatMessage {
