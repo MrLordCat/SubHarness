@@ -6,7 +6,7 @@ import { SUBAGENT_TOOL_NAME } from "../tools/subagent-tool";
 import { postMessage } from "./api";
 import { EditComposer } from "./edit-composer";
 import { OPEN_MODEL_PICKER_EVENT } from "./events";
-import { describeToolCall, formatBytes, formatReset, formatTokens, summarizeInput, toolCommand } from "./format";
+import { answerStart, describeToolCall, formatBytes, formatReset, formatTokens, summarizeInput, toolCommand } from "./format";
 import { Markdown } from "./markdown";
 import type { ChatStore } from "./store";
 
@@ -60,6 +60,17 @@ function MessageView({ message, running, editing, compactionBoundary, isLast, ch
 	const divider = compactionBoundary
 		? <div class="compaction-divider">Earlier messages are summarized for the model</div>
 		: null;
+	if (message.role === "user" && message.continuation) {
+		// Retry sent the model a continuation request; the chat shows only that the answer goes on.
+		return (
+			<>
+				{divider}
+				<div class="msg msg-continuation" title={message.continuation.error ? `Stopped by: ${message.continuation.error}` : undefined}>
+					<span aria-hidden="true">↻</span> Retry: the answer continues where it stopped
+				</div>
+			</>
+		);
+	}
 	if (message.role === "user") {
 		const text = message.parts
 			.flatMap(part => part.kind === "text" ? [part.text] : [])
@@ -149,6 +160,11 @@ function MessageView({ message, running, editing, compactionBoundary, isLast, ch
 			subagentRuns.set(part.callId, part);
 		}
 	}
+	// A streaming answer may still call tools, so its text becomes the answer only once it ends.
+	const answerFrom = running && isLast ? undefined : answerStart(message.parts);
+	const answerTexts = answerFrom === undefined
+		? []
+		: message.parts.flatMap((part, index) => index >= answerFrom && part.kind === "text" ? [{ index, text: part.text }] : []);
 
 	return (
 		<>
@@ -175,6 +191,14 @@ function MessageView({ message, running, editing, compactionBoundary, isLast, ch
 					const index = unit.index;
 					switch (part.kind) {
 						case "text":
+							if (answerFrom !== undefined && index >= answerFrom) {
+								return index === answerFrom ? (
+									<section key={index} class="msg-answer" aria-label="Answer">
+										<div class="msg-answer-label" aria-hidden="true">Answer</div>
+										{answerTexts.map(entry => <Markdown key={entry.index} text={entry.text} />)}
+									</section>
+								) : null;
+							}
 							return <Markdown key={index} text={part.text} />;
 						case "thinking":
 							return <ThinkingBlock key={index} part={part} index={index} messageId={message.id} store={store} />;
@@ -293,17 +317,30 @@ function markdownFirstLine(text: string | undefined): string {
 }
 
 function CompactionCard({ part }: { part: CompactionPart }) {
-	const method = part.method === "deepseek" ? "DeepSeek summary" : "extractive summary";
+	const method = part.method === "deepseek" ? "DeepSeek summary"
+		: part.method === "model" ? `summary by ${part.summaryModel ?? "the chat model"}`
+		: "extractive summary";
+	const covered = [
+		...(part.summarizedMessages > 0 || !part.trimmedTurn ? [`${part.summarizedMessages} earlier messages`] : []),
+		...(part.trimmedTurn ? [`${part.trimmedTurn.rounds} tool ${part.trimmedTurn.rounds === 1 ? "round" : "rounds"} of the next answer`] : []),
+	].join(" and ");
 	return (
 		<div class="compaction-card">
 			<div class="compaction-line">
 				<span class="compaction-label">Context compacted:</span>
-				{` ${part.summarizedMessages} earlier messages summarized · ${formatTokens(part.tokensBefore)} → ${formatTokens(part.tokensAfter)} tokens`}
+				{` ${covered} summarized · ${formatTokens(part.tokensBefore)} → ${formatTokens(part.tokensAfter)} tokens`}
 				<span class="compaction-method">{` (${method})`}</span>
 			</div>
+			{part.fallbackReason ? <div class="compaction-fallback">{`Fallback: ${part.fallbackReason}`}</div> : null}
 			<details class="compaction-summary">
 				<summary>Summary</summary>
 				<Markdown text={part.summary} />
+				{part.requests?.length ? (
+					<div class="compaction-requests">
+						<div class="compaction-requests-title">Your requests, kept verbatim</div>
+						{part.requests.map((request, index) => <div class="compaction-request" key={index}>{request}</div>)}
+					</div>
+				) : null}
 			</details>
 		</div>
 	);

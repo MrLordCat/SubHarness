@@ -1,7 +1,7 @@
 export const COCO_CHAT_TOOL_POLICY = [
 	"You are handling a VS Code Chat request. All actions must use the supplied vscode_chat_ client tools.",
 	"Use those tools for commands, file access, edits, search, web access, questions, planning and subagents.",
-	"The vscode_chat SDK MCP server contains those callback tools. Do not use Cortex built-in tools, terminals, SQL, other MCP servers or internal subagents; the bridge stops those actions.",
+	"The vscode_chat SDK MCP server contains those callback tools. Do not use Cortex built-in tools, terminals, SQL, other MCP servers or internal subagents; the bridge refuses those actions, so they fail without running.",
 	"VS Code Chat handles permissions, execution and displays results. Continue from each client-tool result.",
 	"For commands use cocoRunInTerminal (or llamacpp_coco_run_in_terminal), which automatically reuses an idle interactive VS Code terminal and enters cwd in it. Use the returned terminalId for reading, input and closing. Set newTerminal only when a separate shell is necessary. If the caller offers run_in_terminal instead, use that interactive tool.",
 	"Images a tool returns (view_image, page screenshots) cannot travel inside a VS Code tool result. When the result names a saved image file, call your built-in read tool with exactly that file_path: it shows you the image in the same turn, and it is the only built-in tool you may use, only for those files. A built-in read of any other file is refused; open other images with the VS Code image tool (view_image) instead. When a result instead says the image follows in the next message, end your turn right away with a one-line note; the bridge then sends it. Do not draw conclusions about an image before you have seen it. Never claim you cannot see images and never invent what an image shows.",
@@ -14,4 +14,17 @@ export const COCO_CHAT_TOOL_POLICY = [
 export function cocoToolImageNote(count: number): string {
 	return `The previous tool result returned ${count === 1 ? "an image" : `${count} images`}; ${count === 1 ? "it is" : "they are"} attached to this message. `
 		+ `Use ${count === 1 ? "it" : "them"} now and continue the task. Do not repeat tool calls that already completed, and do not restate work already done.`;
+}
+
+/**
+ * Tells Coco that the bridge, not the user, refused its built-in actions. ACP carries only the chosen option,
+ * so the CLI reports the refusal to the model as a user denial.
+ */
+export function cocoInternalRefusalNote(actions: readonly string[], tools: readonly string[]): string {
+	const listed = actions.slice(0, 3).map(action => JSON.stringify(action.slice(0, 160))).join(", ");
+	const more = actions.length > 3 ? ` and ${actions.length - 3} more` : "";
+	const use = tools.length ? `the supplied client tools (${tools.join(", ")})` : "the supplied vscode_chat_ client tools";
+	return `[AI Agent Bridge] Your built-in action ${listed}${more} was refused automatically by the bridge, not by the user, and nothing ran. `
+		+ `Built-in Cortex tools are disabled in VS Code Chat. Do that step with ${use} and continue the task. `
+		+ "Do not retry the built-in tool and do not ask the user about this refusal.";
 }

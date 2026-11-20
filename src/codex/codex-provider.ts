@@ -14,7 +14,7 @@ import { reportLimitNotice } from "../providers/limit-signal";
 import type { LlamaLogSink } from "../logger";
 import type { ProviderRuntimeMetrics } from "../provider-metrics";
 import { PROVIDER_CONTINUATION_TTL_MS, PROVIDER_DURABLE_SESSION_TTL_MS, PROVIDER_PENDING_ROLLOVER_TTL_MS } from "../session-retention";
-import { setSubagentModelProfiles } from "../subagent-guidance";
+import { codexSubagentUseWhen, setSubagentModelProfiles } from "../subagent-guidance";
 import { asRecord, formatShortResetTime, normalizeCopilotTurnIndex, truncate } from "../utils";
 import { CodexAppServerClient, CodexAppServerError, isCodexCliAvailable, type CodexServerRequest } from "./app-server-client";
 import {
@@ -22,6 +22,7 @@ import {
 	codexAccountLabelSuffix,
 	codexAccountStateKey,
 	decodeCodexAccountModelId,
+	encodeCodexAccountModelId,
 	resolveActiveCodexAccountSetting,
 	type CodexAccountIdentity,
 } from "./accounts";
@@ -2942,7 +2943,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		const labelSuffix = codexAccountLabelSuffix(this.account);
 		const rateLimitReached = this.isCodexRateLimitReached();
 		setSubagentModelProfiles("codex", models.map(model => ({
-			id: model.id,
+			// The chat model id (`codex::<slug>`), so the bridge chat finds the model a subagent asks for.
+			id: encodeCodexAccountModelId(this.account.id, model.id),
 			// Match the model-picker label exactly (`${displayName} (Codex)`) so a
 			// subagent model= value resolves in the picker instead of being
 			// rejected or silently falling back to Auto.
@@ -2954,7 +2956,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				? `ChatGPT subscription rate limit reached (${this.codexUsageLimitPercent ?? "unknown"}%)`
 				: "Model is present in the current ChatGPT subscription catalog",
 			availabilityCheckedAt: Date.now(),
-			useWhen: "Use for repository-wide, multi-step coding or high-confidence verification",
+			useWhen: codexSubagentUseWhen(model.id),
 		})));
 		return models.map(model => mapCodexModelInformation(
 			model,

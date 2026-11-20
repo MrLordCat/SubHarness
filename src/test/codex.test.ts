@@ -74,6 +74,7 @@ import {
 	parseCodexErrorNotification,
 } from "../codex/turn-bridge";
 import type { LlamaLogSink } from "../logger";
+import { getSubagentModelProfiles, setSubagentModelProfiles } from "../subagent-guidance";
 
 const model: CodexModel = {
 	id: "gpt-test",
@@ -1965,6 +1966,27 @@ suite("Codex subscription provider", () => {
 			}
 		);
 		provider.dispose();
+	});
+
+	test("registers the newest Luna and Terra as subagents under their chat model ids", () => {
+		const provider = new CodexChatModelProvider("test");
+		const internals = provider as unknown as { models: Map<string, CodexModel>; mapKnownModels(): vscode.LanguageModelChatInformation[] };
+		for (const [id, displayName] of [["gpt-6.2-sol", "GPT-6.2-Sol"], ["gpt-6.1-terra", "GPT-6.1 Terra"], ["gpt-6-luna", "GPT-6-Luna"], ["gpt-5.6-luna", "GPT-5.6-Luna"]]) {
+			internals.models.set(id, { ...model, id, model: id, displayName, isDefault: false });
+		}
+		try {
+			const chatIds = internals.mapKnownModels().map(info => info.id);
+			const subagents = getSubagentModelProfiles().filter(profile => profile.provider === "codex");
+			// The bridge chat starts a subagent by looking its id up among the chat models.
+			assert.deepStrictEqual(subagents.map(profile => profile.id), ["codex::gpt-6-luna", "codex::gpt-6.1-terra"]);
+			assert.ok(subagents.every(profile => chatIds.includes(profile.id)));
+			assert.deepStrictEqual(subagents.map(profile => profile.label), ["GPT-6-Luna (Codex)", "GPT-6.1 Terra (Codex)"]);
+			assert.match(subagents[0].useWhen, /small, well-defined steps/);
+			assert.match(subagents[1].useWhen, /Larger multi-step steps/);
+		} finally {
+			setSubagentModelProfiles("codex", []);
+			provider.dispose();
+		}
 	});
 
 	test("reattaches a durable Codex thread with thread/resume", async () => {

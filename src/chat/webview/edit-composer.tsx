@@ -50,11 +50,14 @@ export function EditComposer({ store, message, changedFilesSinceTurn, context }:
 			quota={store.quota}
 			cache={cacheStats ? formatCacheHit(cacheStats, selectedModelProvider(store.models, store.selectedModelId)) : undefined}
 			context={context}
+			contextSettings={store.contextSettings}
 			attachments={attachments}
 			onSend={submit}
 			onCancel={() => store.cancelEdit()}
 			onStop={actions.onStop}
 			onSelectModel={actions.onSelectModel}
+			favoriteModels={store.favoriteModels}
+			onSetFavoriteModel={actions.onSetFavoriteModel}
 			onSelectThinking={actions.onSelectThinking}
 			onRefreshQuota={actions.onRefreshQuota}
 			onSetToolsEnabled={actions.onSetToolsEnabled}

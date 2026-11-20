@@ -5,6 +5,7 @@ import {
 	PASTED_FILE_MAX_BYTES,
 	PASTED_FILES_LIMIT,
 	type ChatAttachment,
+	type ChatContextSettings,
 	type ChatModelGroup,
 	type ChatPastedFile,
 	type ChatProviderQuota,
@@ -12,6 +13,7 @@ import {
 	type ChatSignInOffer,
 	type ChatToolGroup,
 } from "../shared/protocol";
+import { ContextIndicator } from "./context-popup";
 import { formatQuotaExhausted, parseUriList, type CacheHitLabel } from "./format";
 import { ModelPicker } from "./model-picker";
 import { QuotaIndicator } from "./quota-indicator";
@@ -26,6 +28,8 @@ interface ComposerProps {
 	selectedThinking: string | undefined;
 	quota: ChatProviderQuota[];
 	context: string | undefined;
+	/** The sliders the context indicator opens; without them it is plain text. */
+	contextSettings?: ChatContextSettings;
 	cache?: CacheHitLabel;
 	attachments: ChatAttachment[];
 	/** Text the textarea starts with; later changes come from typing. */
@@ -46,6 +50,9 @@ interface ComposerProps {
 	onSend: (text: string) => void;
 	onStop: () => void;
 	onSelectModel: (modelId: string) => void;
+	/** Starred models; the picker opens on them. */
+	favoriteModels?: string[];
+	onSetFavoriteModel?: (modelId: string, favorite: boolean) => void;
 	onSelectThinking: (value: string) => void;
 	onRefreshQuota: () => void;
 	onSetToolsEnabled: (names: string[], enabled: boolean) => void;
@@ -121,6 +128,7 @@ export function Composer({
 	quota,
 	cache,
 	context,
+	contextSettings,
 	attachments,
 	initialText,
 	autoFocus,
@@ -133,6 +141,8 @@ export function Composer({
 	onSend,
 	onStop,
 	onSelectModel,
+	favoriteModels,
+	onSetFavoriteModel,
 	onSelectThinking,
 	onRefreshQuota,
 	onSetToolsEnabled,
@@ -400,7 +410,17 @@ export function Composer({
 								<path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
 							</svg>
 						</button>
-						<ModelPicker models={models} selectedModelId={selectedModelId} quota={quota} onRefreshQuota={onRefreshQuota} onSelectModel={onSelectModel} signIn={signIn} onSignIn={onSignIn} />
+						<ModelPicker
+							models={models}
+							selectedModelId={selectedModelId}
+							quota={quota}
+							onRefreshQuota={onRefreshQuota}
+							onSelectModel={onSelectModel}
+							favorites={favoriteModels}
+							onSetFavorite={onSetFavoriteModel}
+							signIn={signIn}
+							onSignIn={onSignIn}
+						/>
 						{selectedModel?.thinking
 							? <ThinkingPicker thinking={selectedModel.thinking} selected={selectedThinking} onSelect={onSelectThinking} />
 							: null}
@@ -409,7 +429,7 @@ export function Composer({
 					</div>
 					<div class="composer-actions">
 						{cache ? <span class={`cache-indicator cache-${cache.level}`} title={cache.title}>{cache.text}</span> : null}
-						{context ? <span class="context-indicator" title="Prompt tokens / context window">{context}</span> : null}
+						<ContextIndicator context={context} settings={contextSettings} />
 						{run.running && !onCancel ? (
 							<>
 								<button type="button" class="send-button send-button-stop" aria-label="Stop" title="Stop" onClick={onStop}>

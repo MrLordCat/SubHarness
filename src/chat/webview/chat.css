@@ -747,6 +747,30 @@ body {
 	font-style: italic;
 }
 
+.compaction-fallback {
+	margin-top: 2px;
+	color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
+	font-size: 11px;
+	overflow-wrap: anywhere;
+}
+
+.compaction-requests {
+	margin-top: 6px;
+}
+
+.compaction-requests-title {
+	color: var(--vscode-foreground);
+	font-weight: 600;
+}
+
+.compaction-request {
+	margin-top: 4px;
+	padding-left: 6px;
+	border-left: 2px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
 .compaction-summary {
 	margin-top: 2px;
 }
@@ -1035,6 +1059,31 @@ body {
 	color: var(--vscode-descriptionForeground);
 	font-size: 11px;
 	text-align: center;
+}
+
+.msg-continuation {
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	text-align: center;
+}
+
+/* The final answer after the tool rounds, set apart from the working commentary above it. */
+.msg-answer {
+	margin-top: 6px;
+	padding: 4px 10px 2px;
+	border: 1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 22%, transparent);
+	border-left: 3px solid var(--vscode-textLink-foreground);
+	border-radius: 4px;
+	background: color-mix(in srgb, var(--vscode-textLink-foreground) 7%, transparent);
+}
+
+.msg-answer-label {
+	margin-top: 2px;
+	color: var(--vscode-textLink-foreground);
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
 }
 
 .run-status {
@@ -1523,6 +1572,21 @@ body {
 	min-width: 0;
 }
 
+/* Only the model list scrolls; the search, "Show all models" and sign-in stay in view. */
+.model-popup {
+	overflow: hidden;
+}
+
+.model-popup > * {
+	flex: 0 0 auto;
+}
+
+.model-popup > .picker-list {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+}
+
 .picker-group {
 	display: flex;
 	flex-direction: column;
@@ -1601,6 +1665,58 @@ body {
 .picker-option-check {
 	flex: 0 0 auto;
 	width: 1em;
+}
+
+.picker-option-star {
+	flex: 0 0 auto;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border: none;
+	border-radius: 3px;
+	background: none;
+	color: var(--vscode-descriptionForeground);
+	font-size: 13px;
+	line-height: 18px;
+	cursor: pointer;
+	opacity: 0;
+}
+
+.picker-option:hover .picker-option-star,
+.picker-option-active .picker-option-star,
+.picker-option-star-on {
+	opacity: 1;
+}
+
+.picker-option-star:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.picker-option-star-on {
+	color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.picker-show-all {
+	padding: 4px 6px;
+	border: none;
+	border-top: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
+	background: none;
+	color: var(--vscode-textLink-foreground);
+	font-family: inherit;
+	font-size: 12px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.picker-show-all:hover {
+	color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+	text-decoration: underline;
+}
+
+.picker-hint {
+	padding: 4px 6px 0;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
 }
 
 .picker-empty {
@@ -2451,6 +2567,98 @@ body {
 .context-indicator {
 	flex: 0 0 auto;
 	white-space: nowrap;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.context-picker {
+	flex: 0 0 auto;
+}
+
+.context-trigger {
+	padding: 1px 3px;
+	border: none;
+	border-radius: 3px;
+	background: none;
+	font-family: inherit;
+	cursor: pointer;
+}
+
+.context-trigger:hover,
+.context-trigger[aria-expanded="true"] {
+	color: var(--vscode-foreground);
+	background: var(--vscode-toolbar-hoverBackground, transparent);
+}
+
+.context-trigger:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+}
+
+.context-popup {
+	right: 0;
+	left: auto;
+	min-width: 280px;
+	gap: 10px;
+	padding: 8px 10px;
+	outline: none;
+	font-size: 12px;
+}
+
+.context-usage {
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.context-setting {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.context-setting + .context-setting {
+	padding-top: 8px;
+	border-top: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
+}
+
+.context-setting-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.context-setting-label {
+	font-weight: 600;
+}
+
+.context-setting-value {
+	color: var(--vscode-textLink-foreground);
+	font-weight: 600;
+}
+
+.context-slider {
+	width: 100%;
+	margin: 2px 0;
+	accent-color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+}
+
+.context-slider:disabled {
+	opacity: 0.5;
+}
+
+.context-toggle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	cursor: pointer;
+}
+
+.context-toggle input {
+	margin: 0;
+	accent-color: var(--vscode-focusBorder);
+}
+
+.context-hint {
 	color: var(--vscode-descriptionForeground);
 	font-size: 11px;
 }

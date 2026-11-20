@@ -49,7 +49,19 @@ export type ChatPart =
 	/** Messages before keepFromMessageId reach the model only as this summary. */
 	| {
 		kind: "compaction"; summary: string; keepFromMessageId: string; summarizedMessages: number;
-		tokensBefore: number; tokensAfter: number; method: "deepseek" | "extractive";
+		tokensBefore: number; tokensAfter: number; method: "deepseek" | "model" | "extractive";
+		/** The kept turn was cut between tool rounds: parts before fromPart of this answer reach the model only through the summary. */
+		trimmedTurn?: { messageId: string; fromPart: number; rounds: number };
+		/** Tool results in kept messages before this user message reach the model shortened to their start and end. */
+		abbreviatedUntil?: string;
+		/** Name of the chat model that wrote a "model" summary. */
+		summaryModel?: string;
+		/** Why DeepSeek, or then the chat model, did not write the summary. */
+		fallbackReason?: string;
+		/** The chat log with every message, named in the summary so the model can look details up. */
+		transcriptPath?: string;
+		/** The user's summarized requests, verbatim (long ones cut), oldest first; the summary alone may paraphrase them. */
+		requests?: string[];
 	}
 	/** What a subagent tool call did; the model sees only the subagent's report in the tool result. */
 	| ({ kind: "subagent" } & ChatSubagentRun);
@@ -111,6 +123,30 @@ export interface ChatDraft {
 	attachments: ChatAttachment[];
 }
 
+/** The working-context settings the context popup edits; the Provider Context panel edits the same settings. */
+export interface ChatContextSettings {
+	/** Shared working context of Codex, Claude, Coco and Cursor in tokens, as the slider stores it. */
+	shared: number;
+	sharedMin: number;
+	sharedMax: number;
+	/** The shared context follows the window of the Codex model instead of the slider. */
+	followCodex: boolean;
+	/** The followed Codex model and its window, once Codex reported or catalogued one. */
+	codexModel?: string;
+	codexWindow?: number;
+	/** Tokens a model may receive when it takes over a chat; a longer chat is compacted first. */
+	switchTokens: number;
+	switchMin: number;
+	switchMax: number;
+}
+
+/** A change from the context popup; absent fields stay as they are. */
+export interface ChatContextSettingsChange {
+	shared?: number;
+	followCodex?: boolean;
+	switchTokens?: number;
+}
+
 /** A message sent while the agent works; it is delivered after the current tool round. */
 export interface ChatQueuedMessage {
 	id: string;
@@ -143,6 +179,13 @@ export interface ChatMessage {
 	attachmentContext?: string;
 	/** Image attachments of a user message, sent after its text to models that accept images; left out of webview views. */
 	images?: ChatToolImage[];
+	/** A user message the bridge sent when Retry continued a failed answer; the chat shows it as a one-line marker. */
+	continuation?: ChatContinuation;
+}
+
+/** Why a continuation was sent: the notice that stopped the answer it continues. */
+export interface ChatContinuation {
+	error?: string;
 }
 
 /** Each pasted file; larger ones are not attached. */
@@ -363,9 +406,13 @@ export type HostMessage =
 		/** The shown chat's unsent text and attachments; the composer takes them over when the chat changes. */
 		draft?: ChatDraft;
 		signIn?: ChatSignInOffer[];
+		contextSettings?: ChatContextSettings;
+		/** Model ids starred in the model picker, oldest first; the picker opens on them. */
+		favoriteModels?: string[];
 	}
 	| { type: "changes"; changes: ChatChangeSet }
-	| { type: "models"; models: ChatModelGroup[]; selectedModelId?: string; selectedThinking?: string; signIn?: ChatSignInOffer[] }
+	| { type: "contextSettings"; settings: ChatContextSettings }
+	| { type: "models"; models: ChatModelGroup[]; selectedModelId?: string; selectedThinking?: string; signIn?: ChatSignInOffer[]; favoriteModels?: string[] }
 	| { type: "quota"; quota: ChatProviderQuota[] }
 	/** The shared memory entries visible here; notice is the last save or delete error. */
 	| { type: "memory"; enabled: boolean; projectLabel?: string; entries: ChatMemoryEntry[]; notice?: string }
@@ -425,7 +472,7 @@ export type WebviewMessage =
 	 * attachments: the attachments to send with the edited text; absent keeps the original ones.
 	 */
 	| { type: "editMessage"; messageId: string; text: string; undoChanges?: boolean; attachments?: ChatAttachment[] }
-	/** Sends the user message of the failed answer (messageId) again, keeping its text and attachments. */
+	/** Continues the failed answer (messageId): its work stays and a continuation message asks the model to finish. */
 	| { type: "retryTurn"; messageId: string }
 	/** Without ids the whole change set is kept or undone. */
 	| { type: "keepChanges"; ids?: string[] }
@@ -433,10 +480,14 @@ export type WebviewMessage =
 	| { type: "openChange"; id: string }
 	| { type: "stop" }
 	| { type: "selectModel"; modelId: string }
+	/** Stars or unstars a model in the model picker. */
+	| { type: "setFavoriteModel"; modelId: string; favorite: boolean }
 	/** Reasoning level for the selected model; remembered per model. */
 	| { type: "selectThinking"; value: string }
 	/** Asks the providers for fresh limits and balances, e.g. when the quota popup opens. */
 	| { type: "refreshQuota" }
+	/** Saves the context popup's sliders and Codex toggle. */
+	| { type: "saveContextSettings"; change: ChatContextSettingsChange }
 	| { type: "setToolsEnabled"; names: string[]; enabled: boolean }
 	| { type: "approve"; id: string; allow: boolean }
 	/** Answers to a questions message; answers absent means the user skipped. */

@@ -28,6 +28,7 @@ export function App({ store }: { store: ChatStore }) {
 	const {
 		onStop,
 		onSelectModel,
+		onSetFavoriteModel,
 		onSelectThinking,
 		onRefreshQuota,
 		onSetToolsEnabled,
@@ -120,11 +121,14 @@ export function App({ store }: { store: ChatStore }) {
 				cache={cache}
 				quota={store.quota}
 				context={context}
+				contextSettings={store.contextSettings}
 				attachments={store.pendingAttachments}
 				draft={store.draftRequest}
 				onSend={onSend}
 				onStop={onStop}
 				onSelectModel={onSelectModel}
+				favoriteModels={store.favoriteModels}
+				onSetFavoriteModel={onSetFavoriteModel}
 				onSelectThinking={onSelectThinking}
 				onRefreshQuota={onRefreshQuota}
 				onSetToolsEnabled={onSetToolsEnabled}

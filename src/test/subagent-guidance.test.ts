@@ -2,6 +2,8 @@ import * as assert from "assert";
 
 import {
 	buildSubagentToolGuidance,
+	codexSubagentRole,
+	codexSubagentUseWhen,
 	enhanceSubagentToolDescription,
 	getSubagentModelProfiles,
 	setSubagentModelProfiles,
@@ -25,16 +27,16 @@ suite("subagent model guidance", () => {
 			useWhen: "Focused complex tasks",
 		}]);
 		setSubagentModelProfiles("codex", [{
-			id: "gpt-5.6-codex",
-			label: "GPT-5.6 Codex",
+			id: "codex::gpt-6-luna",
+			label: "GPT-6-Luna (Codex)",
 			provider: "codex",
 			defaultEffort: "high",
-			useWhen: "Repository-wide work",
+			useWhen: "Small steps",
 		}]);
 
 		const guidance = buildSubagentToolGuidance();
 		assert.ok(guidance.includes('model="DeepSeek V4 Pro (llamacpp)", high thinking'));
-		assert.ok(guidance.includes('model="GPT-5.6 Codex (llamacpp)", high thinking'));
+		assert.ok(guidance.includes('model="GPT-6-Luna (Codex) (llamacpp)", high thinking'));
 		assert.ok(!guidance.includes('model="DeepSeek V4 Pro"'), "VS Code rejects a bare name for a non-Copilot vendor");
 		assert.ok(guidance.includes("Budget routing policy"));
 		assert.ok(guidance.includes("Never omit runSubagent.model"));
@@ -137,32 +139,46 @@ suite("subagent model guidance", () => {
 
 	test("excludes Sol from subagent routing while retaining Opus 5", () => {
 		setSubagentModelProfiles("codex", [
-			{ id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "codex", useWhen: "Large tasks" },
-			{ id: "gpt-5.6-luna", label: "GPT-5.6 Luna", provider: "codex", useWhen: "Subagent tasks" },
+			{ id: "gpt-6.2-sol", label: "GPT-6.2-Sol", provider: "codex", useWhen: "Large tasks" },
+			{ id: "gpt-6-luna", label: "GPT-6-Luna", provider: "codex", useWhen: "Subagent tasks" },
 		]);
 		setSubagentModelProfiles("claude", [
 			{ id: "claude-opus-5", label: "Opus 5", provider: "claude", useWhen: "Subagent tasks" },
 		]);
 		const profiles = getSubagentModelProfiles();
-		assert.ok(!profiles.some(profile => profile.id === "gpt-5.6-sol"));
-		assert.ok(profiles.some(profile => profile.id === "gpt-5.6-luna"));
+		assert.ok(!profiles.some(profile => profile.id === "gpt-6.2-sol"));
+		assert.ok(profiles.some(profile => profile.id === "gpt-6-luna"));
 		assert.ok(profiles.some(profile => profile.id === "claude-opus-5"));
 		const guidance = buildSubagentToolGuidance();
-		assert.ok(!guidance.includes("GPT-5.6 Sol"));
+		assert.ok(!guidance.includes("GPT-6.2-Sol"));
 	});
 
-	test("restricts Codex subagents to the 5.6 family", () => {
-		setSubagentModelProfiles("codex", [
-			{ id: "gpt-5.4-mini", label: "GPT-5.4 Mini (Codex)", provider: "codex", useWhen: "Cheap tasks" },
-			{ id: "gpt-5.5", label: "GPT-5.5 (Codex)", provider: "codex", useWhen: "Older tasks" },
-			{ id: "gpt-5.6-terra", label: "GPT-5.6 Terra (Codex)", provider: "codex", useWhen: "Subagent tasks" },
-			{ id: "gpt-5.6-luna", label: "GPT-5.6 Luna (Codex)", provider: "codex", useWhen: "Subagent tasks" },
-		]);
-		const profiles = getSubagentModelProfiles();
-		assert.ok(!profiles.some(profile => profile.id === "gpt-5.4-mini"));
-		assert.ok(!profiles.some(profile => profile.id === "gpt-5.5"));
-		assert.ok(profiles.some(profile => profile.id === "gpt-5.6-terra"));
-		assert.ok(profiles.some(profile => profile.id === "gpt-5.6-luna"));
+	test("offers only the newest Codex Luna and Terra, Luna first", () => {
+		const codex = (slug: string) => ({ id: `codex::${slug}`, label: `${slug} (Codex)`, provider: "codex" as const, useWhen: "x" });
+		const codexIds = () => getSubagentModelProfiles().filter(profile => profile.provider === "codex").map(profile => profile.id);
+		setSubagentModelProfiles("codex", ["gpt-5.4-mini", "gpt-5.5", "gpt-6.2-sol", "gpt-6.1-sol", "gpt-5.6-terra", "gpt-6.1-terra", "gpt-5.6-luna", "gpt-6-luna", "gpt-5.6-codex"].map(codex));
+		assert.deepStrictEqual(codexIds(), ["codex::gpt-6-luna", "codex::gpt-6.1-terra"]);
+
+		// The newest 6.x version of each wins.
+		setSubagentModelProfiles("codex", ["gpt-6.1-terra", "gpt-6.2-luna", "gpt-6-luna", "gpt-6-terra"].map(codex));
+		assert.deepStrictEqual(codexIds(), ["codex::gpt-6.2-luna", "codex::gpt-6.1-terra"]);
+
+		// Only the 6.x family is used: an account with only 5.x models offers no Codex subagent.
+		setSubagentModelProfiles("codex", ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"].map(codex));
+		assert.deepStrictEqual(codexIds(), []);
+		setSubagentModelProfiles("codex", []);
+	});
+
+	test("gives Luna the small steps and Terra the larger ones", () => {
+		assert.strictEqual(codexSubagentRole("gpt-6-luna"), "luna");
+		assert.strictEqual(codexSubagentRole("codex::work::gpt-6.1-terra"), "terra");
+		assert.strictEqual(codexSubagentRole("gpt-6.2-sol"), undefined);
+		assert.strictEqual(codexSubagentRole("gpt-5.6-codex"), undefined);
+		assert.strictEqual(codexSubagentRole("gpt-5.6-luna"), undefined, "5.x is not used");
+		assert.strictEqual(codexSubagentRole("codex::gpt-5.6-terra"), undefined, "5.x is not used");
+		assert.match(codexSubagentUseWhen("codex::gpt-6-luna"), /^Fast and affordable: small, well-defined steps/);
+		assert.match(codexSubagentUseWhen("codex::gpt-6.1-terra"), /^Larger multi-step steps/);
+		assert.match(codexSubagentUseWhen("gpt-6.2-sol"), /repository-wide/);
 	});
 
 	test("orders budget tiers from cheapest local to premium subscription", () => {
@@ -173,22 +189,26 @@ suite("subagent model guidance", () => {
 			id: "deepseek::deepseek-v4-pro", label: "DeepSeek V4 Pro", provider: "deepseek", defaultEffort: "high", useWhen: "Complex tasks",
 		}]);
 		setSubagentModelProfiles("codex", [{
-			id: "gpt-5.6-codex", label: "GPT-5.6 Codex", provider: "codex", defaultEffort: "high", useWhen: "Repo work",
+			id: "codex::gpt-6-luna", label: "GPT-6-Luna (Codex)", provider: "codex", defaultEffort: "high", useWhen: "Small steps",
 		}]);
-		setSubagentModelProfiles("claude", []);
+		setSubagentModelProfiles("claude", [{
+			id: "claude::claude-opus-5", label: "Opus 5 (Claude)", provider: "claude", defaultEffort: "high", useWhen: "Hardest tasks",
+		}]);
 		setSubagentModelProfiles("api", []);
 		const guidance = buildSubagentToolGuidance();
 		const cheapest = guidance.indexOf("cheapest —");
 		const mid = guidance.indexOf("mid —");
+		const subscription = guidance.indexOf("subscription —");
 		const premium = guidance.indexOf("premium —");
-		assert.ok(cheapest >= 0 && mid > cheapest && premium > mid);
+		assert.ok(cheapest >= 0 && mid > cheapest && subscription > mid && premium > subscription);
+		setSubagentModelProfiles("claude", []);
 	});
 
 	test("omits budget policy when only one cost tier is available", () => {
 		setSubagentModelProfiles("local", []);
 		setSubagentModelProfiles("deepseek", []);
 		setSubagentModelProfiles("codex", [{
-			id: "gpt-5.6-codex", label: "GPT-5.6 Codex", provider: "codex", defaultEffort: "high", useWhen: "Repo work",
+			id: "codex::gpt-6-luna", label: "GPT-6-Luna (Codex)", provider: "codex", defaultEffort: "high", useWhen: "Small steps",
 		}]);
 		setSubagentModelProfiles("claude", []);
 		setSubagentModelProfiles("api", []);
@@ -224,26 +244,31 @@ suite("subagent model guidance", () => {
 		assert.ok(!guidance.includes("unlimited tokens and no rate limits"), "no local model is promised when none exists");
 	});
 
-	test("prefers Terra over Luna inside the premium tier and warns DeepSeek cannot see", () => {
+	test("routes small steps to Luna, larger ones to Terra and warns DeepSeek cannot see", () => {
 		setSubagentModelProfiles("local", []);
 		setSubagentModelProfiles("deepseek", [{
 			id: "deepseek::deepseek-v4-pro", label: "DeepSeek V4 Pro", provider: "deepseek", defaultEffort: "high", useWhen: "Complex tasks",
 		}]);
 		setSubagentModelProfiles("codex", [
-			{ id: "gpt-5.6-luna", label: "GPT-5.6 Luna (Codex)", provider: "codex", useWhen: "Subagent tasks" },
-			{ id: "gpt-5.6-terra", label: "GPT-5.6 Terra (Codex)", provider: "codex", useWhen: "Subagent tasks" },
+			{ id: "codex::gpt-6.1-terra", label: "GPT-6.1 Terra (Codex)", provider: "codex", useWhen: codexSubagentUseWhen("gpt-6.1-terra") },
+			{ id: "codex::gpt-6-luna", label: "GPT-6-Luna (Codex)", provider: "codex", useWhen: codexSubagentUseWhen("gpt-6-luna") },
 		]);
 		setSubagentModelProfiles("claude", []);
 		setSubagentModelProfiles("api", []);
 		const profiles = getSubagentModelProfiles();
-		const terraIndex = profiles.findIndex(profile => profile.id === "gpt-5.6-terra");
-		const lunaIndex = profiles.findIndex(profile => profile.id === "gpt-5.6-luna");
-		assert.ok(terraIndex >= 0 && lunaIndex > terraIndex);
+		const terraIndex = profiles.findIndex(profile => profile.id === "codex::gpt-6.1-terra");
+		const lunaIndex = profiles.findIndex(profile => profile.id === "codex::gpt-6-luna");
+		assert.ok(lunaIndex >= 0 && terraIndex > lunaIndex, "Luna, the cheaper model, comes first");
 		const guidance = buildSubagentToolGuidance();
-		assert.ok(guidance.includes("GPT-5.6 Terra (preferred cheaper everyday subagent model), then GPT-5.6 Luna"));
-		assert.ok(guidance.includes("Preferred subagent order"));
+		assert.ok(guidance.includes('model="GPT-6-Luna (Codex) (llamacpp)": Fast and affordable: small, well-defined steps'));
+		assert.ok(guidance.includes('model="GPT-6.1 Terra (Codex) (llamacpp)": Larger multi-step steps'));
+		assert.ok(guidance.includes("Codex Luna (fast and affordable) for small, well-defined steps"));
+		assert.ok(guidance.includes("Codex Terra for larger multi-step steps"));
+		assert.ok(guidance.includes("same kind of steps as DeepSeek Flash"));
+		assert.ok(guidance.includes("Codex Luna (small steps) → Codex Terra (larger steps)"));
 		assert.ok(guidance.includes("DeepSeek cannot process image input"));
-		assert.ok(guidance.includes("Codex Terra → Codex Luna"));
+		assert.ok(!guidance.includes("premium —"), "without Claude there is no premium tier");
+		setSubagentModelProfiles("codex", []);
 	});
 
 	test("notes DeepSeek Flash vision support when a Flash profile is available", () => {
@@ -252,7 +277,7 @@ suite("subagent model guidance", () => {
 			id: "deepseek::deepseek-flash", label: "DeepSeek Flash", provider: "deepseek", defaultEffort: "high", useWhen: "Complex tasks",
 		}]);
 		setSubagentModelProfiles("codex", [{
-			id: "gpt-5.6-codex", label: "GPT-5.6 Codex", provider: "codex", defaultEffort: "high", useWhen: "Repo work",
+			id: "codex::gpt-6-luna", label: "GPT-6-Luna (Codex)", provider: "codex", defaultEffort: "high", useWhen: "Small steps",
 		}]);
 		setSubagentModelProfiles("claude", []);
 		setSubagentModelProfiles("api", []);

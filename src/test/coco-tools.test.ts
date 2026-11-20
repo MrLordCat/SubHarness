@@ -3,7 +3,7 @@ import * as vscode from "vscode";
 import { CocoAcpClient } from "../coco/acp-client";
 import { CocoChatModelProvider } from "../coco/coco-provider";
 import { mapCocoModel } from "../coco/model-adapter";
-import { COCO_TOOL_DESCRIPTION_LIMIT, CocoTurnBridge, collectCocoToolResults, convertCocoToolResult, fitCocoToolDescription } from "../coco/turn-bridge";
+import { COCO_INTERNAL_REFUSAL_LIMIT, COCO_TOOL_DESCRIPTION_LIMIT, CocoTurnBridge, collectCocoToolResults, convertCocoToolResult, fitCocoToolDescription } from "../coco/turn-bridge";
 import { setSubagentModelProfiles } from "../subagent-guidance";
 import { CompositeChatModelProvider } from "../composite-provider";
 
@@ -136,6 +136,93 @@ suite("Coco native Chat tools", () => {
 			await assert.rejects(segment, /internal action.*bash/);
 			assert.strictEqual(stopped, 1);
 		} finally { bridge.dispose(); token.dispose(); }
+	});
+
+	const cliOptions = [{ optionId: "allow", kind: "allow_once" }, { optionId: "always_0", kind: "allow_always" }, { optionId: "deny", kind: "reject_once" }];
+
+	test("refuses a pending built-in action, keeps the turn and reports the refusal with the next tool result", async () => {
+		let stopped = 0;
+		const bridge = new CocoTurnBridge([tool], () => { stopped++; });
+		const token = new vscode.CancellationTokenSource();
+		let finish!: () => void;
+		const operation = new Promise<void>(resolve => { finish = resolve; });
+		try {
+			const parts: vscode.LanguageModelResponsePart[] = [];
+			const segment = bridge.start(() => operation, { report: part => parts.push(part) }, token.token);
+			bridge.accept({ sessionUpdate: "tool_call", toolCallId: "toolu_1", title: "bash", kind: "execute", status: "pending" });
+			assert.strictEqual(bridge.refuseInternalAction({ toolCall: { title: "bash: npm test" }, options: cliOptions }), "deny");
+			bridge.accept({ sessionUpdate: "tool_call_update", toolCallId: "toolu_1", status: "failed" });
+			assert.strictEqual(bridge.isTerminal, false, "a refused action must not stop the turn");
+			const response = bridge.delegate(String(bridge.clientTools[0].name), { command: "npm test" });
+			await segment;
+			const resumed = bridge.resume([result(callFrom(parts), "Tests passed")], { report: () => undefined }, token.token);
+			const reply = await response;
+			assert.match(String(reply.output), /^Tests passed\n\n\[AI Agent Bridge\] Your built-in action "bash: npm test" was refused automatically by the bridge, not by the user/);
+			assert.strictEqual(bridge.takeRefusalNote(), undefined, "the note is delivered once");
+			finish(); await resumed;
+			assert.strictEqual(stopped, 1);
+		} finally { bridge.dispose(); token.dispose(); finish(); }
+	});
+
+	test("stops a pending built-in action that starts without a permission request", async () => {
+		const bridge = new CocoTurnBridge([tool], () => undefined);
+		const token = new vscode.CancellationTokenSource();
+		try {
+			const segment = bridge.start(async () => {
+				bridge.accept({ sessionUpdate: "tool_call", toolCallId: "toolu_2", title: "bash", kind: "execute", status: "pending" });
+				assert.strictEqual(bridge.isTerminal, false);
+				bridge.accept({ sessionUpdate: "tool_call_update", toolCallId: "toolu_2", status: "in_progress" });
+			}, { report: () => undefined }, token.token);
+			await assert.rejects(segment, /internal action \(bash\)\. It was stopped/);
+		} finally { bridge.dispose(); token.dispose(); }
+	});
+
+	test("stops the turn once Coco keeps retrying refused built-in actions", () => {
+		const bridge = new CocoTurnBridge([tool], () => undefined);
+		try {
+			for (let attempt = 0; attempt < COCO_INTERNAL_REFUSAL_LIMIT; attempt++) {
+				assert.strictEqual(bridge.refuseInternalAction({ toolCall: { title: "write: a.txt" }, options: cliOptions }), "deny");
+			}
+			assert.strictEqual(bridge.refuseInternalAction({ toolCall: { title: "write: a.txt" }, options: cliOptions }), undefined);
+			assert.strictEqual(bridge.refuseInternalAction({ toolCall: { title: "write: b.txt" }, options: [{ optionId: "yes", kind: "allow_always" }] }), undefined,
+				"without a one-time reject option the request is not answered");
+			assert.match(bridge.takeRefusalNote() ?? "", /"write: a\.txt", "write: a\.txt", "write: a\.txt" and 5 more/);
+		} finally { bridge.dispose(); }
+	});
+
+	test("tells Coco to use the client tools when its turn ends after a refused built-in write", async () => {
+		const prompts: string[] = [], answers: Array<string | undefined> = [], diagnostics: string[] = [];
+		const terminal: vscode.LanguageModelChatTool = { name: "run_in_terminal", description: "Run a command.", inputSchema: { type: "object", properties: {} } };
+		const provider = new CocoChatModelProvider({
+			isEnabled: () => true, resolveCli: () => "mock-cli", log: event => diagnostics.push(event),
+			createClient: (_exe, _cwd, _connection, _model, handlers) => ({
+				initialize: async () => undefined, newSession: async () => ({ sessionId: "session" }),
+				prompt: async (_sessionId: string, prompt: string) => {
+					prompts.push(prompt);
+					if (prompts.length === 1) {
+						handlers?.onUpdate?.({ sessionUpdate: "tool_call", toolCallId: "toolu_1", title: "write", kind: "edit", status: "pending" });
+						answers.push(await handlers?.onPermission?.({ toolCall: { title: "write: C:\\repo\\a.txt" }, options: cliOptions }));
+						handlers?.onUpdate?.({ sessionUpdate: "tool_call_update", toolCallId: "toolu_1", status: "failed" });
+						handlers?.onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "The user denied the write." } });
+					} else {
+						handlers?.onUpdate?.({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Continuing with the client tools." } });
+					}
+					return { stopReason: "end_turn" };
+				},
+				cancel: () => undefined, dispose: () => undefined,
+			}) as unknown as CocoAcpClient,
+		});
+		const token = new vscode.CancellationTokenSource(), parts: vscode.LanguageModelResponsePart[] = [];
+		try {
+			await provider.provideLanguageModelChatResponse(model, [vscode.LanguageModelChatMessage.User("Write a file")],
+				{ ...options, tools: [tool, terminal] }, { report: part => parts.push(part) }, token.token);
+			assert.deepStrictEqual(answers, ["deny"]);
+			assert.strictEqual(prompts.length, 2, "one follow-up prompt in the same session");
+			assert.match(prompts[1], /"write: C:\\\\repo\\\\a\.txt" was refused automatically by the bridge, not by the user/);
+			assert.match(prompts[1], /the supplied client tools \(vscode_chat_run_in_terminal_[0-9a-f]{10}\)/);
+			assert.ok(parts.some(part => part instanceof vscode.LanguageModelTextPart && part.value === "Continuing with the client tools."));
+			assert.ok(diagnostics.includes("coco.tool.internal_refused") && diagnostics.includes("coco.tool.internal_refusal_followup"));
+		} finally { provider.dispose(); token.dispose(); }
 	});
 
 	test("lets Coco look up deferred tool schemas through its own catalog", async () => {

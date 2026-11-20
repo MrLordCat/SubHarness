@@ -10,6 +10,7 @@ import { CocoResponseStream } from "./response-stream";
 import { selectCocoChatTools } from "./terminal-tools";
 import { parseCocoContextUsage } from "./usage-adapter";
 import { cocoClientToolName } from "./tool-names";
+import { cocoInternalRefusalNote } from "./tool-policy";
 
 type JsonObject = Record<string, unknown>;
 interface PendingCall {
@@ -81,7 +82,7 @@ export interface CocoPreservedResult { output: string; imageFiles?: readonly { f
 
 /**
  * Coco's built-in `read` is the only CLI path that puts an image inside a tool result, in the same turn.
- * The bridge allows it, read-only and once per call, for image files it saved itself; every other internal action stays blocked.
+ * The bridge allows it, read-only and once per call, for image files it saved itself; every other internal action is refused or stopped.
  */
 const COCO_READ_TOOL = "read";
 const isCocoReadTitle = (title: unknown) => title === COCO_READ_TOOL || typeof title === "string" && title.startsWith(`${COCO_READ_TOOL}: `);
@@ -93,6 +94,13 @@ const imageFileKey = (file: string) => { const resolved = path.resolve(file); re
  * tool_search; it has no side effects outside the CLI process.
  */
 const COCO_CATALOG_ACTIONS = new Set(["tool_search"]);
+
+/** Built-in actions the bridge refuses in one turn before it stops the turn: a model that keeps retrying them is stuck. */
+export const COCO_INTERNAL_REFUSAL_LIMIT = 8;
+/** Follow-up prompts that repeat the refusal note when Coco ends its turn without returning to the client tools. */
+export const COCO_INTERNAL_REFUSAL_FOLLOWUPS = 2;
+/** Client tools named in the refusal note, so Coco knows which ones replace its built-in edits and commands. */
+const COCO_REPLACEMENT_TOOL = /replace_?string|multi_?replace|create_?file|apply_?patch|edit_?file|run_?in_?terminal/i;
 
 function hasVisibleText(update: JsonObject): boolean {
 	const content = update.content as JsonObject | undefined;
@@ -129,6 +137,11 @@ export class CocoTurnBridge implements vscode.Disposable {
 	private readonly viewedImageHashes = new Set<string>();
 	/** Accepted `read` calls still waiting for their permission request. */
 	private readonly pendingImageReads: string[] = [];
+	/** Built-in actions announced as pending, by ACP tool-call id; their permission request is refused, a run without one stops the turn. */
+	private readonly pendingInternal = new Map<string, string>();
+	/** Refused built-in actions Coco has not been told about yet. */
+	private readonly refusedActions: string[] = [];
+	private refusals = 0;
 	private get pending() { return this.state.pending; }
 	private stream?: CocoResponseStream;
 	private latestUsage?: JsonObject;
@@ -228,6 +241,26 @@ export class CocoTurnBridge implements vscode.Disposable {
 		if (this.terminal || typeof title !== "string" || !title.startsWith(`${COCO_READ_TOOL}: `)) { return undefined; }
 		return request.options?.find(candidate => candidate.kind === "reject_once")?.optionId;
 	}
+	/**
+	 * Any other built-in action that asks for permission is refused with the one-time `reject_once` option: nothing runs,
+	 * the CLI reports the failure to Coco and the turn continues, so its work is kept. Coco then learns that the bridge refused it
+	 * (see {@link takeRefusalNote}). Undefined once the turn has stopped or Coco keeps retrying, which stops the turn.
+	 */
+	refuseInternalAction(request: CocoPermissionRequest): string | undefined {
+		if (this.terminal || this.refusals >= COCO_INTERNAL_REFUSAL_LIMIT) { return undefined; }
+		const option = request.options?.find(candidate => candidate.kind === "reject_once")?.optionId;
+		if (!option) { return undefined; }
+		this.refusals++;
+		const title = request.toolCall?.title;
+		this.refusedActions.push(typeof title === "string" && title.trim() ? title.trim() : "built-in tool");
+		return option;
+	}
+	/** The note about refused built-in actions Coco has not seen yet, delivered once: with the next client-tool result or as a follow-up prompt. */
+	takeRefusalNote(): string | undefined {
+		if (!this.refusedActions.length) { return undefined; }
+		const tools = [...this.tools].filter(([, tool]) => COCO_REPLACEMENT_TOOL.test(tool.name)).map(([alias]) => alias);
+		return cocoInternalRefusalNote(this.refusedActions.splice(0), tools);
+	}
 	rememberResults(messages: readonly vscode.LanguageModelChatRequestMessage[]): void {
 		for (const message of messages) { for (const part of message.content) {
 			if (part instanceof vscode.LanguageModelToolResultPart && part.callId.startsWith("coco-")) { this.historicalResults.set(part.callId, part); }
@@ -261,6 +294,9 @@ export class CocoTurnBridge implements vscode.Disposable {
 			.then(converted => {
 				if (this.terminal) { return; }
 				for (const item of converted) { this.collectToolImages(item.result); }
+				// Coco learns about built-in actions refused since its last client-tool call with this result, in the same turn.
+				const note = converted.length ? this.takeRefusalNote() : undefined;
+				if (note) { converted[0].converted.output = `${String(converted[0].converted.output ?? "")}\n\n${note}`; }
 				this.pending.accept(converted, item => item.result.callId, (call, item) => { this.completed.set(item.result.callId,item.converted); call.resolve(item.converted); }, call => call.reported);
 				this.reportCalls();
 			}, error => this.finish(error instanceof Error ? error : new Error(String(error))));
@@ -281,10 +317,20 @@ export class CocoTurnBridge implements vscode.Disposable {
 			// Client tools emit an ACP event too; Chat renders their delegated call, once.
 			// A built-in read is decided by its permission request (allowed for saved images, refused otherwise).
 			// Reads the CLI runs without asking cannot be stopped by ending the turn: the file is read by then.
-			if (typeof update.title !== "string" || (!this.tools.has(update.title) && !COCO_CATALOG_ACTIONS.has(update.title)
-				&& !this.acceptImageRead(update) && !isCocoReadTitle(update.title))) {
-				this.blockInternalAction(typeof update.title === "string" ? update.title : "unknown tool");
-			}
+			const title = typeof update.title === "string" ? update.title : undefined;
+			if (title !== undefined && (this.tools.has(title) || COCO_CATALOG_ACTIONS.has(title) || this.acceptImageRead(update) || isCocoReadTitle(title))) { return; }
+			// Any other pending built-in action waits for its permission request, which the bridge refuses.
+			if (update.status === "pending" && typeof update.toolCallId === "string") { this.pendingInternal.set(update.toolCallId, title ?? "unknown tool"); return; }
+			this.blockInternalAction(title ?? "unknown tool");
+			return;
+		}
+		if (update.sessionUpdate === "tool_call_update") {
+			const id = typeof update.toolCallId === "string" ? update.toolCallId : undefined;
+			const title = id === undefined ? undefined : this.pendingInternal.get(id);
+			if (id === undefined || title === undefined) { return; }
+			// A refused action fails; one that starts anyway ran without a permission request and stops the turn.
+			if (update.status === "failed") { this.pendingInternal.delete(id); }
+			else if (update.status === "in_progress" || update.status === "completed") { this.blockInternalAction(title); }
 			return;
 		}
 		if (update.sessionUpdate !== "agent_message_chunk" && update.sessionUpdate !== "agent_thought_chunk") { return; }
@@ -320,7 +366,8 @@ export class CocoTurnBridge implements vscode.Disposable {
 	}
 
 	blockInternalAction(title: string): void {
-		this.finish(new Error(`Coco attempted an internal action (${title.slice(0, 160)}). It was stopped. `
+		const repeated = this.refusals >= COCO_INTERNAL_REFUSAL_LIMIT ? ` after ${this.refusals} automatic refusals` : "";
+		this.finish(new Error(`Coco attempted an internal action (${title.slice(0, 160)})${repeated}. It was stopped. `
 			+ "Retry using the supplied VS Code Chat tools so permissions and execution appear in the chat."));
 	}
 
@@ -387,6 +434,8 @@ export class CocoTurnBridge implements vscode.Disposable {
 		this.imageFiles.clear();
 		this.viewedImageHashes.clear();
 		this.pendingImageReads.length = 0;
+		this.pendingInternal.clear();
+		this.refusedActions.length = 0;
 		this.detach(error);
 		this.onStop(error);
 	}

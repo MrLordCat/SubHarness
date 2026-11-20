@@ -1,5 +1,90 @@
 # Changelog
 
+## 1.21.44 (development patch) - 2026-11-20
+
+- Changed: Codex subagents come only from the 6.x family. A 5.x Luna or Terra
+  is no longer offered as a fallback, so an account without 6.x models has no
+  Codex subagent.
+
+## 1.21.43 (development patch) - 2026-11-20
+
+- Fixed: Codex and Claude subagents never started in the bridge chat. Their
+  subagent list used bare model ids (`gpt-5.6-luna`), while the chat looks the
+  model up by its full id (`codex::gpt-5.6-luna`), so every call ended with
+  "is not available right now". Both now register the chat model ids.
+- Changed: from Codex the subagent list offers the newest Luna and the newest
+  Terra of the subscription (now GPT-6-Luna and GPT-6.1 Terra) instead of only
+  the 5.6 models, which Codex marks as legacy. Luna is described for small,
+  well-defined steps (an edit in one or two files, a search, a test run), Terra
+  for larger multi-step steps (several files with their tests, a refactoring),
+  and Luna, the cheaper one, comes first. Before, both had the same description
+  and Terra was wrongly called the cheaper one. Sol is still never a subagent.
+
+## 1.21.42 (development patch) - 2026-11-20
+
+- Added: favorites in the bridge chat's model picker. **☆** next to a model
+  stars it; once a model is starred, the picker opens on the starred models,
+  grouped by provider, plus the selected one, with **Show all models** below
+  them. A search always covers every model. Stars are kept for every workspace.
+  Only the model list scrolls now, so the search field and the buttons under
+  the list stay in view.
+- Added: when an answer used tools, its text after the last tool round is
+  shown in a separate **Answer** block with a tinted background and a blue
+  edge, apart from the commentary between the tool calls. It appears once the
+  answer is complete; answers without tools look as before.
+
+## 1.21.41 (development patch) - 2026-11-20
+
+- Added: clicking the context counter in the bridge chat (`13.5k / 400k`)
+  opens a popup with the **Shared context** slider for Codex, Claude, Coco and
+  Cursor, the **Follow the Codex window** toggle (it shows the followed Codex
+  model and window and disables the slider once that window is known), and the
+  **Model switch** slider for the most a model receives when it takes over a
+  chat. A value is saved when the slider is released. The popup edits the same
+  settings as Provider Context, and a change in either place shows in the
+  other.
+
+## 1.21.40 (development patch) - 2026-11-20
+
+- Fixed: compaction when another model takes over a bridge chat no longer
+  shrinks a long task to its summary (397k → 11k tokens before). Cuts were
+  only possible between your messages, so one long turn that did not fit the
+  110k target went into the summary whole. Now the turn that does not fit keeps
+  your request and the newest tool rounds of its answer, and only its earlier
+  rounds are summarized. Tool results longer than 12,000 characters in the
+  older kept turns are shortened to their start and end instead.
+- Changed: the summary may be up to 32,000 characters (16,000 before) and
+  carries your summarized requests verbatim; before, the extract turned a
+  request into `<context> | </userRequest>`. It also names the chat's log file,
+  so the model can look up what the summary left out.
+- Added: when DeepSeek cannot write the summary (no key, an error, an empty
+  balance), the model taking the chat over writes it from the same prompt,
+  without tools; the extract is the last resort. The compaction card shows who
+  wrote the summary, why a fallback was used, and the requests it kept.
+
+## 1.21.39 (development patch) - 2026-11-20
+
+- Fixed: **Retry** on a failed or interrupted answer no longer throws away its
+  work. Before, it cut the chat back to the request, dropped the turn's files
+  from Keep/Undo and sent the request again; Coco then refused it with "The
+  previous Coco native turn was interrupted". Now the answer, its tool results
+  and its file changes stay, and the bridge sends the model a continuation
+  message with the error that stopped it, asking it to finish the task without
+  repeating finished steps. The chat shows that message as a one-line marker
+  that cannot be edited. To start a request over, edit it.
+
+## 1.21.38 (development patch) - 2026-11-20
+
+- Fixed: a Coco turn no longer ends with "Coco attempted an internal action"
+  when Coco reaches for its built-in `write`, `edit` or `bash`. The bridge
+  refuses the CLI's permission request with the one-time `reject_once` option:
+  nothing runs, the turn continues, and its work and Keep/Undo changes stay.
+  The next tool result tells Coco that the bridge refused the action
+  automatically, not the user, and names the VS Code tools to use instead; if
+  Coco ends its turn without another tool call, the same note goes as a
+  follow-up prompt (at most twice). The turn still stops after eight refusals
+  in one turn, and for built-in actions that run without asking permission.
+
 ## 1.21.37 (development patch) - 2026-11-20
 
 - Added: Codex works without the OpenAI extension. When no Codex CLI is found

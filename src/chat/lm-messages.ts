@@ -30,7 +30,75 @@ export function activeCompaction(messages: readonly ChatMessage[]): { part: Chat
 }
 
 export function compactionSummaryText(part: ChatCompactionPart): string {
-	return `<conversation_summary>\nThe earlier part of this conversation (${part.summarizedMessages} messages) was compacted. Summary:\n\n${part.summary}\n</conversation_summary>`;
+	const covered = [
+		...(part.summarizedMessages > 0 || !part.trimmedTurn ? [`${part.summarizedMessages} messages`] : []),
+		...(part.trimmedTurn
+			? [`the first ${part.trimmedTurn.rounds} tool ${part.trimmedTurn.rounds === 1 ? "round" : "rounds"} of the answer to the first request below`]
+			: []),
+	].join(" and ");
+	const log = part.transcriptPath
+		? `\n\nEvery earlier message is kept in full in the chat log ${JSON.stringify(part.transcriptPath)} (JSON Lines, one event per line). Search it when a detail is missing instead of redoing the work.`
+		: "";
+	const requests = part.requests?.length
+		? `\n\nThe user's requests in the summarized part, verbatim (long ones shortened), oldest first:\n${part.requests.map((request, index) => `[${index + 1}] ${request}`).join("\n")}`
+		: "";
+	return `<conversation_summary>\nThe earlier part of this conversation (${covered}) was compacted. Summary:\n\n${part.summary}${requests}${log}\n</conversation_summary>`;
+}
+
+/** Tool results above this length in older kept turns reach the model as their start and end. */
+export const COMPACTED_TOOL_RESULT_MAX_CHARS = 12_000;
+const COMPACTED_TOOL_RESULT_HEAD = 8_000;
+const COMPACTED_TOOL_RESULT_TAIL = 3_800;
+const COMPACTED_TOOL_RESULT_NOTE = "\n[Earlier tool output shortened at compaction; the chat log keeps it in full]\n";
+
+/** Long tool results as compaction keeps them in older turns; the same array when none is long. */
+export function shortenToolResults(parts: ChatPart[]): ChatPart[] {
+	let changed = false;
+	const shortened = parts.map(part => {
+		if (part.kind !== "toolResult" || part.text.length <= COMPACTED_TOOL_RESULT_MAX_CHARS) {
+			return part;
+		}
+		changed = true;
+		return { ...part, text: `${part.text.slice(0, COMPACTED_TOOL_RESULT_HEAD)}${COMPACTED_TOOL_RESULT_NOTE}${part.text.slice(-COMPACTED_TOOL_RESULT_TAIL)}` };
+	});
+	return changed ? shortened : parts;
+}
+
+export interface CompactionWindow {
+	compaction?: { part: ChatCompactionPart; start: number };
+	/** The messages the model receives after the summary, as it receives them. */
+	messages: ChatMessage[];
+	/** Per message, the leading parts the trimmed turn leaves out. */
+	partOffsets: number[];
+}
+
+/** The active compaction and the kept messages, with the trimmed turn cut and older tool outputs shortened. */
+export function compactionWindow(messages: readonly ChatMessage[]): CompactionWindow {
+	const compaction = activeCompaction(messages);
+	if (!compaction) {
+		return { messages: [...messages], partOffsets: messages.map(() => 0) };
+	}
+	const kept = messages.slice(compaction.start);
+	const { trimmedTurn, abbreviatedUntil } = compaction.part;
+	const until = abbreviatedUntil ? kept.findIndex(message => message.id === abbreviatedUntil) : -1;
+	const partOffsets = kept.map(() => 0);
+	const view = kept.map((message, index) => {
+		let parts = message.parts;
+		if (trimmedTurn && message.id === trimmedTurn.messageId && message.role === "assistant") {
+			parts = parts.slice(trimmedTurn.fromPart);
+			partOffsets[index] = trimmedTurn.fromPart;
+		}
+		if (index < until) {
+			parts = shortenToolResults(parts);
+		}
+		return parts === message.parts ? message : { ...message, parts };
+	});
+	return { compaction, messages: view, partOffsets };
+}
+
+/** A system message; LanguageModelChatMessageRole.System is proposed API. */
+export function systemMessage(text: string): vscode.LanguageModelChatMessage {
+	return new vscode.LanguageModelChatMessage(SYSTEM_ROLE, text);
 }
 
 /** The user's text in the form the model receives: host context, memory, attachments, then the request itself. */
@@ -64,13 +132,13 @@ function toolInput(input: unknown): object {
 export function toLanguageModelMessages(messages: readonly ChatMessage[], options: LanguageModelRenderOptions = {}): vscode.LanguageModelChatRequestMessage[] {
 	const converted: vscode.LanguageModelChatRequestMessage[] = [];
 	if (options.system) {
-		converted.push(new vscode.LanguageModelChatMessage(SYSTEM_ROLE, options.system));
+		converted.push(systemMessage(options.system));
 	}
-	const compaction = activeCompaction(messages);
-	if (compaction) {
-		converted.push(vscode.LanguageModelChatMessage.User(compactionSummaryText(compaction.part)));
+	const window = compactionWindow(messages);
+	if (window.compaction) {
+		converted.push(vscode.LanguageModelChatMessage.User(compactionSummaryText(window.compaction.part)));
 	}
-	for (const message of compaction ? messages.slice(compaction.start) : messages) {
+	for (const message of window.messages) {
 		converted.push(...renderChatMessage(message, options));
 	}
 	return converted;

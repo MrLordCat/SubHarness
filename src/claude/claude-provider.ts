@@ -2633,7 +2633,8 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		setSubagentModelProfiles("claude", CLAUDE_SUBSCRIPTION_MODELS.map(model => {
 			const availability = this.getModelAvailability(model.id);
 			return {
-				id: model.id,
+				// The chat model id (`claude::<id>`), so the bridge chat finds the model a subagent asks for.
+				id: encodeClaudeModelId(model.id),
 				label: model.name,
 				provider: "claude",
 				defaultEffort: "high",

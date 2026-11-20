@@ -10,6 +10,9 @@ interface ModelPickerProps {
 	quota?: ChatProviderQuota[];
 	onRefreshQuota?: () => void;
 	onSelectModel: (modelId: string) => void;
+	/** Starred model ids; when one is available the picker opens on them. */
+	favorites?: string[];
+	onSetFavorite?: (modelId: string, favorite: boolean) => void;
 	/** Subscriptions to sign in to, listed below the models. */
 	signIn?: ChatSignInOffer[];
 	onSignIn?: (provider: string) => void;
@@ -25,12 +28,41 @@ interface VisibleGroup {
 	models: VisibleModel[];
 }
 
-export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, onSelectModel, signIn, onSignIn }: ModelPickerProps) {
+/** The models that match the query, grouped by provider; `only` keeps just those ids. */
+function visibleGroups(models: readonly ChatModelGroup[], query: string, only: ReadonlySet<string> | undefined): VisibleGroup[] {
+	const result: VisibleGroup[] = [];
+	let index = 0;
+	for (const group of models) {
+		const visible: VisibleModel[] = [];
+		for (const model of group.models) {
+			if ((only && !only.has(model.id)) || !matchesQuery(query, group.provider, model.name, model.id)) {
+				continue;
+			}
+			visible.push({ model, index });
+			index += 1;
+		}
+		if (visible.length > 0) {
+			result.push({ provider: group.provider, models: visible });
+		}
+	}
+	return result;
+}
+
+/** The favorites view: the starred models that are available, and the selected one; undefined when none is starred. */
+function favoritesFilter(models: readonly ChatModelGroup[], favorites: ReadonlySet<string>, selectedModelId: string | undefined): ReadonlySet<string> | undefined {
+	if (!models.some(group => group.models.some(model => favorites.has(model.id)))) {
+		return undefined;
+	}
+	return selectedModelId === undefined ? favorites : new Set([...favorites, selectedModelId]);
+}
+
+export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, onSelectModel, favorites, onSetFavorite, signIn, onSignIn }: ModelPickerProps) {
 	const instanceId = useId();
 	const [open, setOpen] = useState(false);
 	const [placement, setPlacement] = useState<"above" | "below">("above");
 	const [query, setQuery] = useState("");
 	const [highlight, setHighlight] = useState(0);
+	const [showAll, setShowAll] = useState(false);
 	const wrapperRef = useRef<HTMLDivElement>(null);
 	const triggerRef = useRef<HTMLButtonElement>(null);
 	const searchRef = useRef<HTMLInputElement>(null);
@@ -43,24 +75,12 @@ export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, on
 	useDismiss(wrapperRef, open, close);
 	useKeepInView(popupRef, open);
 
-	const groups = useMemo<VisibleGroup[]>(() => {
-		const result: VisibleGroup[] = [];
-		let index = 0;
-		for (const group of models) {
-			const visible: VisibleModel[] = [];
-			for (const model of group.models) {
-				if (!matchesQuery(query, group.provider, model.name, model.id)) {
-					continue;
-				}
-				visible.push({ model, index });
-				index += 1;
-			}
-			if (visible.length > 0) {
-				result.push({ provider: group.provider, models: visible });
-			}
-		}
-		return result;
-	}, [models, query]);
+	const favoriteSet = useMemo(() => new Set(favorites ?? []), [favorites]);
+	const favoritesOnly = useMemo(() => favoritesFilter(models, favoriteSet, selectedModelId), [models, favoriteSet, selectedModelId]);
+	// The picker opens on the favorites; a search or "Show all models" lists every model.
+	const only = !showAll && !query ? favoritesOnly : undefined;
+	const groups = useMemo<VisibleGroup[]>(() => visibleGroups(models, query, only), [models, query, only]);
+	const total = useMemo(() => models.reduce((count, group) => count + group.models.length, 0), [models]);
 
 	const flat = useMemo(() => groups.flatMap(group => group.models.map(entry => entry.model)), [groups]);
 
@@ -91,9 +111,10 @@ export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, on
 	}, [open, active, highlight]);
 
 	const openPopup = () => {
-		const entries = models.flatMap(group => group.models);
+		const entries = visibleGroups(models, "", favoritesOnly).flatMap(group => group.models.map(entry => entry.model));
 		const selectedIndex = entries.findIndex(model => model.id === selectedModelId);
 		setQuery("");
+		setShowAll(false);
 		setHighlight(selectedIndex >= 0 ? selectedIndex : 0);
 		setPlacement(popupPlacement(triggerRef.current));
 		setOpen(true);
@@ -104,7 +125,17 @@ export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, on
 		const openFromNotice = () => openPopup();
 		window.addEventListener(OPEN_MODEL_PICKER_EVENT, openFromNotice);
 		return () => window.removeEventListener(OPEN_MODEL_PICKER_EVENT, openFromNotice);
-	}, [models, selectedModelId, onRefreshQuota]);
+	}, [models, selectedModelId, onRefreshQuota, favoritesOnly]);
+
+	/** Switches between the favorites and every model, keeping the selected model highlighted. */
+	const toggleShowAll = () => {
+		const next = !showAll;
+		const entries = visibleGroups(models, "", next ? undefined : favoritesOnly).flatMap(group => group.models.map(entry => entry.model));
+		const selectedIndex = entries.findIndex(model => model.id === selectedModelId);
+		setShowAll(next);
+		setHighlight(selectedIndex >= 0 ? selectedIndex : 0);
+		searchRef.current?.focus();
+	};
 
 	const choose = (modelId: string) => {
 		onSelectModel(modelId);
@@ -218,6 +249,13 @@ export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, on
 											onClick={() => choose(entry.model.id)}
 										>
 											<span class="picker-option-name">{entry.model.name}</span>
+											{onSetFavorite ? (
+												<FavoriteStar
+													name={entry.model.name}
+													favorite={favoriteSet.has(entry.model.id)}
+													onToggle={favorite => onSetFavorite(entry.model.id, favorite)}
+												/>
+											) : null}
 											<span class="picker-option-check" aria-hidden="true">{entry.model.id === selectedModelId ? "✓" : ""}</span>
 										</div>
 									))}
@@ -226,6 +264,20 @@ export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, on
 						})}
 						{flat.length === 0 ? <div class="picker-empty">No models match</div> : null}
 					</div>
+					{favoritesOnly && !query ? (
+						<button
+							type="button"
+							class="picker-show-all"
+							// Keeps the focus, and with it the arrow keys, in the search field.
+							onMouseDown={event => event.preventDefault()}
+							onClick={toggleShowAll}
+						>
+							{showAll ? "Show favorites only" : `Show all models (${total})`}
+						</button>
+					) : null}
+					{!favoritesOnly && onSetFavorite && !query ? (
+						<div class="picker-hint">Star models with ☆ and the picker opens on them.</div>
+					) : null}
 					{signIn && signIn.length > 0 && onSignIn ? (
 						<div class="picker-signin">
 							{signIn.map(offer => (
@@ -247,5 +299,33 @@ export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, on
 				</div>
 			) : null}
 		</div>
+	);
+}
+
+interface FavoriteStarProps {
+	name: string;
+	favorite: boolean;
+	onToggle: (favorite: boolean) => void;
+}
+
+/** The star of a model row: a click stars or unstars the model without choosing it. */
+function FavoriteStar({ name, favorite, onToggle }: FavoriteStarProps) {
+	return (
+		<button
+			type="button"
+			tabIndex={-1}
+			class={`picker-option-star${favorite ? " picker-option-star-on" : ""}`}
+			aria-pressed={favorite}
+			aria-label={favorite ? `Remove ${name} from favorites` : `Add ${name} to favorites`}
+			title={favorite ? "Remove from favorites" : "Add to favorites"}
+			// Keeps the focus, and with it the arrow keys, in the search field.
+			onMouseDown={event => event.preventDefault()}
+			onClick={event => {
+				event.stopPropagation();
+				onToggle(!favorite);
+			}}
+		>
+			{favorite ? "★" : "☆"}
+		</button>
 	);
 }

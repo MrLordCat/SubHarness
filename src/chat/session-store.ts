@@ -369,6 +369,12 @@ export class ChatSessionStore {
 		return meta;
 	}
 
+	/** The JSON Lines log that keeps every message of a chat; compaction names it so the model can look details up. */
+	logPath(sessionId: string): string {
+		assertSessionId(sessionId);
+		return this._logFile(sessionId);
+	}
+
 	private _logFile(sessionId: string): string {
 		return path.join(this._root, `${sessionId}${LOG_SUFFIX}`);
 	}
@@ -550,7 +556,9 @@ function isChatMessage(value: unknown): value is ChatMessage {
 		&& (value.images === undefined || (Array.isArray(value.images) && value.images.every(isChatToolImage)))
 		&& (value.usage === undefined || isChatUsage(value.usage))
 		&& (value.usageTotals === undefined || isChatUsageTotals(value.usageTotals))
-		&& (value.promptCache === undefined || isChatPromptCache(value.promptCache));
+		&& (value.promptCache === undefined || isChatPromptCache(value.promptCache))
+		&& (value.continuation === undefined || (isRecord(value.continuation)
+			&& (value.continuation.error === undefined || typeof value.continuation.error === "string")));
 }
 
 function isChatAttachment(value: unknown): boolean {
@@ -594,7 +602,14 @@ function isChatPart(value: unknown): value is ChatPart {
 				&& typeof value.summarizedMessages === "number"
 				&& typeof value.tokensBefore === "number"
 				&& typeof value.tokensAfter === "number"
-				&& (value.method === "deepseek" || value.method === "extractive");
+				&& (value.method === "deepseek" || value.method === "model" || value.method === "extractive")
+				&& (value.trimmedTurn === undefined || (isRecord(value.trimmedTurn) && typeof value.trimmedTurn.messageId === "string"
+					&& Number.isSafeInteger(value.trimmedTurn.fromPart) && Number.isSafeInteger(value.trimmedTurn.rounds)))
+				&& (value.abbreviatedUntil === undefined || typeof value.abbreviatedUntil === "string")
+				&& (value.summaryModel === undefined || typeof value.summaryModel === "string")
+				&& (value.fallbackReason === undefined || typeof value.fallbackReason === "string")
+				&& (value.transcriptPath === undefined || typeof value.transcriptPath === "string")
+				&& (value.requests === undefined || (Array.isArray(value.requests) && value.requests.every(request => typeof request === "string")));
 		case "subagent":
 			return typeof value.callId === "string"
 				&& typeof value.description === "string"

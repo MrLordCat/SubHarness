@@ -25,6 +25,11 @@ tab show the same chat.
   selected. While Codex or Claude is enabled but not signed in, the picker ends
   with **Sign in to Codex** or **Sign in to Claude**; Codex without a CLI
   downloads it first.
+- **☆** next to a model in the picker stars it. Once a model is starred, the
+  picker opens on the starred models, grouped by provider, plus the selected
+  model; **Show all models** lists every model, and a search always looks
+  through all of them. Stars are kept for every workspace, and a model that is
+  missing for a while (signed out, offline) keeps its star.
 - **Thinking** appears for models with reasoning levels. The choice is
   remembered per model.
 - **Tools** lists every tool the model may use. The bridge's own tools are on;
@@ -35,7 +40,15 @@ tab show the same chat.
   balance. Hover it for every window; click it for all providers and reset
   times.
 - The counter on the right is the last request's prompt size against the
-  model's context window.
+  model's context window. Click it for two sliders. **Shared context** is the
+  working context of Codex, Claude, Coco and Cursor, each capped by its model
+  window; **Follow the Codex window** uses the window Codex reports for its
+  last used model instead and disables the slider once that window is known.
+  **Model switch** is the most a model receives when it takes over
+  a chat; a longer chat is compacted first (see Long chats). A value is saved
+  when you release the slider and applies to new requests. The popup changes
+  the same settings as **Provider Context** (`llamacpp.sharedContextLength`,
+  `llamacpp.sharedContextFollowCodex`, `llamacpp.providerSwitchContextTokens`).
 - **cache N%** is the share of prompt tokens the provider served from its
   prompt cache, summed over the selected model's turns since it took over the
   chat. It starts again after a model switch and updates after every request;
@@ -76,6 +89,11 @@ model; the chat shows their name and size.
 
 A turn has no limit on tool rounds: it runs until the model answers without a
 tool call or you press **Stop**. A subagent stops after 100 tool rounds.
+
+When an answer used tools, its text after the last tool round is shown in a
+separate **Answer** block with a tinted background, apart from the commentary
+between the tool calls. It appears once the answer is complete; an answer
+without tools is shown as usual.
 
 For longer work the agent keeps a todo list (`manage_todo_list`), shown above
 the input as **Todos done/total**; click it for the whole list. With
@@ -170,6 +188,13 @@ model from the bridge's subagent list. The task runs with the same tools, but
 without its own subagents. Its card shows the model, the task and the current
 step; expand it for the prompt, every step and the report.
 
+From Codex the list offers only the newest 6.x Luna and the newest 6.x Terra
+of the ChatGPT subscription (now GPT-6-Luna and GPT-6.1 Terra): Luna for small,
+well-defined steps such as an edit in one or two files, a search or a test run,
+Terra for larger multi-step steps such as a change across several files with
+its tests. 5.x models and Sol are never subagents, so an account without 6.x
+models has no Codex subagent.
+
 Models from API profiles (Cursor and other OpenAI-compatible gateways) are
 listed last and marked as paid per use; local llama.cpp servers stay in the
 local group.
@@ -179,9 +204,24 @@ local group.
 When another model takes over a chat that is larger than
 `llamacpp.providerSwitchContextTokens` (default 250,000 tokens), older turns
 are summarized first, down to about 110,000 tokens or half the limit if that is
-lower. A DeepSeek model writes the summary when a DeepSeek API key is
-configured; otherwise the bridge builds a shorter extract of the older turns.
-A card in the answer shows what was summarized.
+lower. The newest turns stay verbatim while they fit. The turn that does not
+fit whole keeps its request and the newest tool rounds of its answer; only its
+earlier rounds go into the summary, so one long task is not reduced to a
+summary. Tool results longer than 12,000 characters in the kept turns before
+your latest message reach the model as their first 8,000 and last 3,800
+characters.
+
+A DeepSeek model writes the summary (up to 32,000 characters) when a DeepSeek
+API key is configured. Without a key, or when DeepSeek fails (for example an
+empty balance), the model taking the chat over writes it from the same prompt,
+without tools; if that fails too, the bridge builds an extract of the older
+turns. The summary also carries your summarized requests verbatim (up to 2,000
+characters each and 12,000 in total; when there are more, the first and the
+newest stay) and names the chat's log file, so the model can look up details
+it left out.
+
+A card in the answer shows what was summarized, who wrote the summary, why a
+fallback was used, and your requests.
 
 The chat window renders only the visible messages. Long tool output and long
 thinking text reach the window as short previews and load in full when you
@@ -191,11 +231,17 @@ expand them.
 
 When a subscription limit or an empty balance stops a request, the answer shows
 when the limit resets and a **Choose another model** button. A failed answer
-has **Retry**, which sends the same message again with its attachments.
+has **Retry**, which continues the answer instead of starting it over: its
+text, tool results and file changes stay in the chat and in Keep/Undo, and the
+bridge sends the model a continuation message with the error that stopped it.
+The chat shows that message as a one-line marker; it cannot be edited. Coco
+continues its saved native session; the model gets the failed answer's tool
+rounds in the history. To start the request over instead, edit your message.
 
 If VS Code closes or reloads while an answer runs, the chat reopens with a
-note that the answer was interrupted, and **Retry**. Files changed by an
-interrupted turn are not listed for Keep/Undo; the changes panel says so.
+note that the answer was interrupted, and **Retry**, which continues it the
+same way. Files changed by an interrupted turn are not listed for Keep/Undo;
+the changes panel says so.
 
 ## Commands
 

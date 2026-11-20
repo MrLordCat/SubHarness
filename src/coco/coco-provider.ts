@@ -14,7 +14,7 @@ import {
 	COCO_COMPACTION_THRESHOLD_ENV, decodeCocoModelId, mapCocoModel, parseCocoModels, parseCocoThinkingConfiguration,
 	resolveCocoCompactionThreshold, resolveCocoReasoningEffort, type CocoModel, type CocoThinkingConfiguration,
 } from "./model-adapter";
-import { CocoTurnBridge, collectCocoToolResults, COCO_CHAT_TOOL_POLICY, COCO_TOOL_IMAGE_ROUNDS } from "./turn-bridge";
+import { CocoTurnBridge, collectCocoToolResults, COCO_CHAT_TOOL_POLICY, COCO_INTERNAL_REFUSAL_FOLLOWUPS, COCO_TOOL_IMAGE_ROUNDS } from "./turn-bridge";
 import { cocoToolImageNote } from "./tool-policy";
 import { estimateCocoTokens } from "./message-adapter";
 import { parseCocoContextUsage, parseCocoTokenUsage } from "./usage-adapter";
@@ -473,6 +473,12 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 					this.diagnostic("coco.tool.read_denied", { requestId: metrics.requestId });
 					return denied;
 				}
+				const refused = bridge.refuseInternalAction(request);
+				if (refused) {
+					const title = request.toolCall?.title;
+					this.diagnostic("coco.tool.internal_refused", { requestId: metrics.requestId, tool: typeof title === "string" ? title.split(":")[0].trim().slice(0, 40) : "unknown" });
+					return refused;
+				}
 				bridge.blockInternalAction(request.toolCall?.title ?? "permission request");
 				return undefined;
 			},
@@ -579,12 +585,21 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 				let stopReason = await send([{ type: "text", text: `${policy}${transcript}\n\n${slot.fresh ? "VS Code conversation history; continue its latest user request" : "New VS Code conversation entries; earlier entries are already in this session"}:\n` }, ...transfer.prompt]);
 				// A tool result cannot carry an image through the native client-tool protocol: the CLI turns every
 				// result into text. The images are attached to a follow-up prompt in the same native session instead.
-				for (let round = 1; round <= COCO_TOOL_IMAGE_ROUNDS; round++) {
-					const images = bridge.takeImages();
-					if (!images.length || bridge.isTerminal) { break; }
-					this.diagnostic("coco.tool.images_attached", { requestId: metrics.requestId, sessionId, round, count: images.length,
-						bytes: images.reduce((total, image) => total + Math.ceil(image.data.length * 3 / 4), 0) });
-					stopReason = await prompt([{ type: "text", text: cocoToolImageNote(images.length) }, ...images] satisfies CocoPromptContent[]);
+				// A turn that ends after a refused built-in action, without a client-tool call, gets the refusal note the same way.
+				for (let imageRound = 0, refusalRound = 0; !bridge.isTerminal;) {
+					const images = imageRound < COCO_TOOL_IMAGE_ROUNDS ? bridge.takeImages() : [];
+					if (images.length) {
+						imageRound++;
+						this.diagnostic("coco.tool.images_attached", { requestId: metrics.requestId, sessionId, round: imageRound, count: images.length,
+							bytes: images.reduce((total, image) => total + Math.ceil(image.data.length * 3 / 4), 0) });
+						stopReason = await prompt([{ type: "text", text: cocoToolImageNote(images.length) }, ...images] satisfies CocoPromptContent[]);
+						continue;
+					}
+					const refusal = refusalRound < COCO_INTERNAL_REFUSAL_FOLLOWUPS ? bridge.takeRefusalNote() : undefined;
+					if (!refusal) { break; }
+					refusalRound++;
+					this.diagnostic("coco.tool.internal_refusal_followup", { requestId: metrics.requestId, sessionId, round: refusalRound });
+					stopReason = await prompt(refusal);
 				}
 				// The request token belongs to the first Chat segment; later segments
 				// cancel through the bridge, so only the bridge state is checked here.

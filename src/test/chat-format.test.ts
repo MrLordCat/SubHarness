@@ -1,6 +1,6 @@
 import * as assert from "node:assert";
-import type { ChatMessage, ChatProviderQuota, ChatUsageTotals } from "../chat/shared/protocol";
-import { describeToolCall, exhaustedWindow, formatAge, formatCacheHit, formatQuotaExhausted, formatQuotaSummary, formatReset, modelCacheStats, parseUriList, selectedModelProvider, sessionGroup } from "../chat/webview/format";
+import type { ChatMessage, ChatPart, ChatProviderQuota, ChatUsageTotals } from "../chat/shared/protocol";
+import { answerStart, describeToolCall, exhaustedWindow, formatAge, formatCacheHit, formatQuotaExhausted, formatQuotaSummary, formatReset, modelCacheStats, parseUriList, selectedModelProvider, sessionGroup } from "../chat/webview/format";
 import { groupModels } from "../chat/shared/model-groups";
 
 function time(date: Date): string {
@@ -12,6 +12,15 @@ function dateTime(date: Date): string {
 }
 
 suite("Chat webview formatting", () => {
+	test("finds the final answer after the last tool round", () => {
+		const call = (callId: string): ChatPart => ({ kind: "toolCall", callId, name: "read", input: {} });
+		const result = (callId: string): ChatPart => ({ kind: "toolResult", callId, text: "ok" });
+		const text = (value: string): ChatPart => ({ kind: "text", text: value });
+		assert.strictEqual(answerStart([text("No tools, all answer.")]), undefined, "an answer without tools is not split");
+		assert.strictEqual(answerStart([text("Reading."), call("c1"), result("c1"), text("Checking more."), call("c2"), result("c2"), { kind: "thinking", text: "t" }, text(" "), text("Done: fixed.")]), 8);
+		assert.strictEqual(answerStart([text("Reading."), call("c1"), result("c1")]), undefined, "an answer that ended in a tool round has none");
+		assert.strictEqual(answerStart([call("c1"), result("c1"), { kind: "notice", level: "error", text: "failed", retryable: true }]), undefined);
+	});
 	test("shows time only for a reset later today", () => {
 		const now = new Date(2026, 10, 18, 9, 0).getTime();
 		const reset = new Date(2026, 10, 18, 14, 30);

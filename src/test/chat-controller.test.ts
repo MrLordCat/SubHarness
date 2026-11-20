@@ -5,8 +5,8 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { renderAttachments, type AttachmentContent } from "../chat/attachments";
 import type { ChatChangeTrackerLike, TurnSnapshot } from "../chat/changes/change-tracker";
-import { ChatController, type ChatAccountSource, type ChatAttachmentsDeps, type ChatControllerDeps, type ChatQuotaSource } from "../chat/chat-controller";
-import type { ChatCompactionPlan } from "../chat/compaction";
+import { ChatController, continuationRequest, type ChatAccountSource, type ChatAttachmentsDeps, type ChatControllerDeps, type ChatQuotaSource } from "../chat/chat-controller";
+import { createChatSummarizer, type ChatCompactionPlan } from "../chat/compaction";
 import { compactionSummaryText } from "../chat/lm-messages";
 import type { ChatMemoryContext, ChatMemorySource } from "../chat/memory-context";
 import type { ChatMemoryStore } from "../chat/memory-store";
@@ -20,6 +20,8 @@ import {
 	WEBVIEW_TOOL_RESULT_PREVIEW_CHARS,
 	type ChatAttachment,
 	type ChatChangeSet,
+	type ChatContextSettings,
+	type ChatContextSettingsChange,
 	type ChatMemoryEntry,
 	type ChatMemorySaveInput,
 	type ChatMessage,
@@ -542,7 +544,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "attachments" | "memory" | "memoryStore">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -2654,6 +2656,71 @@ suite("chat controller", () => {
 		assert.ok(session?.session.title.startsWith("Name this chat"));
 	});
 
+	test("sends the context settings with init and saves only valid changes from the popup", async () => {
+		let settings: ChatContextSettings = {
+			shared: 258_400, sharedMin: 131_072, sharedMax: 1_048_576, followCodex: false,
+			switchTokens: 250_000, switchMin: 32_768, switchMax: 1_048_576,
+		};
+		const updates: ChatContextSettingsChange[] = [];
+		const changed = new vscode.EventEmitter<void>();
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, {
+			contextSettings: {
+				get: () => settings,
+				update: async change => {
+					updates.push(change);
+					settings = { ...settings, ...change };
+				},
+				onDidChange: changed.event,
+			},
+		});
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		assert.deepStrictEqual(current.webview.ofType("init")[0].contextSettings, settings);
+
+		current.webview.receive({ type: "saveContextSettings", change: { shared: 400_000, followCodex: true, switchTokens: "x", extra: 1 } });
+		await waitFor(() => current.webview.ofType("contextSettings").length === 1, "saved settings");
+		assert.deepStrictEqual(updates, [{ shared: 400_000, followCodex: true }]);
+		assert.deepStrictEqual(current.webview.ofType("contextSettings")[0].settings, { ...settings, shared: 400_000, followCodex: true });
+
+		current.webview.receive({ type: "saveContextSettings", change: { shared: -5, switchTokens: 1.5 } });
+		await waitFor(() => current.webview.ofType("contextSettings").length === 2, "ignored values");
+		assert.deepStrictEqual(updates.at(-1), {}, "negative and fractional token counts are dropped");
+		current.webview.receive({ type: "saveContextSettings" });
+
+		settings = { ...settings, codexModel: "gpt-5.5", codexWindow: 475_000 };
+		changed.fire();
+		await waitFor(() => current.webview.ofType("contextSettings").length === 3, "followed window");
+		assert.strictEqual(current.webview.ofType("contextSettings")[2].settings.codexWindow, 475_000);
+		assert.strictEqual(updates.length, 2, "a message without a change is not parsed");
+		changed.dispose();
+	});
+
+	test("stars models in the global state and sends the stars with the model list", async () => {
+		const globalState = new FakeMemento();
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, { globalState });
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		assert.deepStrictEqual(current.webview.ofType("init")[0].favoriteModels, []);
+		const [first, second] = MODELS;
+		const favorites = (): string[] | undefined => current.webview.ofType("models").at(-1)?.favoriteModels;
+
+		current.webview.receive({ type: "setFavoriteModel", modelId: first.id, favorite: true });
+		await waitFor(() => favorites()?.length === 1, "first star");
+		current.webview.receive({ type: "setFavoriteModel", modelId: second.id, favorite: true });
+		await waitFor(() => favorites()?.length === 2, "second star");
+		current.webview.receive({ type: "setFavoriteModel", modelId: first.id, favorite: false });
+		await waitFor(() => favorites()?.length === 1, "unstar");
+		assert.deepStrictEqual(favorites(), [second.id]);
+		current.webview.receive({ type: "setFavoriteModel", modelId: 5, favorite: true });
+		current.webview.receive({ type: "setFavoriteModel", modelId: second.id });
+		await new Promise<void>(resolve => setTimeout(resolve, 30));
+		assert.deepStrictEqual(favorites(), [second.id], "malformed messages change nothing");
+		assert.deepStrictEqual(globalState.get("llamacpp.chat.favoriteModels"), [second.id]);
+		assert.strictEqual(current.state.get("llamacpp.chat.favoriteModels"), undefined, "stars are shared by every workspace");
+	});
+
 	test("compacts a long chat before another model takes over", async () => {
 		const longReply = "x".repeat(2_000);
 		const backend = new FakeBackend([
@@ -2714,6 +2781,60 @@ suite("chat controller", () => {
 		const savedAssistant = persisted.find(message => message.id === assistant2.id);
 		assert.ok(savedAssistant);
 		assert.strictEqual(savedAssistant.parts[0].kind, "compaction");
+	});
+
+	test("lets the model taking over write the summary without DeepSeek and names the chat log", async () => {
+		const longReply = "x".repeat(2_000);
+		const written = [
+			"## Objective", "Answer both questions.", "## Completed", "- Answered the first question.", "## Decisions", "(none)",
+			"## Files and symbols", "(none)", "## Verification", "(none)", "## Failed approaches", "(none)", "## Constraints", "(none)",
+			"## Open work", "- Answer the second question.",
+		].join("\n");
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart(longReply)),
+			progress => progress.report(new vscode.LanguageModelTextPart(written)),
+			progress => progress.report(new vscode.LanguageModelTextPart("second reply")),
+		]);
+		const current = createHarness(root, backend, undefined, undefined, {
+			compaction: {
+				summarize: createChatSummarizer({ apiKey: async () => undefined, userAgent: "test-agent" }),
+				limits: () => ({ triggerTokens: 50, targetTokens: 100 }),
+			},
+		});
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "First question" });
+		await waitFor(() => finished() === 1, "first turn");
+		current.webview.receive({ type: "selectModel", modelId: "claude::smart" });
+		await waitFor(() => current.webview.ofType("models").some(message => message.selectedModelId === "claude::smart"), "model selection");
+		current.webview.receive({ type: "send", text: "Second question" });
+		await waitFor(() => finished() === 2, "second turn");
+
+		assert.strictEqual(backend.requests.length, 3, "the first answer, the summary and the second answer");
+		const writer = backend.requests[1];
+		assert.deepStrictEqual(writer.options.tools, [], "the summary writer gets no tools");
+		assert.strictEqual(writer.messages[0].role as number, 3);
+		assert.match(messageText(writer.messages[0]), /durable engineering-task summary/);
+		assert.match(messageText(writer.messages[0]), /under 32000 characters/);
+		assert.match(messageText(writer.messages[1]), /First question/);
+
+		const assistant2 = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "assistant" && message.turn === 2);
+		assert.ok(assistant2);
+		const compaction = current.webview.ofType("partAdded").filter(message => message.messageId === assistant2.id).map(message => message.part)[0];
+		if (compaction?.kind !== "compaction") {
+			throw new Error("expected a compaction part");
+		}
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		assert.strictEqual(compaction.method, "model");
+		assert.strictEqual(compaction.summaryModel, "Smart (Claude)");
+		assert.strictEqual(compaction.fallbackReason, "No DeepSeek API key is set.");
+		assert.match(compaction.summary, /Answered the first question/);
+		assert.deepStrictEqual(compaction.requests, ["First question"]);
+		assert.strictEqual(compaction.transcriptPath, current.store.logPath(sessionId));
+		const summaryText = messageText(backend.requests[2].messages[0]);
+		assert.ok(summaryText.includes(JSON.stringify(current.store.logPath(sessionId))), "the summary names the chat log");
+		assert.match(summaryText, /verbatim[^\n]*\n\[1\] First question/);
 	});
 
 	test("does not compact when the same model continues", async () => {
@@ -3088,8 +3209,11 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(notices.at(-1), { kind: "notice", level: "info", text: "Stopped." });
 	});
 
-	test("retryTurn re-sends the user text with the attachment context it already rendered", async () => {
+	test("retryTurn continues the failed answer and keeps its work, changes and rendered attachments", async () => {
+		const calls: string[] = [];
+		const tracker = new FakeTracker(calls);
 		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-w", "writer", {})),
 			() => {
 				throw new Error("provider failed");
 			},
@@ -3097,7 +3221,7 @@ suite("chat controller", () => {
 		]);
 		const fake = new FakeAttachments();
 		fake.contents = [{ attachment: ATTACHMENT, text: "const a = 1;" }];
-		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		const current = createHarness(root, backend, loggingTools(calls), tracker, { attachments: fake });
 		harness = current;
 		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
 		current.webview.receive({ type: "send", text: "Explain", attachments: [ATTACHMENT] });
@@ -3106,23 +3230,52 @@ suite("chat controller", () => {
 		assert.ok(assistant);
 
 		current.webview.receive({ type: "retryTurn", messageId: assistant.id });
-		await waitFor(() => finished() === 2 && backend.requests.length === 2, "retried turn");
+		await waitFor(() => finished() === 2 && backend.requests.length === 3, "continued turn");
+		assert.deepStrictEqual(current.webview.ofType("truncated"), [], "Retry discards nothing");
+		assert.ok(calls.includes("end:1:tree-before"), "the failed turn records its changes");
+		assert.ok(!calls.some(call => call.startsWith("forget:") || call.startsWith("undoSince:")), "Keep/Undo keeps the failed turn's changes");
+		const continued = backend.requests[2].messages;
 		const block = renderAttachments([{ attachment: ATTACHMENT, text: "const a = 1;" }]);
-		const expected = `${block}\n<userRequest>\nExplain\n</userRequest>`;
-		assert.strictEqual(messageText(backend.requests[0].messages.at(-1)!), expected);
-		assert.strictEqual(messageText(backend.requests[1].messages.at(-1)!), expected);
-		assert.strictEqual(fake.reads.length, 1, "the retry reuses the rendered block");
-		const resent = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user").at(-1);
-		assert.deepStrictEqual(resent?.attachments, [STORED_ATTACHMENT]);
+		assert.ok(continued.some(message => messageText(message) === `${block}\n<userRequest>\nExplain\n</userRequest>`), "the original request stays");
+		assert.ok(continued.some(message => message.content.some(part => part instanceof vscode.LanguageModelToolCallPart && part.callId === "call-w")),
+			"the model sees the tool round of the failed answer");
+		assert.strictEqual(messageText(continued.at(-1)!), continuationRequest("provider failed"));
+		assert.match(continuationRequest("provider failed"), /with this error:\nprovider failed\n.*continue the same task from where it stopped/s);
+		assert.strictEqual(fake.reads.length, 1, "the attachments are not read again");
+		const marker = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user").at(-1);
+		assert.deepStrictEqual(marker?.continuation, { error: "provider failed" });
 
 		await current.store.flush();
 		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
 		assert.ok(sessionId);
 		const loaded = await new ChatSessionStore(root).loadSession(sessionId);
-		assert.deepStrictEqual(loaded.messages.map(message => message.role), ["user", "assistant"]);
-		assert.deepStrictEqual(loaded.messages[0].parts, [{ kind: "text", text: "Explain" }]);
-		assert.deepStrictEqual(loaded.messages[1].parts, [{ kind: "text", text: "Recovered." }]);
+		assert.deepStrictEqual(loaded.messages.map(message => message.role), ["user", "assistant", "user", "assistant"]);
+		assert.deepStrictEqual(loaded.messages[1].parts.at(-1), { kind: "notice", level: "error", text: "provider failed", retryable: true });
+		assert.deepStrictEqual(loaded.messages[2].continuation, { error: "provider failed" });
+		assert.deepStrictEqual(loaded.messages[2].parts, [{ kind: "text", text: continuationRequest("provider failed") }]);
+		assert.deepStrictEqual(loaded.messages[3].parts, [{ kind: "text", text: "Recovered." }]);
 		assert.strictEqual(loaded.interruptedMessageId, undefined);
+	});
+
+	test("retryTurn ignores an answer that is no longer the last message", async () => {
+		const backend = new FakeBackend([
+			() => {
+				throw new Error("provider failed");
+			},
+			progress => progress.report(new vscode.LanguageModelTextPart("Second.")),
+		]);
+		const current = createHarness(root, backend);
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "One" });
+		await waitFor(() => finished() === 1, "failed turn");
+		const failed = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "assistant");
+		assert.ok(failed);
+		current.webview.receive({ type: "send", text: "Two" });
+		await waitFor(() => finished() === 2, "second turn");
+		current.webview.receive({ type: "retryTurn", messageId: failed.id });
+		await new Promise<void>(resolve => setTimeout(resolve, 50));
+		assert.strictEqual(backend.requests.length, 2);
 	});
 
 	test("ignores retryTurn while the chat is running", async () => {

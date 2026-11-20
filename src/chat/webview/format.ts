@@ -1,5 +1,29 @@
-import type { ChatMessage, ChatModelGroup, ChatProviderQuota, ChatQuotaWindow, ChatUsage } from "../shared/protocol";
+import type { ChatMessage, ChatModelGroup, ChatPart, ChatProviderQuota, ChatQuotaWindow, ChatUsage } from "../shared/protocol";
 import { modelProvider } from "../shared/model-groups";
+
+/**
+ * Where the final answer of an answer that used tools starts: its first text after the last tool round.
+ * The text before and between tool rounds is the agent's working commentary; an answer without tools is all answer.
+ */
+export function answerStart(parts: readonly ChatPart[]): number | undefined {
+	let lastTool = -1;
+	for (let index = 0; index < parts.length; index += 1) {
+		const kind = parts[index].kind;
+		if (kind === "toolCall" || kind === "toolResult" || kind === "subagent") {
+			lastTool = index;
+		}
+	}
+	if (lastTool < 0) {
+		return undefined;
+	}
+	for (let index = lastTool + 1; index < parts.length; index += 1) {
+		const part = parts[index];
+		if (part.kind === "text" && part.text.trim()) {
+			return index;
+		}
+	}
+	return undefined;
+}
 
 /** 312000 → "312k", 1_200_000 → "1.2M"; used wherever token counts are shown. */
 export function formatTokens(value: number): string {

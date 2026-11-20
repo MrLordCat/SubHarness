@@ -39,39 +39,76 @@ export function subagentProviderForSource(source: Pick<ChatModelSource, "protoco
 }
 
 const catalogs = new Map<SubagentProvider, SubagentModelProfile[]>();
-const excludedSubagentModels = new Map<SubagentProvider, ReadonlySet<string>>([
-	["codex", new Set(["gpt-5.6-sol"])],
-]);
 
-/** Only the 5.6 family is approved for Codex subagents (older models excluded). */
-const CODEX_SUBAGENT_FAMILY_PATTERN = /^gpt-5\.6/i;
+/** Codex subagent roles: Luna, the fast affordable model, takes small steps; Terra takes larger ones. */
+export type CodexSubagentRole = "luna" | "terra";
 
-function isEligibleSubagentProfile(profile: SubagentModelProfile): boolean {
-	const modelId = profile.id.toLowerCase().split("::").at(-1) ?? profile.id.toLowerCase();
-	if (profile.provider === "codex" && !CODEX_SUBAGENT_FAMILY_PATTERN.test(modelId)) {
-		// e.g. gpt-5.4-mini must never be routed as a subagent model.
-		return false;
+/** Only the Codex 6.x family is used; 5.x models are never subagents. */
+const CODEX_SUBAGENT_MODEL = /^gpt-(6(?:\.\d+)*)-(luna|terra)$/i;
+
+function bareModelId(id: string): string {
+	return (id.split("::").at(-1) ?? id).toLowerCase();
+}
+
+/** The subagent role of a 6.x Codex model; Sol, 5.x and every other Codex model have none and are never subagents. */
+export function codexSubagentRole(modelId: string): CodexSubagentRole | undefined {
+	return CODEX_SUBAGENT_MODEL.exec(bareModelId(modelId))?.[2].toLowerCase() as CodexSubagentRole | undefined;
+}
+
+/** "gpt-6.1-terra" → [6, 1]; compared part by part, so 6.1 is newer than 6. */
+function codexModelVersion(modelId: string): number[] {
+	return (CODEX_SUBAGENT_MODEL.exec(bareModelId(modelId))?.[1] ?? "0").split(".").map(Number);
+}
+
+function compareVersions(left: readonly number[], right: readonly number[]): number {
+	for (let index = 0; index < Math.max(left.length, right.length); index++) {
+		const diff = (left[index] ?? 0) - (right[index] ?? 0);
+		if (diff !== 0) {
+			return diff;
+		}
 	}
-	return !excludedSubagentModels.get(profile.provider)?.has(modelId);
+	return 0;
+}
+
+/** What the subagent list says a Codex model is for. */
+export function codexSubagentUseWhen(modelId: string): string {
+	switch (codexSubagentRole(modelId)) {
+		case "luna":
+			return "Fast and affordable: small, well-defined steps such as an edit in one or two files, a code search, a routine check or a test run";
+		case "terra":
+			return "Larger multi-step steps: a change across several files with its tests, a refactoring or a feature step";
+		default:
+			return "Use for repository-wide, multi-step coding or high-confidence verification";
+	}
+}
+
+/**
+ * Codex offers subagents only its newest 6.x Luna and newest 6.x Terra; older versions, 5.x, Sol and the other
+ * models stay out. An account without a 6.x Luna or Terra offers none.
+ */
+function newestCodexSubagents(profiles: readonly SubagentModelProfile[]): SubagentModelProfile[] {
+	const newest = new Map<CodexSubagentRole, SubagentModelProfile>();
+	for (const profile of profiles) {
+		const role = codexSubagentRole(profile.id);
+		const current = role ? newest.get(role) : undefined;
+		if (role && (!current || compareVersions(codexModelVersion(profile.id), codexModelVersion(current.id)) > 0)) {
+			newest.set(role, profile);
+		}
+	}
+	return [...newest.values()];
 }
 
 export function setSubagentModelProfiles(
 	provider: SubagentProvider,
 	profiles: readonly SubagentModelProfile[]
 ): void {
-	const unique = new Map(profiles
-		.filter(isEligibleSubagentProfile)
-		.map(profile => [profile.id, profile]));
+	const eligible = provider === "codex" ? newestCodexSubagents(profiles) : profiles;
+	const unique = new Map(eligible.map(profile => [profile.id, profile]));
 	const sorted = [...unique.values()].sort((left, right) => {
 		if (provider === "codex") {
-			// Prefer the cheaper everyday model over the flagship one for subagents.
-			const tier = (label: string): number => {
-				const lower = label.toLowerCase();
-				if (lower.includes("terra")) { return 0; }
-				if (lower.includes("luna")) { return 1; }
-				return 2;
-			};
-			const tierDiff = tier(left.label) - tier(right.label);
+			// Luna, the cheaper model for small steps, comes before Terra.
+			const tier = (id: string): number => codexSubagentRole(id) === "luna" ? 0 : 1;
+			const tierDiff = tier(left.id) - tier(right.id);
 			if (tierDiff !== 0) { return tierDiff; }
 		}
 		return left.label.localeCompare(right.label);
@@ -190,15 +227,11 @@ function buildBudgetRoutingPolicy(profiles: readonly SubagentModelProfile[]): st
 			: "DeepSeek cannot process image input: when the subtask needs vision, skip DeepSeek and use a local vision-capable model or Codex";
 		tiers.push(`mid — DeepSeek (e.g. DeepSeek V4 Pro) for focused multi-step reasoning a local model cannot complete reliably, code analysis across files, and architecture decisions. ${visionNote}`);
 	}
-	if (has("codex") || has("claude")) {
-		const premiumModels: string[] = [];
-		if (has("codex")) {
-			premiumModels.push("Codex GPT-5.6 Terra (preferred cheaper everyday subagent model), then GPT-5.6 Luna");
-		}
-		if (has("claude")) {
-			premiumModels.push("Claude Opus 5 (highest capability, save for the hardest tasks)");
-		}
-		tiers.push(`premium — ${premiumModels.join("; ")}; Sol is excluded from subagent use to conserve premium quota. Use only for repository-wide, cross-file, or high-stakes reasoning the cheaper tiers cannot satisfy`);
+	if (has("codex")) {
+		tiers.push("subscription — Codex Luna (fast and affordable) for small, well-defined steps: an edit in one or two files, a code search, a routine check, a test run; Codex Terra for larger multi-step steps: a change across several files with its tests, a refactoring, a feature step. Both take the same kind of steps as DeepSeek Flash and use the ChatGPT subscription quota; Sol is excluded from subagent use to conserve that quota");
+	}
+	if (has("claude")) {
+		tiers.push("premium — Claude Opus 5 (highest capability): only for cross-file or high-stakes reasoning the cheaper tiers cannot satisfy");
 	}
 	if (has("api")) {
 		// Paid API profiles (Cursor and other gateways) bill every request, so
@@ -211,8 +244,8 @@ function buildBudgetRoutingPolicy(profiles: readonly SubagentModelProfile[]): st
 	const preferredOrder = [
 		"local (cheapest, unlimited)",
 		"DeepSeek (non-vision reasoning)",
-		"Codex Terra",
-		"Codex Luna",
+		"Codex Luna (small steps)",
+		"Codex Terra (larger steps)",
 		"Claude Opus 5 (last resort)",
 		...(has("api") ? ["paid API profiles (only on request)"] : []),
 	].join(" → ");
@@ -235,8 +268,8 @@ export function buildSubagentToolGuidance(): string {
 			const effort = profile.defaultEffort ? `, ${profile.defaultEffort} thinking` : "";
 			return `model="${subagentModelReference(profile.label)}"${effort}: ${profile.useWhen}.`;
 		}).join(" ")
-		: `model="${subagentModelReference("Qwen 3.6 27B (Local)")}": narrow economical tasks, visual inspection, unlimited tokens. model="${subagentModelReference("DeepSeek V4 Pro (DeepSeek)")}", high thinking: focused complex multi-step reasoning. model="${subagentModelReference("GPT-5.6 Luna (Codex)")}", high thinking: repository-wide coding (Sol excluded from subagents to conserve premium quota). model="${subagentModelReference("Opus 5 (Claude)")}", high thinking: highest-capability complex analysis.`;
-	const example = subagentModelReference(profiles[0]?.label ?? "GPT-5.6 Luna (Codex)");
+		: `model="${subagentModelReference("Qwen 3.6 27B (Local)")}": narrow economical tasks, visual inspection, unlimited tokens. model="${subagentModelReference("DeepSeek V4 Pro (DeepSeek)")}", high thinking: focused complex multi-step reasoning. model="${subagentModelReference("GPT-6-Luna (Codex)")}", high thinking: small, well-defined steps. model="${subagentModelReference("GPT-6.1 Terra (Codex)")}", high thinking: larger multi-step steps (Sol excluded from subagents to conserve premium quota). model="${subagentModelReference("Opus 5 (Claude)")}", high thinking: highest-capability complex analysis.`;
+	const example = subagentModelReference(profiles[0]?.label ?? "GPT-6-Luna (Codex)");
 	const budgetPolicy = buildBudgetRoutingPolicy(profiles);
 	const visionDelegation = hasLocal
 		? "Vision delegation: when you need visual inspection (screenshots, UI layouts, images, Unity scene captures) that you cannot see directly, delegate to a local-model subagent. The subagent has access to view_image and terminal tools — it can capture screenshots, inspect images, and report what it sees. Use agentName 'Explore' or any available agent type with a local model — the agent type does not limit which tools the subagent can use."

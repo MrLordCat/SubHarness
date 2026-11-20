@@ -19,9 +19,11 @@ export function useComposerActions(store: ChatStore) {
 	const onSignIn = useCallback((provider: string) => postMessage({ type: "signIn", provider }), []);
 	const onOpenAttachment = useCallback((attachment: ChatAttachment) => postMessage({ type: "openAttachment", attachment }), []);
 	const onRemoveAttachment = useCallback((id: string) => store.removeAttachment(id), [store]);
+	const onSetFavoriteModel = useCallback((modelId: string, favorite: boolean) => store.setFavoriteModel(modelId, favorite), [store]);
 	return {
 		onStop,
 		onSelectModel,
+		onSetFavoriteModel,
 		onSelectThinking,
 		onRefreshQuota,
 		onSetToolsEnabled,

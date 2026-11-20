@@ -3,6 +3,7 @@ import {
 	type ChatApprovalRequest,
 	type ChatAttachment,
 	type ChatChangeSet,
+	type ChatContextSettings,
 	type ChatDraft,
 	type ChatMemoryEntry,
 	type ChatMessage,
@@ -26,6 +27,7 @@ import { postMessage } from "./api";
 const HOST_MESSAGE_TYPES = new Set([
 	"init",
 	"changes",
+	"contextSettings",
 	"models",
 	"quota",
 	"memory",
@@ -139,6 +141,10 @@ export class ChatStore {
 	selectedModelId: string | undefined;
 	/** Subscriptions the model picker offers to sign in to. */
 	signIn: ChatSignInOffer[] = [];
+	/** The sliders of the context popup; absent when the host offers none. */
+	contextSettings: ChatContextSettings | undefined;
+	/** Starred model ids; the model picker opens on them. */
+	favoriteModels: string[] = [];
 	run: ChatRunState = { running: false };
 	latestUsage: ChatUsage | undefined;
 
@@ -288,10 +294,18 @@ export class ChatStore {
 		this.listeners.forEach(listener => listener());
 	};
 
+	/** Shows the star at once; the host's next model list confirms it. */
+	setFavoriteModel = (modelId: string, favorite: boolean): void => {
+		const others = this.favoriteModels.filter(id => id !== modelId);
+		this.favoriteModels = favorite ? [...others, modelId] : others;
+		this.listeners.forEach(listener => listener());
+		postMessage({ type: "setFavoriteModel", modelId, favorite });
+	};
+
 	/** Opens the editor on a user message, with the attachments it was sent with. */
 	startEdit = (messageId: string): void => {
 		const message = this.messageById.get(messageId);
-		if (!message || message.role !== "user") {
+		if (!message || message.role !== "user" || message.continuation) {
 			return;
 		}
 		this.editing = { messageId, attachments: [...message.attachments ?? []] };
@@ -361,6 +375,8 @@ export class ChatStore {
 				this.changes = update.changes;
 				this.selectedModelId = update.selectedModelId;
 				this.signIn = update.signIn ?? [];
+				this.contextSettings = update.contextSettings;
+				this.favoriteModels = update.favoriteModels ?? [];
 				this.run = update.run;
 				this.queued = update.queued ?? [];
 				this.editing = undefined;
@@ -370,9 +386,15 @@ export class ChatStore {
 			case "changes":
 				this.changes = update.changes;
 				return;
+			case "contextSettings":
+				this.contextSettings = update.settings;
+				return;
 			case "models":
 				this.models = update.models;
 				this.signIn = update.signIn ?? [];
+				if (update.favoriteModels) {
+					this.favoriteModels = update.favoriteModels;
+				}
 				if (update.selectedModelId !== undefined) {
 					this.selectedModelId = update.selectedModelId;
 				}

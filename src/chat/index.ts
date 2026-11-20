@@ -11,6 +11,7 @@ import { findGitExecutable } from "./changes/shadow-git";
 import { ChatController, type ChatAccountSource, type ChatQuotaSource } from "./chat-controller";
 import { registerChatView } from "./chat-view";
 import { CHAT_COMPACTION_TARGET_TOKENS, createChatSummarizer } from "./compaction";
+import { createChatContextSettingsSource } from "./context-settings";
 import { createChatMemorySource } from "./memory-context";
 import { createChatMemoryStore } from "./memory-store";
 import { ChatPromptSource } from "./prompt/instructions";
@@ -129,12 +130,14 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		state: context.globalState,
 	});
 	const attachments = new ChatAttachmentSource({ log: deps.log, pasteDir: vscode.Uri.file(path.join(storage, "chat-attachments")) });
+	const contextSettings = createChatContextSettingsSource();
 	const controller = new ChatController({
 		backend: deps.composite,
 		onDidChangeModels: deps.composite.onDidChangeLanguageModelChatInformation ?? NEVER_FIRES,
 		store: new ChatSessionStore(root),
 		tools: createChatToolSource(catalog),
 		state: context.workspaceState,
+		globalState: context.globalState,
 		log: deps.log,
 		changes,
 		openChange: registerChangeDiff(context, changes),
@@ -154,6 +157,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		},
 		quota: deps.quota,
 		accounts: deps.accounts,
+		contextSettings,
 		compaction: {
 			summarize: createChatSummarizer({
 				apiKey: async () => (await context.secrets.get(DEEPSEEK_KEY_SECRET))?.trim() || undefined,
@@ -174,6 +178,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 	context.subscriptions.push(
 		terminals,
 		controller,
+		contextSettings,
 		vscode.commands.registerCommand("llamacpp.chat.new", () => controller.newChat()),
 		vscode.commands.registerCommand("llamacpp.chat.history", () => controller.showSessions()),
 		vscode.commands.registerCommand("llamacpp.chat.openInEditor", () => host.openInEditor()),

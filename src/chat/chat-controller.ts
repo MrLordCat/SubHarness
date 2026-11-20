@@ -4,8 +4,8 @@ import { ToolCallValidationError } from "../tools/tool-call-reliability";
 import { runAgentTurn, type AgentTurnSink, type ChatToolExecutor } from "./agent-loop";
 import { renderAttachments, type AttachmentContent } from "./attachments";
 import type { ChatWebviewBridge } from "./chat-view";
-import { compactChatHistory, estimateTextTokens, planChatCompaction, previousModelId, type ChatCompactionLimits, type ChatSummarizer } from "./compaction";
-import { activeCompaction } from "./lm-messages";
+import { compactChatHistory, estimateTextTokens, planChatCompaction, previousModelId, type ChatCompactionLimits, type ChatSummarizer, type ChatSummaryWriter } from "./compaction";
+import { activeCompaction, systemMessage } from "./lm-messages";
 import { MEMORY_INDEX_ID, type ChatMemoryContext, type ChatMemorySource } from "./memory-context";
 import type { ChatMemoryStore } from "./memory-store";
 import type { ChatSessionStore } from "./session-store";
@@ -27,6 +27,9 @@ import type {
 	ChatApprovalRequest,
 	ChatAttachment,
 	ChatChangeSet,
+	ChatContextSettings,
+	ChatContextSettingsChange,
+	ChatContinuation,
 	ChatDraft,
 	ChatMemoryEntry,
 	ChatMemorySaveInput,
@@ -63,6 +66,8 @@ export interface ChatControllerDeps {
 	store: ChatSessionStore;
 	tools: ChatToolSource;
 	state: vscode.Memento;
+	/** Settings shared by every workspace, such as the starred models; without it they stay in `state`. */
+	globalState?: vscode.Memento;
 	log?: (event: string, data: Record<string, unknown>) => void;
 	/** Records the files each turn changed; without it the chat has no Keep/Undo. */
 	changes?: ChatChangeTrackerLike;
@@ -81,6 +86,8 @@ export interface ChatControllerDeps {
 	quota?: ChatQuotaSource;
 	/** Sign-in offers in the model picker. */
 	accounts?: ChatAccountSource;
+	/** The working-context settings the context popup shows and changes. */
+	contextSettings?: ChatContextSettingsSource;
 	/** Editor selections and files the user attaches to a message. */
 	attachments?: ChatAttachmentsDeps;
 	/** Shared durable memory shown to the model in <memory> blocks before user requests. */
@@ -96,6 +103,12 @@ export interface ChatAttachmentsDeps {
 	savePasted?(files: readonly ChatPastedFile[]): Promise<ChatAttachment[]>;
 	read(attachments: readonly ChatAttachment[]): Promise<AttachmentContent[]>;
 	open(attachment: ChatAttachment): Promise<void>;
+}
+
+export interface ChatContextSettingsSource {
+	get(): ChatContextSettings;
+	update(change: ChatContextSettingsChange): Promise<void>;
+	onDidChange?: vscode.Event<void>;
 }
 
 /** Subscriptions that need a sign-in before their models appear. */
@@ -124,6 +137,9 @@ export interface ChatCompactionDeps {
 
 const ACTIVE_SESSION_KEY = "llamacpp.chat.activeSession";
 const LAST_MODEL_KEY = "llamacpp.chat.lastModel";
+/** Starred model ids; kept in the global state, so every workspace shares them. */
+const FAVORITE_MODELS_KEY = "llamacpp.chat.favoriteModels";
+const FAVORITE_MODELS_LIMIT = 200;
 /** Reasoning level per model id. */
 const THINKING_KEY = "llamacpp.chat.thinking";
 const SESSION_ID = /^[A-Za-z0-9-]{1,64}$/;
@@ -431,8 +447,28 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 		case "openChange": return typeof value.id === "string" ? { type: "openChange", id: value.id } : undefined;
 		case "stop": return { type: "stop" };
 		case "selectModel": return typeof value.modelId === "string" ? { type: "selectModel", modelId: value.modelId } : undefined;
+		case "setFavoriteModel":
+			return typeof value.modelId === "string" && value.modelId.length > 0 && value.modelId.length <= 512 && typeof value.favorite === "boolean"
+				? { type: "setFavoriteModel", modelId: value.modelId, favorite: value.favorite }
+				: undefined;
 		case "selectThinking": return typeof value.value === "string" ? { type: "selectThinking", value: value.value } : undefined;
 		case "refreshQuota": return { type: "refreshQuota" };
+		case "saveContextSettings": {
+			const change = isRecord(value.change) ? value.change : undefined;
+			if (!change) {
+				return undefined;
+			}
+			const tokens = (field: unknown) => typeof field === "number" && Number.isSafeInteger(field) && field > 0 ? field : undefined;
+			const shared = tokens(change.shared), switchTokens = tokens(change.switchTokens);
+			return {
+				type: "saveContextSettings",
+				change: {
+					...(shared === undefined ? {} : { shared }),
+					...(typeof change.followCodex === "boolean" ? { followCodex: change.followCodex } : {}),
+					...(switchTokens === undefined ? {} : { switchTokens }),
+				},
+			};
+		}
 		case "setToolsEnabled":
 			return Array.isArray(value.names) && value.names.every(name => typeof name === "string") && typeof value.enabled === "boolean"
 				? { type: "setToolsEnabled", names: value.names as string[], enabled: value.enabled }
@@ -489,6 +525,16 @@ function turnErrorText(error: unknown): string {
 		return `The provider rejected the model's call${tool} before it ran (${error.message}), so the turn stopped. Send the message again or rephrase it.`;
 	}
 	return errorMessage(error);
+}
+
+/** Longest error a continuation repeats to the model and keeps for its marker. */
+const CONTINUATION_ERROR_MAX_CHARS = 1_000;
+
+/** What Retry sends the model: the failed answer stays in the history, so the model continues it instead of starting over. */
+export function continuationRequest(error?: string): string {
+	const reason = error ? ` with this error:\n${error}\n` : ". ";
+	return `The previous answer stopped before it finished${reason}The user pressed Retry: continue the same task from where it stopped. `
+		+ "Everything that answer already did is kept, file changes included. Check the current state where needed instead of repeating finished steps.";
 }
 
 function emptyChangeSet(): ChatChangeSet {
@@ -553,6 +599,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	private _quotaRefreshedAt = 0;
 	private readonly _memorySubscription: vscode.Disposable | undefined;
 	private readonly _accountSubscription: vscode.Disposable | undefined;
+	private readonly _contextSettingsSubscription: vscode.Disposable | undefined;
 	private _memoryTimer: ReturnType<typeof setTimeout> | undefined;
 	private _lastQuota: string | undefined;
 	private _lastActivity: string | undefined;
@@ -569,6 +616,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				this._broadcastModels();
 			}
 		});
+		this._contextSettingsSubscription = deps.contextSettings?.onDidChange?.(() => this._broadcastContextSettings());
 	}
 
 	attach(webview: vscode.Webview): vscode.Disposable {
@@ -834,6 +882,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		this._modelChangeSubscription.dispose();
 		this._quotaSubscription?.dispose();
 		this._accountSubscription?.dispose();
+		this._contextSettingsSubscription?.dispose();
 		if (this._quotaTimer) {
 			clearTimeout(this._quotaTimer);
 			this._quotaTimer = undefined;
@@ -919,11 +968,23 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "selectModel":
 				await this._selectModel(message.modelId);
 				return;
+			case "setFavoriteModel":
+				await this._setFavoriteModel(message.modelId, message.favorite);
+				return;
 			case "selectThinking":
 				await this._selectThinking(message.value);
 				return;
 			case "refreshQuota":
 				await this._refreshQuota();
+				return;
+			case "saveContextSettings":
+				try {
+					await this._deps.contextSettings?.update(message.change);
+				} catch (error) {
+					this._log("chat.context_settings.save_failed", { message: errorMessage(error) });
+				}
+				// The source's change event may lag the write; the webview gets the stored values now.
+				this._broadcastContextSettings();
 				return;
 			case "listMemory":
 				this._post(webview, this._memoryMessage());
@@ -1091,7 +1152,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 		runtime.busy = true;
 		try {
-			const index = runtime.messages.findIndex(message => message.id === messageId && message.role === "user");
+			const index = runtime.messages.findIndex(message => message.id === messageId && message.role === "user" && !message.continuation);
 			if (index < 0) {
 				return;
 			}
@@ -1129,29 +1190,29 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
-	/** Sends the user message of the failed answer again, keeping its attachments and rendered context. */
+	/**
+	 * Continues a failed or interrupted answer: its text, tool results and file changes stay, and a continuation
+	 * message asks the model to finish the task. Coco continues its saved native session with that new message.
+	 */
 	private async _retryTurn(messageId: string): Promise<void> {
 		await this._ensureSession();
 		const runtime = this._active();
 		if (!runtime || runtime.busy || runtime.running) {
 			return;
 		}
-		const index = runtime.messages.findIndex(message => message.id === messageId && message.role === "assistant");
-		if (index < 0) {
+		const failed = runtime.messages.at(-1);
+		if (!failed || failed.id !== messageId || failed.role !== "assistant") {
 			return;
 		}
-		let user: ChatMessage | undefined;
-		for (let earlier = index - 1; earlier >= 0; earlier -= 1) {
-			if (runtime.messages[earlier].role === "user") {
-				user = runtime.messages[earlier];
-				break;
-			}
+		const notice = failed.parts.findLast(part => part.kind === "notice" && part.retryable);
+		const error = notice?.kind === "notice" ? notice.text.slice(0, CONTINUATION_ERROR_MAX_CHARS) : undefined;
+		runtime.busy = true;
+		try {
+			await this._sendTurn(runtime, continuationRequest(error), undefined, undefined, error ? { error } : {});
+		} finally {
+			runtime.busy = false;
+			this._deliverQueued(runtime);
 		}
-		if (!user) {
-			return;
-		}
-		const text = user.parts.flatMap(part => part.kind === "text" ? [part.text] : []).join("\n\n");
-		await this._edit(user.id, text, false);
 	}
 
 	private async _sendTurn(
@@ -1159,6 +1220,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		text: string,
 		attachments?: ChatAttachment[],
 		preserved?: { attachments?: ChatAttachment[]; attachmentContext?: string; images?: ChatToolImage[] },
+		continuation?: ChatContinuation,
 	): Promise<void> {
 		await this._ensureModels();
 		const messages = runtime.messages;
@@ -1194,7 +1256,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				this._log("chat.attachments.read_failed", { message: errorMessage(error) });
 			}
 		}
-		const memory = await this._memoryContext(text, messages);
+		// A continuation repeats no request of its own; the memory of the request it continues is already shown.
+		const memory = continuation ? undefined : await this._memoryContext(text, messages);
 		const user: ChatMessage = {
 			id: randomUUID(),
 			role: "user",
@@ -1206,6 +1269,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			...(attachmentContext ? { attachmentContext } : {}),
 			...(display && display.length > 0 ? { attachments: display.map(storedAttachment) } : {}),
 			...(images.length > 0 ? { images } : {}),
+			...(continuation ? { continuation: { ...continuation } } : {}),
 		};
 		await this._appendMessage(runtime, user);
 		await this._refreshSessionMeta(runtime);
@@ -1532,7 +1596,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		this._emit(running.runtime, { type: "run", run: { running: true, detail: COMPACTING_DETAIL } });
 		const startedAt = Date.now();
 		try {
-			const part = await compactChatHistory(history, { limits, summarize: compaction.summarize, token, plan });
+			const part = await compactChatHistory(history, {
+				limits, summarize: compaction.summarize, token, plan,
+				writer: this._summaryWriter(model),
+				transcriptPath: this._deps.store.logPath(running.sessionId),
+			});
 			if (!part) {
 				return [];
 			}
@@ -1541,9 +1609,12 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				to: model.id,
 				method: part.method,
 				summarizedMessages: part.summarizedMessages,
+				trimmedRounds: part.trimmedTurn?.rounds ?? 0,
+				abbreviated: Boolean(part.abbreviatedUntil),
 				tokensBefore: part.tokensBefore,
 				tokensAfter: part.tokensAfter,
 				durationMs: Date.now() - startedAt,
+				...(part.fallbackReason ? { fallbackReason: part.fallbackReason } : {}),
 			});
 			this._addPart(running, part);
 			return [part];
@@ -1559,6 +1630,24 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				this._emit(running.runtime, { type: "run", run: { running: true } });
 			}
 		}
+	}
+
+	/** The model taking a chat over writes its summary when DeepSeek cannot; it gets no tools and no history. */
+	private _summaryWriter(model: vscode.LanguageModelChatInformation): ChatSummaryWriter {
+		return {
+			name: model.name,
+			write: async (prompt, token) => {
+				let text = "";
+				await this._deps.backend.provideLanguageModelChatResponse(
+					model,
+					[systemMessage(prompt.system), vscode.LanguageModelChatMessage.User(prompt.transcript)],
+					{ toolMode: vscode.LanguageModelChatToolMode.Auto, tools: [], modelOptions: { _aabSkipSharedMemory: true } },
+					{ report: part => { if (part instanceof vscode.LanguageModelTextPart) { text += part.value; } } },
+					token,
+				);
+				return text;
+			},
+		};
 	}
 
 	private _queueDelta(running: RunningTurn, kind: ChatTextKind, text: string): void {
@@ -1859,6 +1948,26 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		void this._refreshQuota();
 	}
 
+	/** Starred models, oldest first; a model that is gone for now (signed out, offline) keeps its star. */
+	private _favoriteModels(): string[] {
+		const stored = (this._deps.globalState ?? this._deps.state).get<unknown>(FAVORITE_MODELS_KEY);
+		return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string").slice(-FAVORITE_MODELS_LIMIT) : [];
+	}
+
+	private async _setFavoriteModel(modelId: string, favorite: boolean): Promise<void> {
+		const current = this._favoriteModels();
+		if (current.includes(modelId) === favorite) {
+			return;
+		}
+		const next = favorite ? [...current, modelId].slice(-FAVORITE_MODELS_LIMIT) : current.filter(id => id !== modelId);
+		try {
+			await (this._deps.globalState ?? this._deps.state).update(FAVORITE_MODELS_KEY, next);
+		} catch (error) {
+			this._log("chat.favorites.save_failed", { message: errorMessage(error) });
+		}
+		this._broadcastModels();
+	}
+
 	/** The remembered level when the model still offers it; otherwise the provider's default applies. */
 	private _thinkingFor(modelId: string | undefined): string | undefined {
 		const model = modelId === undefined ? undefined : this._models.find(candidate => candidate.id === modelId);
@@ -2134,6 +2243,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			throw new Error("The chat session is not loaded.");
 		}
 		const draft = this._draft(runtime.meta.id);
+		const contextSettings = this._contextSettings();
 		return {
 			type: "init",
 			session: { ...runtime.meta },
@@ -2151,7 +2261,25 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			queued: [...runtime.queued],
 			...(draft ? { draft } : {}),
 			signIn: this._signInOffers(),
+			...(contextSettings ? { contextSettings } : {}),
+			favoriteModels: this._favoriteModels(),
 		};
+	}
+
+	private _contextSettings(): ChatContextSettings | undefined {
+		try {
+			return this._deps.contextSettings?.get();
+		} catch (error) {
+			this._log("chat.context_settings.read_failed", { message: errorMessage(error) });
+			return undefined;
+		}
+	}
+
+	private _broadcastContextSettings(): void {
+		const settings = this._contextSettings();
+		if (settings) {
+			this._broadcast({ type: "contextSettings", settings });
+		}
 	}
 
 	private _signInOffers(): ChatSignInOffer[] {
@@ -2170,6 +2298,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			selectedModelId: this._selectedModelId,
 			selectedThinking: this._thinkingFor(this._selectedModelId),
 			signIn: this._signInOffers(),
+			favoriteModels: this._favoriteModels(),
 		});
 	}
 

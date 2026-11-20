@@ -39,6 +39,7 @@ import {
 } from "../claude/claude-provider";
 import { buildClaudeModelAvailability } from "../claude/availability";
 import { resolveClaudeKeepAliveSettings } from "../claude/keepalive-settings";
+import { getSubagentModelProfiles, setSubagentModelProfiles } from "../subagent-guidance";
 import {
 	CLAUDE_ACTIVE_TURN_TIMEOUT_MS,
 	ClaudeAgentSession,
@@ -1447,6 +1448,22 @@ function claudeChatFixture(): {
 }
 
 suite("Claude tool catalog growth", () => {
+	test("registers subagents under their chat model ids", () => {
+		const fixture = claudeChatFixture();
+		try {
+			(fixture.provider as unknown as { refreshSubagentProfiles(): void }).refreshSubagentProfiles();
+			const ids = getSubagentModelProfiles().filter(profile => profile.provider === "claude").map(profile => profile.id);
+			// The bridge chat starts a subagent by looking its id up among the chat models.
+			assert.deepStrictEqual(ids, CLAUDE_SUBSCRIPTION_MODELS.map(model => encodeClaudeModelId(model.id)).sort((left, right) => {
+				const label = (id: string) => CLAUDE_SUBSCRIPTION_MODELS.find(model => encodeClaudeModelId(model.id) === id)!.name;
+				return label(left).localeCompare(label(right));
+			}));
+		} finally {
+			setSubagentModelProfiles("claude", []);
+			fixture.provider.dispose();
+		}
+	});
+
 	test("a strict new turn with an added tool restarts the live session from its SDK id", async () => {
 		const fixture = claudeChatFixture();
 		try {

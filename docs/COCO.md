@@ -150,7 +150,23 @@ request carries it in its `read: <path>` title. A `read` of any other file that
 asks for permission is refused with the one-time `reject_once` option: the CLI
 tells Coco the read was denied and the turn continues. The CLI reads files
 inside the workspace without asking; ending the turn afterwards would not undo
-that read, so it is not stopped. Any other internal action still stops the turn.
+that read, so it is not stopped.
+
+Other built-in actions (`write`, `edit`, `bash` and the like) are refused, not
+stopped. The CLI announces such an action as a `pending` `tool_call` and asks
+for permission with a `write: <path>` or `bash: <command>` title; the bridge
+answers with the one-time `reject_once` option. Nothing runs, the CLI reports a
+failed call to Coco and the turn continues, so its work and the Keep/Undo
+changes stay. ACP carries only the chosen option, so the CLI tells the model
+the user denied the action. The bridge corrects that: the next client-tool
+result carries an `[AI Agent Bridge]` note saying the bridge refused the action
+automatically and naming the client tools that replace it (file edits, file
+creation, `run_in_terminal`). If Coco ends its turn without another client-tool
+call, the note goes as a follow-up prompt in the same native session, at most
+twice per turn. The turn still stops after eight refusals in one turn, for a
+built-in action that runs without asking for permission, and for a pending one
+that starts anyway. Diagnostics record `coco.tool.internal_refused` and
+`coco.tool.internal_refusal_followup`.
 
 If the image could not be saved or Coco does not read it, the bridge attaches
 the bytes to a follow-up prompt

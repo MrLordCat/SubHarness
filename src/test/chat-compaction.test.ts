@@ -8,12 +8,15 @@ import {
 	estimateTextTokens,
 	planChatCompaction,
 	previousModelId,
+	roundStarts,
+	summarizedRequests,
 	toOpenAIMessages,
 	type ChatCompactionLimits,
 	type ChatCompactionPlan,
 	type ChatSummarizerDeps,
 } from "../chat/compaction";
-import { activeCompaction, compactionSummaryText, toLanguageModelMessages, userRequestText, type ChatCompactionPart } from "../chat/lm-messages";
+import type { CompactionSummaryPrompt } from "../context/deepseek-compaction-summary";
+import { activeCompaction, compactionSummaryText, shortenToolResults, toLanguageModelMessages, userRequestText, type ChatCompactionPart } from "../chat/lm-messages";
 import type { ChatMessage, ChatPart } from "../chat/shared/protocol";
 
 const SYSTEM_ROLE = 3;
@@ -233,7 +236,7 @@ suite("chat compaction", () => {
 			{ kind: "notice", level: "info", text: "ignored" },
 		]);
 		assert.deepStrictEqual(toOpenAIMessages([user, assistant]), [
-			{ role: "user", content: userRequestText(user) },
+			{ role: "user", content: "Hello" },
 			{
 				role: "assistant",
 				content: "A",
@@ -242,6 +245,107 @@ suite("chat compaction", () => {
 			{ role: "tool", tool_call_id: "c1", content: "R" },
 			{ role: "assistant", content: "B" },
 		]);
+	});
+
+	test("gives the summary writer the request itself, attachment names and a short Retry note", () => {
+		const attached = textMessage("user", "Look", {
+			memoryContext: "<memory>\nnote\n</memory>",
+			attachmentContext: "<attachments>x</attachments>",
+			attachments: [{ id: "a", kind: "file", path: "src/a.ts", uri: "file:///src/a.ts" }],
+		});
+		const retry = textMessage("user", "The previous answer stopped before it finished.", { continuation: { error: "boom" } });
+		assert.deepStrictEqual(toOpenAIMessages([attached, retry]), [
+			{ role: "user", content: "Look\n[Attached: src/a.ts]" },
+			{ role: "user", content: "[Retry: the user asked to continue the previous answer after it stopped with: boom]" },
+		]);
+	});
+
+	test("cuts the turn that does not fit between tool rounds and keeps its request verbatim", async () => {
+		const result = (callId: string): ChatPart => ({ kind: "toolResult", callId, text: "r".repeat(8_000) });
+		const u1 = textMessage("user", "Refactor the parser");
+		const a1 = chatMessage("assistant", [
+			{ kind: "text", text: "Reading." }, { kind: "toolCall", callId: "c1", name: "read", input: {} }, result("c1"),
+			{ kind: "text", text: "Editing." }, { kind: "toolCall", callId: "c2", name: "edit", input: {} }, result("c2"),
+			{ kind: "toolCall", callId: "c3", name: "test", input: {} }, result("c3"),
+			{ kind: "text", text: "Done." },
+		]);
+		const u2 = textMessage("user", "Now update the docs");
+		const history = [u1, a1, u2];
+		assert.deepStrictEqual(roundStarts(a1.parts), [3, 6, 8]);
+		const tail = estimateChatMessageTokens({ ...a1, parts: a1.parts.slice(6) });
+		const total = history.map(estimateChatMessageTokens).reduce((sum, cost) => sum + cost, 0);
+		const limits: ChatCompactionLimits = {
+			triggerTokens: total - 1,
+			targetTokens: CHAT_COMPACTION_SUMMARY_RESERVE_TOKENS + estimateChatMessageTokens(u1) + estimateChatMessageTokens(u2) + tail,
+		};
+		const plan = planChatCompaction(history, limits);
+		assert.ok(plan);
+		assert.strictEqual(plan.keepFrom, 0, "the request of the cut turn stays");
+		assert.deepStrictEqual(plan.trimmedTurn, { messageId: a1.id, fromPart: 6, rounds: 2 });
+		assert.strictEqual(plan.summarizedMessages, 0);
+		assert.deepStrictEqual(plan.dropped.map(message => message.parts.length), [1, 6], "the summary reads the request and the two dropped rounds");
+		assert.strictEqual(plan.abbreviatedUntil, undefined, "no tool result is long enough to shorten");
+
+		const source = new vscode.CancellationTokenSource();
+		const part = await compactChatHistory(history, {
+			limits, plan, token: source.token, transcriptPath: "C:\\logs\\chat.jsonl",
+			summarize: async () => ({ summary: "SUMMARY", method: "extractive" }),
+		});
+		source.dispose();
+		assert.ok(part);
+		assert.deepStrictEqual(part.trimmedTurn, plan.trimmedTurn);
+		const rendered = toLanguageModelMessages([...history, chatMessage("assistant", [part, { kind: "text", text: "Docs updated." }])]);
+		const texts = rendered.map(messageText);
+		assert.match(texts[0], /\(the first 2 tool rounds of the answer to the first request below\) was compacted/);
+		assert.ok(texts[0].includes(JSON.stringify("C:\\logs\\chat.jsonl")), "the summary names the chat log");
+		assert.strictEqual(texts[1], "Refactor the parser");
+		const calls = rendered.flatMap(message => message.content.flatMap(item => item instanceof vscode.LanguageModelToolCallPart ? [item.callId] : []));
+		assert.deepStrictEqual(calls, ["c3"], "only the newest round stays verbatim");
+		assert.deepStrictEqual(texts.slice(-3), ["Done.", "Now update the docs", "Docs updated."]);
+	});
+
+	test("shortens long tool results of the older kept turns and keeps the user's requests verbatim", () => {
+		const sum = (messages: readonly ChatMessage[]): number => messages.map(estimateChatMessageTokens).reduce((total, cost) => total + cost, 0);
+		const u0 = textMessage("user", "q".repeat(40_000));
+		const a0 = textMessage("assistant", "a".repeat(4_000));
+		const u1 = textMessage("user", "Read the log");
+		const a1 = chatMessage("assistant", [
+			{ kind: "toolCall", callId: "c1", name: "read", input: {} },
+			{ kind: "toolResult", callId: "c1", text: "L".repeat(30_000) },
+			{ kind: "text", text: "It failed." },
+		]);
+		const u2 = textMessage("user", "Fix it");
+		const history = [u0, a0, u1, a1, u2];
+		const keptCost = sum([u1, { ...a1, parts: shortenToolResults(a1.parts) }, u2]);
+		assert.ok(keptCost < sum([u1, a1, u2]), "the shortened result costs less");
+		const plan = planChatCompaction(history, { triggerTokens: sum(history) - 1, targetTokens: CHAT_COMPACTION_SUMMARY_RESERVE_TOKENS + keptCost });
+		assert.ok(plan);
+		assert.strictEqual(plan.keepFrom, 2);
+		assert.strictEqual(plan.trimmedTurn, undefined);
+		assert.strictEqual(plan.abbreviatedUntil, u2.id);
+		assert.strictEqual(plan.keptTokens, keptCost);
+		const requests = plan.requests ?? [];
+		assert.strictEqual(requests.length, 1);
+		assert.strictEqual(requests[0].length, 2_000);
+		assert.ok(requests[0].includes(" […] "));
+
+		const part: ChatCompactionPart = { ...compactionPart("SUMMARY", u1.id), abbreviatedUntil: u2.id, requests };
+		const rendered = toLanguageModelMessages([...history, chatMessage("assistant", [part])]);
+		const shortened = rendered.flatMap(message => message.content).find(item => item instanceof vscode.LanguageModelToolResultPart);
+		assert.ok(shortened instanceof vscode.LanguageModelToolResultPart);
+		const output = (shortened.content[0] as vscode.LanguageModelTextPart).value;
+		assert.ok(output.length < 13_000 && output.includes("Earlier tool output shortened at compaction"));
+		assert.ok(messageText(rendered[0]).includes(`[1] ${requests[0]}`), "the summary carries the request verbatim");
+	});
+
+	test("keeps the first and the newest requests within the budget and leaves out Retry notes", () => {
+		const requests = Array.from({ length: 10 }, (_, index) => textMessage("user", `${index}`.repeat(1_900)));
+		const retry = textMessage("user", "Continue", { continuation: {} });
+		const kept = summarizedRequests(["Original task"], [...requests, textMessage("assistant", "answer"), retry]);
+		assert.strictEqual(kept[0], "Original task");
+		assert.ok(!kept.includes("Continue"));
+		assert.deepStrictEqual(kept.slice(1), [4, 5, 6, 7, 8, 9].map(index => `${index}`.repeat(1_900)));
+		assert.ok(kept.join("").length <= 12_000);
 	});
 
 	test("createChatSummarizer asks DeepSeek when a key is set", async () => {
@@ -283,6 +387,50 @@ suite("chat compaction", () => {
 		assert.strictEqual(result.method, "extractive");
 		assert.ok(result.summary.startsWith("Conversation summary (chat compaction):"));
 		assert.deepStrictEqual(logs, ["chat.compaction.deepseek_failed"]);
+		assert.strictEqual(result.fallbackReason, "deepseek is down");
+	});
+
+	const VALID_SUMMARY = [
+		"## Objective", "Ship the parser.", "## Completed", "- Read the parser.", "## Decisions", "(none)", "## Files and symbols", "(none)",
+		"## Verification", "(none)", "## Failed approaches", "(none)", "## Constraints", "(none)", "## Open work", "- Edit the parser.",
+	].join("\n");
+
+	test("createChatSummarizer lets the chat model write the summary when DeepSeek fails", async () => {
+		const plan = planForSummarizer();
+		const prompts: CompactionSummaryPrompt[] = [];
+		const source = new vscode.CancellationTokenSource();
+		const summarize = createChatSummarizer({
+			apiKey: async () => "sk-test",
+			userAgent: "test-agent",
+			request: async () => { throw new Error("DeepSeek compaction request failed (402 Payment Required)"); },
+		});
+		const result = await summarize(plan, source.token, {
+			name: "Smart",
+			write: async prompt => {
+				prompts.push(prompt);
+				return `Here is the summary.\n${VALID_SUMMARY}`;
+			},
+		});
+		source.dispose();
+
+		assert.strictEqual(result.method, "model");
+		assert.strictEqual(result.summaryModel, "Smart");
+		assert.strictEqual(result.fallbackReason, "DeepSeek compaction request failed (402 Payment Required)");
+		assert.ok(result.summary.startsWith("## Objective"), "the preamble is dropped");
+		assert.strictEqual(prompts.length, 1);
+		assert.match(prompts[0].system, /under 32000 characters/);
+		assert.match(prompts[0].transcript, /First request/);
+	});
+
+	test("createChatSummarizer uses the extractive summary when the chat model fails too and says why", async () => {
+		const source = new vscode.CancellationTokenSource();
+		const summarize = createChatSummarizer({ apiKey: async () => undefined, userAgent: "test-agent" });
+		const result = await summarize(planForSummarizer(), source.token, { name: "Smart", write: async () => "not a summary" });
+		source.dispose();
+
+		assert.strictEqual(result.method, "extractive");
+		assert.strictEqual(result.fallbackReason, "No DeepSeek API key is set. Smart: Smart returned an empty or incomplete compaction summary.");
+		assert.match(result.summary, /First request/, "the extractive summary keeps the user's words");
 	});
 
 	test("createChatSummarizer never calls DeepSeek without a key", async () => {

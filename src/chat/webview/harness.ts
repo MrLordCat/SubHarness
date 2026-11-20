@@ -4,6 +4,7 @@ import {
 	type ChatAttachment,
 	type ChatChangedFile,
 	type ChatChangeSet,
+	type ChatContextSettings,
 	type ChatMessage,
 	type ChatModelGroup,
 	type ChatPart,
@@ -196,6 +197,13 @@ let nextSessionId = 0;
 let selectedModelId = "gpt-5.5-codex";
 const thinkingByModel: Record<string, string> = {};
 let quota = createQuota();
+// ?favorites=id,id stars models in the picker.
+let favoriteModels = (harnessParams.get("favorites") ?? "").split(",").filter(id => id.length > 0);
+let contextSettings: ChatContextSettings = {
+	shared: 258_400, sharedMin: 131_072, sharedMax: 1_048_576,
+	followCodex: harnessParams.get("followCodex") !== "0", codexModel: "gpt-5.5", codexWindow: 475_000,
+	switchTokens: 250_000, switchMin: 32_768, switchMax: 1_048_576,
+};
 let nextId = 0;
 let turn = Math.ceil(messages.length / 2);
 let streamTimer: number | undefined;
@@ -328,6 +336,16 @@ function handleWebviewMessage(message: WebviewMessage): void {
 		case "refreshQuota":
 			quota = refreshedQuota(quota);
 			emit({ type: "quota", quota });
+			break;
+		case "saveContextSettings":
+			contextSettings = { ...contextSettings, ...message.change };
+			emit({ type: "contextSettings", settings: contextSettings });
+			break;
+		case "setFavoriteModel":
+			favoriteModels = message.favorite
+				? [...favoriteModels.filter(id => id !== message.modelId), message.modelId]
+				: favoriteModels.filter(id => id !== message.modelId);
+			emit({ type: "models", models: MODEL_GROUPS, selectedModelId, selectedThinking: thinkingFor(selectedModelId), favoriteModels });
 			break;
 		case "setToolsEnabled":
 			applyToolsEnabled(message.names, message.enabled);
@@ -466,8 +484,17 @@ function emitInit(): void {
 		changes: currentChanges,
 		quota,
 		activity: activity.map(entry => ({ ...entry })),
+		contextSettings,
+		favoriteModels,
 	});
 	startLiveSubagent();
+	// ?openContext=1 opens the context popup, ?openModels=1 the model picker, for screenshots.
+	if (harnessParams.get("openContext") === "1") {
+		setTimeout(() => document.querySelector<HTMLButtonElement>(".composer .context-trigger")?.click(), 300);
+	}
+	if (harnessParams.get("openModels") === "1") {
+		setTimeout(() => document.querySelector<HTMLButtonElement>(".composer .model-picker .picker-trigger")?.click(), 300);
+	}
 }
 
 function emitActivity(): void {
@@ -820,33 +847,28 @@ function handleEdit(messageId: string, text: string, undoChanges: boolean | unde
 	}
 }
 
-/** Truncates at the failed answer's user message and replays a short fake answer. */
+/** Keeps the failed answer, adds the continuation marker and replays a short fake answer. */
 function handleRetryTurn(messageId: string): void {
-	const index = messages.findIndex(candidate => candidate.id === messageId && candidate.role === "assistant");
-	if (index < 0) {
+	const failed = messages.at(-1);
+	if (!failed || failed.id !== messageId || failed.role !== "assistant") {
 		return;
 	}
-	let userIndex = index - 1;
-	while (userIndex >= 0 && messages[userIndex].role !== "user") {
-		userIndex -= 1;
-	}
-	const user = messages[userIndex];
-	if (!user) {
-		return;
-	}
+	const notice = [...failed.parts].reverse().find(part => part.kind === "notice" && part.retryable);
 	stopStream();
 	pendingApproval = undefined;
-	emit({ type: "truncated", messageId: user.id });
-	messages.splice(userIndex);
 	turn += 1;
 	const now = Date.now();
-	const resent: ChatMessage = { ...user, id: `sent-user-${nextId++}`, turn, createdAt: now };
+	const continuation: ChatMessage = {
+		id: `sent-user-${nextId++}`, role: "user", turn, createdAt: now,
+		parts: [{ kind: "text", text: "Continue the same task from where it stopped." }],
+		continuation: notice?.kind === "notice" ? { error: notice.text } : {},
+	};
 	const assistant: ChatMessage = { id: `sent-assistant-${nextId++}`, role: "assistant", turn, createdAt: now, modelId: selectedModelId, parts: [] };
-	messages.push(resent, assistant);
-	emit({ type: "messageAdded", message: resent });
+	messages.push(continuation, assistant);
+	emit({ type: "messageAdded", message: continuation });
 	emit({ type: "messageAdded", message: assistant });
 	emit({ type: "run", run: { running: true } });
-	emit({ type: "textDelta", messageId: assistant.id, kind: "text", text: "Retry: this is a short fake answer." });
+	emit({ type: "textDelta", messageId: assistant.id, kind: "text", text: "Retry: this is a short fake answer that continues the task." });
 	emit({ type: "run", run: { running: false } });
 }
 
@@ -1031,6 +1053,18 @@ function createMessages(count: number): ChatMessage[] {
 	const failing = result.at(-1);
 	if (failing?.role === "assistant") {
 		failing.parts.push({ kind: "notice", level: "error", text: "The provider stopped before the answer finished.", retryable: true });
+		// ?continued=1 shows the answer after Retry: the continuation marker and the rest of the work.
+		if (harnessParams.get("continued") === "1") {
+			const next = failing.turn + 1;
+			result.push(
+				{
+					id: "continued-user", role: "user", turn: next, createdAt: failing.createdAt + 1,
+					parts: [{ kind: "text", text: "Continue the same task from where it stopped." }],
+					continuation: { error: "The provider stopped before the answer finished." },
+				},
+				{ id: "continued-assistant", role: "assistant", turn: next, createdAt: failing.createdAt + 2, modelId: failing.modelId, parts: [{ kind: "text", text: "Picking up where it stopped: the remaining edit is done." }] },
+			);
+		}
 	}
 	return result;
 }
@@ -1116,7 +1150,14 @@ function createCompactionPart(keepFromMessageId: string): ChatPart {
 		summarizedMessages: 5,
 		tokensBefore: 312_000,
 		tokensAfter: 104_000,
-		method: "deepseek",
+		method: "model",
+		summaryModel: "GPT-5.5 \u00b7 Codex",
+		fallbackReason: "DeepSeek compaction request failed (402 Payment Required)",
+		trimmedTurn: { messageId: "harness-trimmed", fromPart: 6, rounds: 3 },
+		requests: [
+			"Can you check why the chat list slows down with thousands of messages?",
+			"Please add the virtual layout and make sure typing stays smooth.",
+		],
 	};
 }
 
