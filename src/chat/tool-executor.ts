@@ -51,7 +51,7 @@ export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSour
 			if (confirmation && !(context && await context.approve(confirmation))) {
 				return { text: DENIED_TOOL_RESULT, isError: true };
 			}
-			const output = await tool.invoke(input, token, { callId: context?.callId, runSubagent: context?.runSubagent });
+			const output = await tool.invoke(input, token, { callId: context?.callId, runSubagent: context?.runSubagent, askQuestions: context?.askQuestions });
 			const result = typeof output === "string" ? { text: output } : output;
 			return { text: result.text, isError: false, ...(result.images && result.images.length > 0 ? { images: result.images } : {}) };
 		},

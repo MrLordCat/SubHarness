@@ -28,7 +28,7 @@ interface HistoryGroup {
 
 const STATUS_LABELS: Record<ChatSessionActivityState, string> = {
 	running: "Running",
-	approval: "Waiting for approval",
+	approval: "Waiting for you",
 	finished: "Finished",
 };
 

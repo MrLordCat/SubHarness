@@ -215,6 +215,42 @@ export interface ChatChangeSet {
 	unavailable?: string;
 }
 
+/** One item of the plan manage_todo_list shows above the composer. */
+export interface ChatTodoItem {
+	id: number;
+	title: string;
+	status: "not-started" | "in-progress" | "completed";
+}
+
+export interface ChatQuestionOption {
+	label: string;
+	description?: string;
+	recommended?: boolean;
+}
+
+export interface ChatQuestion {
+	header: string;
+	question: string;
+	message?: string;
+	options?: ChatQuestionOption[];
+	multiSelect?: boolean;
+	allowFreeformInput?: boolean;
+}
+
+export interface ChatQuestionAnswer {
+	header: string;
+	selected: string[];
+	freeform?: string;
+}
+
+/** Questions ask_questions waits on; the user answers or skips them in the chat. */
+export interface ChatQuestionRequest {
+	id: string;
+	messageId: string;
+	callId: string;
+	questions: ChatQuestion[];
+}
+
 /** A tool call held until the user allows or denies it. */
 export interface ChatApprovalRequest {
 	id: string;
@@ -232,7 +268,7 @@ export interface ChatApprovalRequest {
 export type HostMessage =
 	| {
 		type: "init"; session: ChatSessionMeta; messages: ChatMessage[]; models: ChatModelGroup[]; selectedModelId?: string; run: ChatRunState;
-		tools: ChatToolGroup[]; approvals: ChatApprovalRequest[]; changes: ChatChangeSet;
+		tools: ChatToolGroup[]; approvals: ChatApprovalRequest[]; questions?: ChatQuestionRequest[]; changes: ChatChangeSet;
 		/** Chosen reasoning level of the selected model; absent means the model's default. */
 		selectedThinking?: string;
 		quota: ChatProviderQuota[];
@@ -257,6 +293,9 @@ export type HostMessage =
 	| { type: "run"; run: ChatRunState }
 	| { type: "approval"; request: ChatApprovalRequest }
 	| { type: "approvalResolved"; id: string; allowed: boolean }
+	/** Questions the agent waits on; the webview shows an answer card. */
+	| { type: "questions"; request: ChatQuestionRequest }
+	| { type: "questionsResolved"; id: string }
 	| { type: "toolResultFull"; messageId: string; callId: string; text: string }
 	| { type: "partTextFull"; messageId: string; index: number; text: string }
 	/** Live state of a running subagent; the finished run arrives as a "subagent" part. */
@@ -301,6 +340,8 @@ export type WebviewMessage =
 	| { type: "refreshQuota" }
 	| { type: "setToolsEnabled"; names: string[]; enabled: boolean }
 	| { type: "approve"; id: string; allow: boolean }
+	/** Answers to a questions message; answers absent means the user skipped. */
+	| { type: "answerQuestions"; id: string; answers?: ChatQuestionAnswer[] }
 	| { type: "newChat" }
 	| { type: "listSessions" }
 	| { type: "openSession"; sessionId: string }

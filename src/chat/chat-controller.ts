@@ -7,6 +7,7 @@ import type { ChatWebviewBridge } from "./chat-view";
 import { compactChatHistory, estimateTextTokens, planChatCompaction, previousModelId, type ChatCompactionLimits, type ChatSummarizer } from "./compaction";
 import type { ChatSessionStore } from "./session-store";
 import { runChatSubagent } from "./subagent-runner";
+import { ASK_QUESTIONS_TOOL_NAME, TODO_TOOL_NAME } from "./tools/interaction-tools";
 import { SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
 import { groupModels, thinkingOptions } from "./shared/model-groups";
 import { appendChatText, WEBVIEW_THINKING_PREVIEW_CHARS, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS } from "./shared/protocol";
@@ -18,6 +19,9 @@ import type {
 	ChatPart,
 	ChatProviderQuota,
 	ChatQueuedMessage,
+	ChatQuestion,
+	ChatQuestionAnswer,
+	ChatQuestionRequest,
 	ChatRunState,
 	ChatSessionActivity,
 	ChatSessionActivityState,
@@ -98,6 +102,9 @@ const INTERRUPTED_NOTICE = "This answer was interrupted: VS Code closed or reloa
 const COMPACTING_DETAIL = "Compacting context…";
 const SEND_ATTACHMENT_LIMIT = 20;
 const ADD_ATTACHMENT_LIMIT = 50;
+const MAX_QUESTION_ANSWERS = 5;
+const MAX_QUESTION_SELECTED = 10;
+const MAX_ANSWER_CHARS = 2_000;
 
 interface DeltaBuffer {
 	kind: ChatTextKind;
@@ -124,6 +131,8 @@ interface SessionRuntime {
 	busy: boolean;
 	completion: Promise<void>;
 	approvals: Map<string, { request: ChatApprovalRequest; settle: (allowed: boolean) => void }>;
+	/** Question cards the chat waits on; answers undefined means the user skipped them. */
+	questions: Map<string, { request: ChatQuestionRequest; settle: (answers: ChatQuestionAnswer[] | undefined) => void }>;
 	/** A turn ended while this chat was not shown. */
 	finished: boolean;
 	/** Messages sent while the chat worked; each goes out after the current tool round. */
@@ -216,6 +225,52 @@ function mergeQueuedAttachments(messages: readonly ChatQueuedMessage[]): ChatAtt
 	return merged.length > 0 ? merged : undefined;
 }
 
+/** The question answers a webview sent, or undefined when the shape is malformed. */
+function asQuestionAnswers(value: unknown): ChatQuestionAnswer[] | undefined {
+	if (!Array.isArray(value) || value.length > MAX_QUESTION_ANSWERS) {
+		return undefined;
+	}
+	const answers: ChatQuestionAnswer[] = [];
+	for (const item of value) {
+		if (!isRecord(item) || typeof item.header !== "string" || !Array.isArray(item.selected)
+			|| item.selected.length > MAX_QUESTION_SELECTED || !item.selected.every(label => typeof label === "string")) {
+			return undefined;
+		}
+		if (item.freeform !== undefined && typeof item.freeform !== "string") {
+			return undefined;
+		}
+		answers.push({
+			header: item.header,
+			selected: item.selected as string[],
+			...(item.freeform === undefined ? {} : { freeform: item.freeform }),
+		});
+	}
+	return answers;
+}
+
+/** Keeps only answers that fit the ask_questions call: known headers, offered labels, allowed freeform. */
+function sanitizeAnswers(questions: readonly ChatQuestion[], answers: readonly ChatQuestionAnswer[] | undefined): ChatQuestionAnswer[] | undefined {
+	if (answers === undefined) {
+		return undefined;
+	}
+	const asked = new Map(questions.map(question => [question.header, question]));
+	const seen = new Set<string>();
+	const result: ChatQuestionAnswer[] = [];
+	for (const answer of answers) {
+		const question = asked.get(answer.header);
+		if (!question || seen.has(answer.header)) {
+			continue;
+		}
+		seen.add(answer.header);
+		const offered = new Set((question.options ?? []).map(option => option.label));
+		const selected = [...new Set(answer.selected.filter(label => offered.has(label)))];
+		const kept = question.multiSelect === true ? selected : selected.slice(0, 1);
+		const freeform = question.allowFreeformInput === false ? "" : answer.freeform?.trim().slice(0, MAX_ANSWER_CHARS) ?? "";
+		result.push({ header: question.header, selected: kept, ...(freeform ? { freeform } : {}) });
+	}
+	return result;
+}
+
 function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 	if (!isRecord(value) || typeof value.type !== "string") {
 		return undefined;
@@ -274,6 +329,16 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 				: undefined;
 		case "approve":
 			return typeof value.id === "string" && typeof value.allow === "boolean" ? { type: "approve", id: value.id, allow: value.allow } : undefined;
+		case "answerQuestions": {
+			if (typeof value.id !== "string") {
+				return undefined;
+			}
+			if (value.answers === undefined) {
+				return { type: "answerQuestions", id: value.id };
+			}
+			const answers = asQuestionAnswers(value.answers);
+			return answers ? { type: "answerQuestions", id: value.id, answers } : undefined;
+		}
 		case "newChat": return { type: "newChat" };
 		case "listSessions": return { type: "listSessions" };
 		case "openSession":
@@ -480,6 +545,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			for (const approval of [...runtime.approvals.values()]) {
 				approval.settle(false);
 			}
+			for (const question of [...runtime.questions.values()]) {
+				question.settle(undefined);
+			}
 			await runtime.completion.catch(() => undefined);
 			this._runtimes.delete(sessionId);
 		}
@@ -512,7 +580,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 
 	/** A chat that still works stays in memory; an idle untouched one would only clutter the history. */
 	private async _leave(runtime: SessionRuntime): Promise<void> {
-		if (runtime.running || runtime.busy || runtime.approvals.size > 0 || runtime.queued.length > 0) {
+		if (runtime.running || runtime.busy || runtime.approvals.size > 0 || runtime.questions.size > 0 || runtime.queued.length > 0) {
 			return;
 		}
 		const sessionId = runtime.meta.id;
@@ -545,6 +613,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		for (const runtime of this._runtimes.values()) {
 			for (const approval of [...runtime.approvals.values()]) {
 				approval.settle(false);
+			}
+			for (const question of [...runtime.questions.values()]) {
+				question.settle(undefined);
 			}
 			const running = runtime.running;
 			running?.cts.cancel();
@@ -646,6 +717,15 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 					}
 				}
 				return;
+			case "answerQuestions":
+				for (const runtime of this._runtimes.values()) {
+					const question = runtime.questions.get(message.id);
+					if (question) {
+						question.settle(sanitizeAnswers(question.request.questions, message.answers));
+						break;
+					}
+				}
+				return;
 			case "newChat":
 				await this.newChat();
 				return;
@@ -685,6 +765,10 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		if (runtime.busy || runtime.running) {
 			runtime.queued.push({ id: randomUUID(), text, ...(attachments?.length ? { attachments } : {}) });
 			this._emit(runtime, { type: "queued", queued: [...runtime.queued] });
+			// An open question would hold the round, and with it the message, until someone answers it.
+			for (const question of [...runtime.questions.values()]) {
+				question.settle(undefined);
+			}
 			return;
 		}
 		runtime.busy = true;
@@ -992,6 +1076,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 					...(nested ? {} : {
 						runSubagent: (request: SubagentRequest, subagentToken: vscode.CancellationToken) =>
 							this._runSubagent(running, callId ?? randomUUID(), request, subagentTools, subagentToken),
+						askQuestions: (questions: ChatQuestion[], questionToken: vscode.CancellationToken) =>
+							this._askQuestions(running, callId, questions, questionToken),
 					}),
 				});
 			} finally {
@@ -1001,7 +1087,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			}
 		};
 		const subagentTools: ChatToolExecutor = {
-			get tools() { return source.tools.filter(tool => tool.name !== SUBAGENT_TOOL_NAME); },
+			get tools() {
+				return source.tools.filter(tool => tool.name !== SUBAGENT_TOOL_NAME && tool.name !== TODO_TOOL_NAME && tool.name !== ASK_QUESTIONS_TOOL_NAME);
+			},
 			invoke: (name, input, token, callId) => invoke(name, input, token, callId, true),
 		};
 		const tools: ChatToolExecutor = {
@@ -1330,6 +1418,53 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		});
 	}
 
+	/** Shows question cards in the chat's webviews; Stop or a closed controller counts as a skip. */
+	private _askQuestions(
+		running: RunningTurn,
+		callId: string | undefined,
+		questions: ChatQuestion[],
+		token: vscode.CancellationToken,
+	): Promise<ChatQuestionAnswer[] | undefined> {
+		if (token.isCancellationRequested || this._disposed) {
+			return Promise.resolve(undefined);
+		}
+		this._flushDelta(running);
+		const runtime = running.runtime;
+		const request: ChatQuestionRequest = {
+			id: randomUUID(),
+			messageId: running.message.id,
+			callId: callId ?? "",
+			questions,
+		};
+		return new Promise<ChatQuestionAnswer[] | undefined>(resolve => {
+			const subscriptions: vscode.Disposable[] = [];
+			const settle = (answers: ChatQuestionAnswer[] | undefined): void => {
+				if (!runtime.questions.delete(request.id)) {
+					return;
+				}
+				subscriptions.forEach(subscription => subscription.dispose());
+				this._log("chat.tool.questions", { count: request.questions.length, answered: answers !== undefined });
+				this._emit(runtime, { type: "questionsResolved", id: request.id });
+				this._broadcastActivity();
+				resolve(answers);
+			};
+			runtime.questions.set(request.id, { request, settle });
+			subscriptions.push(token.onCancellationRequested(() => settle(undefined)));
+			this._emit(runtime, { type: "questions", request });
+			this._broadcastActivity();
+			if (runtime.meta.id !== this._activeId) {
+				const notice = this._deps.notify?.(`"${runtime.meta.title}" has a question for you.`, "Open Chat");
+				if (notice) {
+					void notice.then(open => {
+						if (open) {
+							void this.openSession(runtime.meta.id);
+						}
+					}, () => undefined);
+				}
+			}
+		});
+	}
+
 	private _toolGroups(): ChatToolGroup[] {
 		return this._deps.tools.groups?.() ?? [];
 	}
@@ -1522,6 +1657,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			busy: false,
 			completion: Promise.resolve(),
 			approvals: new Map(),
+			questions: new Map(),
 			finished: false,
 			queued: [],
 		};
@@ -1568,6 +1704,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			run: this._runState(),
 			tools: this._toolGroups(),
 			approvals: [...runtime.approvals.values()].map(approval => approval.request),
+			questions: [...runtime.questions.values()].map(question => question.request),
 			changes: runtime.changes,
 			selectedThinking: this._thinkingFor(this._selectedModelId),
 			quota: this._quota(),
@@ -1606,7 +1743,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			if (runtime.meta.id === this._activeId) {
 				continue;
 			}
-			const state: ChatSessionActivityState | undefined = runtime.approvals.size > 0 ? "approval" : runtime.running ? "running" : runtime.finished ? "finished" : undefined;
+			const state: ChatSessionActivityState | undefined = runtime.approvals.size > 0 || runtime.questions.size > 0 ? "approval" : runtime.running ? "running" : runtime.finished ? "finished" : undefined;
 			if (state) {
 				activity.push({ id: runtime.meta.id, title: runtime.meta.title, state });
 			}

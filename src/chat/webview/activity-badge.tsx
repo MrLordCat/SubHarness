@@ -15,7 +15,7 @@ function activityLabel(running: number, approval: number, finished: number): str
 		parts.push(runningLabel(running));
 	}
 	if (approval > 0) {
-		parts.push(`${approval} waiting for approval`);
+		parts.push(`${approval} waiting for you`);
 	}
 	if (finished > 0) {
 		parts.push(`${finished} finished`);

@@ -1,4 +1,5 @@
 import { useCallback, useLayoutEffect, useState } from "preact/hooks";
+import type { ChatQuestionAnswer } from "../shared/protocol";
 import { ActivityBadge } from "./activity-badge";
 import { postMessage } from "./api";
 import { ApprovalCard } from "./approval-card";
@@ -9,7 +10,9 @@ import { useComposerActions } from "./composer-actions";
 import { contextIndicator, formatCacheHit, modelCacheStats } from "./format";
 import { MessageList } from "./message-list";
 import { QueuedMessages } from "./queued-messages";
+import { QuestionCard } from "./question-card";
 import type { ChatStore } from "./store";
+import { TodoPanel } from "./todo-panel";
 
 export function App({ store }: { store: ChatStore }) {
 	const [, setRevision] = useState(0);
@@ -33,6 +36,7 @@ export function App({ store }: { store: ChatStore }) {
 		onRemoveAttachment,
 	} = useComposerActions(store);
 	const onApprove = useCallback((id: string, allow: boolean) => postMessage({ type: "approve", id, allow }), []);
+	const onAnswer = useCallback((id: string, answers?: ChatQuestionAnswer[]) => postMessage(answers ? { type: "answerQuestions", id, answers } : { type: "answerQuestions", id }), []);
 	const onListSessions = useCallback(() => postMessage({ type: "listSessions" }), []);
 	const onOpenSession = useCallback((sessionId: string) => postMessage({ type: "openSession", sessionId }), []);
 	const onDeleteSession = useCallback((sessionId: string) => postMessage({ type: "deleteSession", sessionId }), []);
@@ -72,13 +76,19 @@ export function App({ store }: { store: ChatStore }) {
 				/>
 			)}
 			{store.run.running && store.run.detail ? <div class="run-status" role="status">{store.run.detail}</div> : null}
+			{store.todoList && store.todoList.length > 0 && (store.run.running || store.todoList.some(todo => todo.status !== "completed")) ? (
+				<TodoPanel todos={store.todoList} running={store.run.running} />
+			) : null}
 			{store.changes.files.length > 0 || store.changes.notice || store.changes.unavailable ? (
 				<ChangesPanel changes={store.changes} running={store.run.running} />
 			) : null}
-			{store.approvals.length > 0 ? (
+			{store.approvals.length > 0 || store.questionRequests.length > 0 ? (
 				<div class="approval-stack">
 					{store.approvals.map(request => (
 						<ApprovalCard key={request.id} request={request} onApprove={onApprove} />
+					))}
+					{store.questionRequests.map(request => (
+						<QuestionCard key={request.id} request={request} onAnswer={onAnswer} />
 					))}
 				</div>
 			) : null}

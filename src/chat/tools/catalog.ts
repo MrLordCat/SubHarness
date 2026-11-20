@@ -52,6 +52,7 @@ const BUILTIN_GROUP_LABELS: Record<string, string> = {
 	[CHAT_TOOL_GROUPS.web]: "Web",
 	[CHAT_TOOL_GROUPS.terminal]: "Terminal",
 	[CHAT_TOOL_GROUPS.diagnostics]: "Diagnostics",
+	[CHAT_TOOL_GROUPS.planning]: "Planning and questions",
 	[CHAT_TOOL_GROUPS.agents]: "Subagents",
 	[CHAT_TOOL_GROUPS.bridge]: "AI Agent Bridge",
 };

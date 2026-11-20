@@ -343,6 +343,22 @@ suite("Chat webview tool call descriptions", () => {
 		assert.deepStrictEqual(describeToolCall("mystery_tool", { a: 1 }), { title: "mystery_tool", detail: "{\"a\":1}" });
 	});
 
+	test("describes the todo list and the questions", () => {
+		const todoList = [
+			{ id: 1, title: "Read the code", status: "completed" },
+			{ id: 2, title: "Write the code", status: "in-progress" },
+		];
+		assert.deepStrictEqual(describeToolCall("manage_todo_list", { todoList }), { title: "Updated todos (1/2 done)" });
+		assert.deepStrictEqual(describeToolCall("manage_todo_list", { todoList: [] }), { title: "Cleared todos" });
+		assert.deepStrictEqual(describeToolCall("manage_todo_list", {}), { title: "manage_todo_list", detail: "{}" });
+		assert.deepStrictEqual(describeToolCall("ask_questions", { questions: [{ header: "A", question: "Q?" }] }), { title: "Asked 1 question" });
+		assert.deepStrictEqual(
+			describeToolCall("ask_questions", { questions: [{ header: "A", question: "Q?" }, { header: "B", question: "R?" }] }),
+			{ title: "Asked 2 questions" },
+		);
+		assert.deepStrictEqual(describeToolCall("ask_questions", { questions: [] }), { title: "ask_questions", detail: "{\"questions\":[]}" });
+	});
+
 	test("survives malformed input", () => {
 		const circular: Record<string, unknown> = {};
 		circular.self = circular;

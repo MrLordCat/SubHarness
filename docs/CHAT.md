@@ -57,6 +57,12 @@ pages (`fetch_webpage`), work with symbols through the language servers
 start subagents. Images returned by MCP and extension tools also reach the
 model; the chat shows their name and size.
 
+For longer work the agent keeps a todo list (`manage_todo_list`), shown above
+the input as **Todos done/total**; click it for the whole list. With
+`ask_questions` the agent asks you up to five questions in a card above the
+input and waits: pick an option, type an answer, or **Skip**. Sending a message
+instead also skips the questions, and the agent reads your message next.
+
 The model runs tools without asking, with one exception: a terminal command
 that matches a rule in `llamacpp.chat.dangerousCommands` waits for your
 approval in the chat. The default rules cover force pushes, hard resets,

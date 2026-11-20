@@ -162,6 +162,25 @@ export function describeToolCall(name: string, input: unknown): ToolCallDescript
 				const file = textField(record, "filePath");
 				return file === undefined ? fallbackDescription(name, input) : { title: `Viewed ${baseName(file)}` };
 			}
+			case "manage_todo_list": {
+				const todos = record.todoList;
+				if (!Array.isArray(todos)) {
+					return fallbackDescription(name, input);
+				}
+				if (todos.length === 0) {
+					return { title: "Cleared todos" };
+				}
+				const done = todos.filter(todo => inputRecord(todo).status === "completed").length;
+				return { title: `Updated todos (${done}/${todos.length} done)` };
+			}
+			case "ask_questions": {
+				const questions = record.questions;
+				if (!Array.isArray(questions) || questions.length === 0) {
+					return fallbackDescription(name, input);
+				}
+				const count = questions.length;
+				return { title: `Asked ${count} question${count === 1 ? "" : "s"}` };
+			}
 			case "file_search": {
 				const query = textField(record, "query");
 				return query === undefined ? fallbackDescription(name, input) : { title: `Searched files for ${query}` };

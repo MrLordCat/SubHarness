@@ -12,6 +12,7 @@ import { ChatSessionStore } from "../chat/session-store";
 import { groupModels } from "../chat/shared/model-groups";
 import { applyHostUpdate, WEBVIEW_THINKING_PREVIEW_CHARS, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatAttachment, type ChatChangeSet, type ChatMessage, type ChatProviderQuota, type ChatToolGroup, type ChatToolImage, type HostMessage } from "../chat/shared/protocol";
 import { createChatToolSource, DENIED_TOOL_RESULT, type ChatToolSource } from "../chat/tool-executor";
+import { ASK_QUESTIONS_TOOL_NAME, createAskQuestionsTool, createTodoTool, TODO_TOOL_NAME } from "../chat/tools/interaction-tools";
 import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
 import type { ChatTool } from "../chat/tools/types";
 
@@ -274,6 +275,16 @@ function guardedCatalog(): { source: ChatToolSource; runs: unknown[]; toggles: A
 		},
 	});
 	return { source, runs, toggles };
+}
+
+/** A catalog with the two planning tools, which the controller wires to the chat. */
+function planningCatalog(): ChatToolSource {
+	const tools: ChatTool[] = [createTodoTool(), createAskQuestionsTool()];
+	return createChatToolSource({
+		enabledTools: () => tools,
+		groups: () => [],
+		setEnabled: async () => undefined,
+	});
 }
 
 /** Records the controller's calls in one log shared with the tools, so the order is visible. */
@@ -1597,6 +1608,12 @@ suite("chat controller", () => {
 			{ type: "loadPartText", messageId: "m1", index: -1 },
 			{ type: "loadPartText", messageId: "m1", index: 1.5 },
 			{ type: "loadPartText", messageId: 7, index: 0 },
+			{ type: "answerQuestions" },
+			{ type: "answerQuestions", id: 7 },
+			{ type: "answerQuestions", id: "q1", answers: "nope" },
+			{ type: "answerQuestions", id: "q1", answers: [{ header: "A" }] },
+			{ type: "answerQuestions", id: "q1", answers: [{ header: "A", selected: ["x"], freeform: 7 }] },
+			{ type: "answerQuestions", id: "q1", answers: Array.from({ length: 6 }, () => ({ header: "A", selected: [] })) },
 		];
 		for (const message of malformed) {
 			current.webview.receive(message);
@@ -1695,6 +1712,140 @@ suite("chat controller", () => {
 		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "stopped turn");
 		assert.strictEqual(current.webview.ofType("approvalResolved").at(-1)?.allowed, false);
 		assert.deepStrictEqual(catalog.runs, []);
+	});
+
+	test("ask_questions posts the request and answers the tool with the sanitised answers", async () => {
+		const askInput = {
+			questions: [
+				{ header: "Approach", question: "Which one?", options: [{ label: "Refactor" }, { label: "Rewrite" }], allowFreeformInput: true },
+				{ header: "Name", question: "Which name?", options: [{ label: "keep" }], allowFreeformInput: false },
+			],
+		};
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-q", ASK_QUESTIONS_TOOL_NAME, askInput)),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, planningCatalog());
+		harness = current;
+		current.webview.receive({ type: "send", text: "Plan it" });
+		await waitFor(() => current.webview.ofType("questions").length === 1, "question request");
+		const request = current.webview.ofType("questions")[0].request;
+		assert.strictEqual(request.callId, "call-q");
+		assert.deepStrictEqual(request.questions.map(question => question.header), ["Approach", "Name"]);
+
+		current.webview.receive({
+			type: "answerQuestions",
+			id: request.id,
+			answers: [
+				{ header: "Approach", selected: ["Rewrite", "Unknown", "Refactor"], freeform: "  small  " },
+				{ header: "Name", selected: ["keep", "bogus"], freeform: "typed" },
+			],
+		});
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(current.webview.ofType("questionsResolved"), [{ type: "questionsResolved", id: request.id }]);
+		const result = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "toolResult" && part.callId === "call-q");
+		if (result?.kind !== "toolResult") {
+			throw new Error("expected a tool result");
+		}
+		assert.strictEqual(result.isError, false);
+		assert.strictEqual(result.text, "Approach: Rewrite; \"small\"\nName: keep");
+	});
+
+	test("skipping the questions gives the tool the dismissed text", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-q", ASK_QUESTIONS_TOOL_NAME, {
+				questions: [{ header: "Approach", question: "Which one?", options: [{ label: "Refactor" }] }],
+			})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, planningCatalog());
+		harness = current;
+		current.webview.receive({ type: "send", text: "Plan it" });
+		await waitFor(() => current.webview.ofType("questions").length === 1, "question request");
+		current.webview.receive({ type: "answerQuestions", id: current.webview.ofType("questions")[0].request.id });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		const result = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "toolResult" && part.callId === "call-q");
+		if (result?.kind !== "toolResult") {
+			throw new Error("expected a tool result");
+		}
+		assert.strictEqual(result.text, "The user dismissed the questions without answering. Continue with your best judgement, or ask in your reply.");
+	});
+
+	test("a message sent while questions are open dismisses them and reaches the agent next", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-q", ASK_QUESTIONS_TOOL_NAME, {
+				questions: [{ header: "Approach", question: "Which one?" }],
+			})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Using the typed hint")),
+		]);
+		const current = createHarness(root, backend, planningCatalog());
+		harness = current;
+		current.webview.receive({ type: "send", text: "Plan it" });
+		await waitFor(() => current.webview.ofType("questions").length === 1, "question request");
+		const request = current.webview.ofType("questions")[0].request;
+		current.webview.receive({ type: "send", text: "Just refactor it" });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "both turns");
+		assert.deepStrictEqual(current.webview.ofType("questionsResolved"), [{ type: "questionsResolved", id: request.id }]);
+		assert.strictEqual(backend.requests.length, 2);
+		const lastRequest = backend.requests.at(-1);
+		assert.ok(lastRequest);
+		assert.strictEqual(messageText(lastRequest.messages.at(-1)!), "Just refactor it");
+	});
+
+	test("stopping while the agent waits for answers resolves the questions and ends the turn", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-q", ASK_QUESTIONS_TOOL_NAME, {
+				questions: [{ header: "Approach", question: "Which one?" }],
+			})),
+		]);
+		const current = createHarness(root, backend, planningCatalog());
+		harness = current;
+		current.webview.receive({ type: "send", text: "Plan it" });
+		await waitFor(() => current.webview.ofType("questions").length === 1, "question request");
+		const request = current.webview.ofType("questions")[0].request;
+		current.webview.receive({ type: "stop" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(current.webview.ofType("questionsResolved"), [{ type: "questionsResolved", id: request.id }]);
+		const notice = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "notice" && part.text === "Stopped.");
+		assert.ok(notice);
+	});
+
+	test("init carries pending questions", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-q", ASK_QUESTIONS_TOOL_NAME, {
+				questions: [{ header: "Approach", question: "Which one?" }],
+			})),
+		]);
+		const current = createHarness(root, backend, planningCatalog());
+		harness = current;
+		current.webview.receive({ type: "send", text: "Plan it" });
+		await waitFor(() => current.webview.ofType("questions").length === 1, "question request");
+		const request = current.webview.ofType("questions")[0].request;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init with pending questions");
+		assert.deepStrictEqual(current.webview.ofType("init")[0].questions?.map(question => question.id), [request.id]);
+	});
+
+	test("a subagent gets neither planning tool", async () => {
+		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
+		const source = createChatToolSource({
+			enabledTools: () => [subagent, createTodoTool(), createAskQuestionsTool()],
+			groups: () => [],
+			setEnabled: async () => undefined,
+		});
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-sub", SUBAGENT_TOOL_NAME, { description: "Check", prompt: "Inspect", model: "Smart (Claude)" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("REPORT")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		const names = (backend.requests[1].options.tools ?? []).map(tool => tool.name);
+		assert.ok(!names.includes(SUBAGENT_TOOL_NAME));
+		assert.ok(!names.includes(TODO_TOOL_NAME));
+		assert.ok(!names.includes(ASK_QUESTIONS_TOOL_NAME));
 	});
 
 	test("tool toggles reach the catalog and every webview gets the new groups", async () => {

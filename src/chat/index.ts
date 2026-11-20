@@ -14,6 +14,7 @@ import { createChatToolSource } from "./tool-executor";
 import { ChatToolCatalog } from "./tools/catalog";
 import { getSubagentModelProfiles } from "../subagent-guidance";
 import { createCoreTools } from "./tools/core-tools";
+import { createAskQuestionsTool, createTodoTool } from "./tools/interaction-tools";
 import { createSubagentTool } from "./tools/subagent-tool";
 import { createSymbolTools } from "./tools/symbol-tools";
 import { configuredDangerousCommandRules } from "./tools/danger";
@@ -90,6 +91,8 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 			...createCoreTools(),
 			...createWebTools(),
 			...createSymbolTools(),
+			createTodoTool(),
+			createAskQuestionsTool(),
 			...createChatTerminalTools({ manager: terminals, rules: () => configuredDangerousCommandRules(reportInvalidRule) }),
 			createSubagentTool({
 				// The bridge's subagent catalog: cheapest first, premium flagships and exhausted subscriptions left out.

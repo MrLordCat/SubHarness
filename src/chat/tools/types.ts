@@ -1,5 +1,5 @@
 import type * as vscode from "vscode";
-import type { ChatToolImage } from "../shared/protocol";
+import type { ChatQuestion, ChatQuestionAnswer, ChatToolImage } from "../shared/protocol";
 
 export interface ChatToolOutput {
 	text: string;
@@ -36,6 +36,8 @@ export interface ChatToolInvokeContext {
 	callId?: string;
 	/** Runs a nested agent turn and resolves with its final report; absent inside a subagent. */
 	runSubagent?(request: SubagentRequest, token: vscode.CancellationToken): Promise<string>;
+	/** Asks the user in the chat and resolves with the answers; undefined when skipped; absent inside a subagent. */
+	askQuestions?(questions: ChatQuestion[], token: vscode.CancellationToken): Promise<ChatQuestionAnswer[] | undefined>;
 }
 
 /** A tool the chat can call; invoke throws on failure and the message becomes an error result. */
@@ -62,6 +64,7 @@ export const CHAT_TOOL_GROUPS = {
 	web: "web",
 	terminal: "terminal",
 	diagnostics: "diagnostics",
+	planning: "planning",
 	agents: "agents",
 	bridge: "bridge",
 } as const;

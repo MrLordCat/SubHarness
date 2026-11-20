@@ -7,14 +7,17 @@ import {
 	type ChatModelGroup,
 	type ChatProviderQuota,
 	type ChatQueuedMessage,
+	type ChatQuestionRequest,
 	type ChatRunState,
 	type ChatSessionActivity,
 	type ChatSessionMeta,
 	type ChatSubagentRun,
+	type ChatTodoItem,
 	type ChatToolGroup,
 	type ChatUsage,
 	type HostMessage,
 } from "../shared/protocol";
+import { latestTodoList } from "../shared/todo";
 import { postMessage } from "./api";
 
 const HOST_MESSAGE_TYPES = new Set([
@@ -34,6 +37,8 @@ const HOST_MESSAGE_TYPES = new Set([
 	"run",
 	"approval",
 	"approvalResolved",
+	"questions",
+	"questionsResolved",
 	"toolResultFull",
 	"partTextFull",
 	"subagent",
@@ -96,6 +101,10 @@ export class ChatStore {
 	models: ChatModelGroup[] = [];
 	tools: ChatToolGroup[] = [];
 	approvals: ChatApprovalRequest[] = [];
+	/** Question cards the agent waits on. */
+	questionRequests: ChatQuestionRequest[] = [];
+	/** The newest plan the agent kept with manage_todo_list; undefined until it calls the tool. */
+	todoList: ChatTodoItem[] | undefined;
 	changes: ChatChangeSet = { files: [], sinceTurn: [] };
 	/** Chosen reasoning level of the selected model; absent means the model's default. */
 	selectedThinking: string | undefined;
@@ -274,6 +283,7 @@ export class ChatStore {
 				this.quota = update.quota;
 				this.activity = update.activity;
 				this.approvals = update.approvals;
+				this.questionRequests = update.questions ?? [];
 				this.changes = update.changes;
 				this.selectedModelId = update.selectedModelId;
 				this.run = update.run;
@@ -327,6 +337,14 @@ export class ChatStore {
 			case "approvalResolved":
 				this.approvals = this.approvals.filter(request => request.id !== update.id);
 				return;
+			case "questions":
+				if (!this.questionRequests.some(request => request.id === update.request.id)) {
+					this.questionRequests = [...this.questionRequests, update.request];
+				}
+				return;
+			case "questionsResolved":
+				this.questionRequests = this.questionRequests.filter(request => request.id !== update.id);
+				return;
 			case "truncated": {
 				const removed = this.indexOf(update.messageId);
 				const edited = this.editing ? this.indexOf(this.editing.messageId) : undefined;
@@ -368,6 +386,9 @@ export class ChatStore {
 				if (update.part.kind === "subagent") {
 					this.liveSubagentRuns.delete(update.part.callId);
 				}
+				if (update.part.kind === "toolResult") {
+					this.todoList = latestTodoList(this.messages);
+				}
 				this.bump(update.messageId);
 				return;
 			case "subagent":
@@ -383,6 +404,7 @@ export class ChatStore {
 					this.messageById.set(update.message.id, update.message);
 					this.indexById.set(update.message.id, this.messages.length - 1);
 					this.versions.set(update.message.id, this.nextVersion());
+					this.todoList = latestTodoList(this.messages);
 				} else {
 					if (update.type === "usage") {
 						this.latestUsage = update.usage;
@@ -425,6 +447,7 @@ export class ChatStore {
 			}
 		}
 		this.latestUsage = latest;
+		this.todoList = latestTodoList(this.messages);
 	}
 
 	private bump(messageId: string): void {

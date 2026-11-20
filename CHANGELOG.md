@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.21.28 (development patch) - 2026-11-20
+
+- Added: the bridge chat's own manage_todo_list and ask_questions tools. The
+  agent's todo list shows above the input (Todos done/total, click for the
+  list). Questions appear in a card with options, a recommended choice and a
+  text field; Skip, Stop or sending a message dismisses them. A chat in the
+  background that waits for an answer shows "Waiting for you".
+
 ## 1.21.27 (development patch) - 2026-11-20
 
 - Added: the bridge chat's view_image tool shows a PNG, JPEG, GIF or WebP file
