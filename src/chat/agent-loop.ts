@@ -38,7 +38,8 @@ export interface AgentTurnRequest {
 
 export const MAX_TOOL_RESULT_CHARS = 200_000;
 
-const DEFAULT_MAX_ROUNDS = 100;
+/** A chat turn runs until the model stops calling tools or the user presses Stop. */
+const DEFAULT_MAX_ROUNDS = Number.POSITIVE_INFINITY;
 const TRUNCATION_NOTE = "\n\n[Tool result truncated.]";
 const THINKING_PART = (vscode as unknown as Record<string, unknown>)["LanguageModelThinkingPart"] as
 	(new (value: string | string[], id?: string) => vscode.LanguageModelResponsePart) | undefined;
@@ -199,7 +200,7 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 				}
 			},
 		};
-		await request.backend.provideLanguageModelChatResponse(request.model, toLanguageModelMessages([...request.history, assistant], { system: request.system }), {
+		await request.backend.provideLanguageModelChatResponse(request.model, toLanguageModelMessages([...request.history, assistant], { system: request.system, imageInput: request.model.capabilities?.imageInput === true }), {
 			toolMode: vscode.LanguageModelChatToolMode.Auto,
 			tools: request.tools.tools,
 			modelOptions: { ...request.modelOptions, _conversationId: request.conversationId, _copilotTurnIndex: request.turn, [LIMIT_SIGNAL_OPTION]: true, [PROMPT_CACHE_OPTION]: true },

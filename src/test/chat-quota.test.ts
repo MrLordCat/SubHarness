@@ -105,9 +105,13 @@ suite("Chat quota", () => {
 		assert.strictEqual(claude?.models[0].thinking, undefined);
 	});
 
-	test("formats the chip text from the most used window or a balance", () => {
+	test("formats the chip text from the 5h window, a used-up window or a balance", () => {
 		assert.strictEqual(formatQuotaChip({ provider: "Codex", windows: [{ label: "5h", percent: 42 }, { label: "Week", percent: 12.4 }] }), "5h 42%");
-		assert.strictEqual(formatQuotaChip({ provider: "Codex", windows: [{ label: "5h", percent: 3 }, { label: "Week", percent: 80.6 }] }), "Week 81%");
+		assert.strictEqual(formatQuotaChip({ provider: "Codex", windows: [{ label: "5h", percent: 3 }, { label: "Week", percent: 80.6 }] }), "5h 3%");
+		assert.strictEqual(formatQuotaChip({ provider: "Codex", windows: [{ label: "5h", percent: 3 }, { label: "Week", percent: 100 }] }), "Week 100%");
+		assert.strictEqual(formatQuotaChip({ provider: "Claude", windows: [{ label: "5h", percent: 100 }, { label: "Week", percent: 64 }] }), "5h 100%");
+		assert.strictEqual(formatQuotaChip({ provider: "Claude", windows: [{ label: "Week", percent: 64 }] }), "Week 64%");
+		assert.strictEqual(formatQuotaChip({ provider: "Codex", windows: [{ label: "5h", percent: 3 }, { label: "Week", percent: 100, resetsAt: 1_000 }] }, 2_000), "5h 3%");
 		assert.strictEqual(formatQuotaChip({ provider: "DeepSeek", windows: [], balance: "  $12.30  " }), "$12.30");
 		assert.strictEqual(formatQuotaChip({ provider: "Local", windows: [] }), "");
 	});
@@ -130,6 +134,7 @@ suite("Chat quota", () => {
 		assert.strictEqual(quotaSeverity({ provider: "Codex", windows: [{ label: "5h", percent: 42 }, { label: "Week", percent: 12 }] }), "normal");
 		assert.strictEqual(quotaSeverity({ provider: "Claude", windows: [{ label: "5h", percent: 91 }] }), "warning");
 		assert.strictEqual(quotaSeverity({ provider: "Claude", windows: [{ label: "5h", percent: 79 }, { label: "Week", percent: 100 }] }), "error");
+		assert.strictEqual(quotaSeverity({ provider: "Claude", windows: [{ label: "5h", percent: 10 }, { label: "Week", percent: 95 }] }), "normal");
 		assert.strictEqual(quotaSeverity({ provider: "DeepSeek", windows: [], balance: "$12.30" }), "normal");
 	});
 });

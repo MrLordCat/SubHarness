@@ -16,7 +16,7 @@ import type { ProviderRuntimeMetrics } from "../provider-metrics";
 import { PROVIDER_CONTINUATION_TTL_MS, PROVIDER_DURABLE_SESSION_TTL_MS, PROVIDER_PENDING_ROLLOVER_TTL_MS } from "../session-retention";
 import { setSubagentModelProfiles } from "../subagent-guidance";
 import { asRecord, formatShortResetTime, normalizeCopilotTurnIndex, truncate } from "../utils";
-import { CodexAppServerClient, CodexAppServerError, type CodexServerRequest } from "./app-server-client";
+import { CodexAppServerClient, CodexAppServerError, isCodexCliAvailable, type CodexServerRequest } from "./app-server-client";
 import {
 	CODEX_DEFAULT_ACCOUNT,
 	codexAccountLabelSuffix,
@@ -689,6 +689,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 	private pendingRollover: PendingCodexThreadRollover | undefined;
 	private readonly models = new Map<string, CodexModel>();
 	private status: CodexProviderStatus = { state: "signedOut", summary: "Checking..." };
+	/** The initial signedOut is a placeholder until the first status check. */
+	private statusKnown = false;
 	private requestCount = 0;
 	private threadReuseCount = 0;
 	private lastCacheHitPercent: number | undefined;
@@ -928,8 +930,22 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		} catch (error) {
 			this.accountCache = undefined;
 			this.logSink?.logError("codex.status.failed", error);
-			return this.setStatus({ state: "unavailable", summary: "Codex unavailable" });
+			return this.setStatus({ state: "unavailable", summary: this.cliAvailable ? "Codex unavailable" : "Codex CLI not installed" });
 		}
+	}
+
+	/** A Codex CLI to start was found: the account's or the configured path, the OpenAI extension, a download or PATH. */
+	get cliAvailable(): boolean {
+		return isCodexCliAvailable(this.account.cliPath);
+	}
+
+	/** Checked and not usable until the user signs in, or installs the CLI first. */
+	get needsSignIn(): boolean {
+		if (!this.statusKnown) {
+			return false;
+		}
+		const state = this.status.state;
+		return state === "signedOut" || state === "wrongAuth" || (state === "unavailable" && !this.cliAvailable);
 	}
 
 	async signIn(): Promise<void> {
@@ -1094,7 +1110,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			return this.mapKnownModels();
 		} catch (error) {
 			this.logSink?.logError("codex.models.failed", error);
-			this.setStatus({ state: "unavailable", summary: "Codex unavailable" });
+			this.setStatus({ state: "unavailable", summary: this.cliAvailable ? "Codex unavailable" : "Codex CLI not installed" });
 			return this.models.size > 0 ? this.mapKnownModels() : [];
 		}
 	}
@@ -3388,6 +3404,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 	}
 
 	private setStatus(status: CodexProviderStatus): CodexProviderStatus {
+		this.statusKnown = true;
 		if (
 			status.state !== this.status.state ||
 			status.summary !== this.status.summary ||

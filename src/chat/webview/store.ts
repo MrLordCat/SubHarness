@@ -3,6 +3,7 @@ import {
 	type ChatApprovalRequest,
 	type ChatAttachment,
 	type ChatChangeSet,
+	type ChatDraft,
 	type ChatMemoryEntry,
 	type ChatMessage,
 	type ChatModelGroup,
@@ -12,6 +13,7 @@ import {
 	type ChatRunState,
 	type ChatSessionActivity,
 	type ChatSessionMeta,
+	type ChatSignInOffer,
 	type ChatSubagentRun,
 	type ChatTodoItem,
 	type ChatToolGroup,
@@ -48,7 +50,11 @@ const HOST_MESSAGE_TYPES = new Set([
 	"attachmentsAdded",
 	"queued",
 	"restoreDraft",
+	"draft",
 ]);
+
+/** Typing pauses this long before the draft goes to the host. */
+const DRAFT_SAVE_DELAY_MS = 300;
 
 const MAX_PENDING_ATTACHMENTS = 20;
 
@@ -122,11 +128,17 @@ export class ChatStore {
 	queued: ChatQueuedMessage[] = [];
 	/** Text the composer should take over, e.g. what Stop took back from the queue. */
 	draftRequest: { text: string; seq: number } | undefined;
-	/** Attachments shown in the composer; they are sent with the next message and survive a chat switch. */
+	/** Attachments shown in the composer; they are sent with the next message and stay with their chat. */
 	pendingAttachments: ChatAttachment[] = [];
+	/** The main composer's text as last reported; the composer owns the live value. */
+	draftText = "";
+	/** Bumped when the composer must start over with draftText, e.g. after a chat switch. */
+	composerKey = 0;
 	/** The user message being edited; the composer shows and changes its attachments. */
 	editing: { messageId: string; attachments: ChatAttachment[] } | undefined;
 	selectedModelId: string | undefined;
+	/** Subscriptions the model picker offers to sign in to. */
+	signIn: ChatSignInOffer[] = [];
 	run: ChatRunState = { running: false };
 	latestUsage: ChatUsage | undefined;
 
@@ -139,6 +151,52 @@ export class ChatStore {
 	private readonly listeners = new Set<() => void>();
 	private versionSeq = 0;
 	private draftSeq = 0;
+	/** The chat draftText and pendingAttachments belong to. */
+	private draftSessionId: string | undefined;
+	private draftTimer: ReturnType<typeof setTimeout> | undefined;
+	private draftDirty = false;
+
+	/** The main composer reports its text here; the edit composer does not. */
+	setDraftText = (text: string): void => {
+		if (text === this.draftText) {
+			return;
+		}
+		this.draftText = text;
+		this.scheduleDraftSave();
+	};
+
+	/** Sends a pending draft now, e.g. before the chat changes or the view goes away. */
+	flushDraft = (): void => {
+		if (this.draftTimer !== undefined) {
+			clearTimeout(this.draftTimer);
+			this.draftTimer = undefined;
+		}
+		if (!this.draftDirty || this.draftSessionId === undefined) {
+			return;
+		}
+		this.draftDirty = false;
+		postMessage({ type: "saveDraft", sessionId: this.draftSessionId, text: this.draftText, attachments: this.pendingAttachments });
+	};
+
+	private scheduleDraftSave(): void {
+		this.draftDirty = true;
+		if (this.draftTimer !== undefined) {
+			clearTimeout(this.draftTimer);
+		}
+		this.draftTimer = setTimeout(this.flushDraft, DRAFT_SAVE_DELAY_MS);
+	}
+
+	/** The composer drops its text and starts over with the given draft. */
+	private replaceDraft(draft: ChatDraft | undefined): void {
+		if (this.draftTimer !== undefined) {
+			clearTimeout(this.draftTimer);
+			this.draftTimer = undefined;
+		}
+		this.draftDirty = false;
+		this.draftText = draft?.text ?? "";
+		this.pendingAttachments = [...draft?.attachments ?? []];
+		this.composerKey += 1;
+	}
 
 	subscribe = (listener: () => void): (() => void) => {
 		this.listeners.add(listener);
@@ -226,6 +284,7 @@ export class ChatStore {
 			return;
 		}
 		this.pendingAttachments = next;
+		this.scheduleDraftSave();
 		this.listeners.forEach(listener => listener());
 	};
 
@@ -265,6 +324,7 @@ export class ChatStore {
 		const taken = this.pendingAttachments;
 		this.pendingAttachments = [];
 		if (taken.length > 0) {
+			this.scheduleDraftSave();
 			this.listeners.forEach(listener => listener());
 		}
 		return taken;
@@ -282,6 +342,12 @@ export class ChatStore {
 	private apply(update: HostMessage): void {
 		switch (update.type) {
 			case "init":
+				// Another chat: the old one's pending draft goes out first, then the new one's comes in.
+				if (update.session.id !== this.draftSessionId) {
+					this.flushDraft();
+					this.draftSessionId = update.session.id;
+					this.replaceDraft(update.draft);
+				}
 				this.session = update.session;
 				this.activeSessionId = update.session.id;
 				this.messages = update.messages;
@@ -294,6 +360,7 @@ export class ChatStore {
 				this.questionRequests = update.questions ?? [];
 				this.changes = update.changes;
 				this.selectedModelId = update.selectedModelId;
+				this.signIn = update.signIn ?? [];
 				this.run = update.run;
 				this.queued = update.queued ?? [];
 				this.editing = undefined;
@@ -305,6 +372,7 @@ export class ChatStore {
 				return;
 			case "models":
 				this.models = update.models;
+				this.signIn = update.signIn ?? [];
 				if (update.selectedModelId !== undefined) {
 					this.selectedModelId = update.selectedModelId;
 				}
@@ -332,6 +400,12 @@ export class ChatStore {
 				this.pendingAttachments = mergeAttachmentsById(this.pendingAttachments, update.attachments);
 				this.draftSeq += 1;
 				this.draftRequest = { text: update.text, seq: this.draftSeq };
+				this.scheduleDraftSave();
+				return;
+			case "draft":
+				if (update.sessionId === this.draftSessionId) {
+					this.replaceDraft(update.draft);
+				}
 				return;
 			case "session":
 				this.session = update.session;
@@ -441,6 +515,7 @@ export class ChatStore {
 			this.editing = { ...this.editing, attachments: next };
 		} else {
 			this.pendingAttachments = next;
+			this.scheduleDraftSave();
 		}
 	}
 

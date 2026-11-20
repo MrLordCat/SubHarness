@@ -9,6 +9,8 @@ export type ChatCompactionPart = Extract<ChatPart, { kind: "compaction" }>;
 
 export interface LanguageModelRenderOptions {
 	system?: string;
+	/** The model accepts images; otherwise attached images are replaced by a note. */
+	imageInput?: boolean;
 }
 
 /** The newest compaction whose first kept message is still in the list; earlier messages reach the model only as its summary. */
@@ -69,18 +71,33 @@ export function toLanguageModelMessages(messages: readonly ChatMessage[], option
 		converted.push(vscode.LanguageModelChatMessage.User(compactionSummaryText(compaction.part)));
 	}
 	for (const message of compaction ? messages.slice(compaction.start) : messages) {
-		converted.push(...renderChatMessage(message));
+		converted.push(...renderChatMessage(message, options));
 	}
 	return converted;
 }
 
+function imageNote(count: number): string {
+	return `\n[${count === 1 ? "1 attached image was" : `${count} attached images were`} left out: this model does not accept images.]`;
+}
+
 /** One stored message as model messages, without the system prompt or compaction window. */
-export function renderChatMessage(message: ChatMessage): vscode.LanguageModelChatRequestMessage[] {
+export function renderChatMessage(message: ChatMessage, options: Pick<LanguageModelRenderOptions, "imageInput"> = {}): vscode.LanguageModelChatRequestMessage[] {
 	const converted: vscode.LanguageModelChatRequestMessage[] = [];
 	if (message.role === "user") {
 		const text = userRequestText(message);
-		if (text) {
+		if (!text) {
+			return converted;
+		}
+		const images = (message.images ?? []).filter(image => image.data !== undefined);
+		if (images.length === 0) {
 			converted.push(vscode.LanguageModelChatMessage.User(text));
+		} else if (options.imageInput) {
+			converted.push(vscode.LanguageModelChatMessage.User([
+				new vscode.LanguageModelTextPart(text),
+				...images.map(image => vscode.LanguageModelDataPart.image(Buffer.from(image.data ?? "", "base64"), image.mimeType)),
+			]));
+		} else {
+			converted.push(vscode.LanguageModelChatMessage.User(`${text}${imageNote(images.length)}`));
 		}
 		return converted;
 	}

@@ -8,7 +8,7 @@ import type { SharedMemoryService } from "../memory/shared-memory-service";
 import { ChatAttachmentSource } from "./attachment-source";
 import { ChatChangeTracker } from "./changes/change-tracker";
 import { findGitExecutable } from "./changes/shadow-git";
-import { ChatController, type ChatQuotaSource } from "./chat-controller";
+import { ChatController, type ChatAccountSource, type ChatQuotaSource } from "./chat-controller";
 import { registerChatView } from "./chat-view";
 import { CHAT_COMPACTION_TARGET_TOKENS, createChatSummarizer } from "./compaction";
 import { createChatMemorySource } from "./memory-context";
@@ -38,6 +38,8 @@ export interface ChatWindowDeps {
 	/** Sent with DeepSeek summary requests. */
 	userAgent?: string;
 	quota?: ChatQuotaSource;
+	/** Subscriptions to sign in to, offered in the model picker. */
+	accounts?: ChatAccountSource;
 	/** Shared durable memory the chat shows to every provider. */
 	memory?: SharedMemoryService;
 }
@@ -126,7 +128,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		],
 		state: context.globalState,
 	});
-	const attachments = new ChatAttachmentSource({ log: deps.log });
+	const attachments = new ChatAttachmentSource({ log: deps.log, pasteDir: vscode.Uri.file(path.join(storage, "chat-attachments")) });
 	const controller = new ChatController({
 		backend: deps.composite,
 		onDidChangeModels: deps.composite.onDidChangeLanguageModelChatInformation ?? NEVER_FIRES,
@@ -151,6 +153,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 			return choice === action;
 		},
 		quota: deps.quota,
+		accounts: deps.accounts,
 		compaction: {
 			summarize: createChatSummarizer({
 				apiKey: async () => (await context.secrets.get(DEEPSEEK_KEY_SECRET))?.trim() || undefined,

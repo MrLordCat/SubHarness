@@ -37,6 +37,8 @@ import { ProviderDirectory } from "./providers/provider-directory";
 import { applyAgentHostThinkingPatch, findAgentHostBundle, getAgentHostThinkingPatchStatus, restoreAgentHostThinkingPatch } from "./byok/agent-host-thinking-patch";
 import { applyWorkbenchTerminalPatch, findWorkbenchBundle, getWorkbenchTerminalPatchStatus, restoreWorkbenchTerminalPatch } from "./byok/workbench-terminal-patch";
 import { CodexChatModelProvider, type CodexUsageRecord } from "./codex/codex-provider";
+import { codexCliStorage, resolveCodexCliPath, setCodexCliStorage } from "./codex/app-server-client";
+import { installCodexCli, installedCodexCliPath, installedCodexCliVersion, latestCodexCliVersion } from "./codex/cli-installer";
 import {
 	CODEX_DEFAULT_ACCOUNT_ID,
 	decodeCodexAccountModelId,
@@ -537,6 +539,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// Keep UA minimal: only extension version and VS Code version
 	const ua = `${EXTENSION_NAME}/${extVersion} VSCode/${vscodeVersion}`;
 	const logService = new LlamaLogService(context);
+	// A Codex CLI downloaded by "Install Codex CLI" lives here; set before any app-server starts.
+	setCodexCliStorage(path.join(context.globalStorageUri.fsPath, "codex-cli"));
 
 	// Production-grade crash logging: VS Code keeps the extension host alive on
 	// uncaught exceptions, but without these handlers the failure is silent to
@@ -739,6 +743,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			].filter(quota => quota !== undefined),
 			refresh: async () => {
 				await Promise.allSettled([activeCodex().refreshStatus(), claudeProvider.refreshSubscriptionUsage(true), llamaProvider.refreshDeepSeekBalance(true)]);
+			},
+			onDidChange: quotaChanges.event,
+		},
+		accounts: {
+			offers: () => [
+				...(activeCodex().needsSignIn
+					? [{ provider: "codex", label: "Sign in to Codex", detail: activeCodex().cliAvailable ? "ChatGPT subscription" : "ChatGPT subscription; downloads the Codex CLI first" }]
+					: []),
+				...(claudeProvider.needsSignIn
+					? [{ provider: "claude", label: "Sign in to Claude", detail: "Claude subscription, through the bundled Claude Code" }]
+					: []),
+			],
+			signIn: async provider => {
+				await vscode.commands.executeCommand(provider === "codex" ? "llamacpp.codexSignIn" : "llamacpp.claudeSignIn");
 			},
 			onDidChange: quotaChanges.event,
 		},
@@ -1762,9 +1780,90 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 		})
 	);
 
+	/** Downloads the Codex CLI from npm with a cancellable progress notification; true when one is ready. */
+	const installCodexCliWithProgress = async (): Promise<boolean> => {
+		const root = codexCliStorage();
+		if (!root) {
+			return false;
+		}
+		const previous = installedCodexCliPath(root);
+		const wasInUse = previous !== undefined && resolveCodexCliPath() === previous;
+		const controller = new AbortController();
+		try {
+			const outcome = await vscode.window.withProgress({
+				location: vscode.ProgressLocation.Notification,
+				title: "Codex CLI",
+				cancellable: true,
+			}, async (progress, token) => {
+				token.onCancellationRequested(() => controller.abort());
+				progress.report({ message: "Looking up the latest version…" });
+				const latest = await latestCodexCliVersion({ signal: controller.signal });
+				if (previous && installedCodexCliVersion(root) === latest) {
+					return { version: latest, upToDate: true };
+				}
+				let shown = 0;
+				const result = await installCodexCli({
+					root,
+					version: latest,
+					signal: controller.signal,
+					log: (event, data) => logService.log(event, data),
+					onProgress: (received, total) => {
+						if (!total) {
+							return;
+						}
+						const percent = Math.floor(received / total * 100);
+						if (percent > shown) {
+							progress.report({ increment: percent - shown, message: percent < 100 ? `Downloading ${latest}… ${percent}%` : "Unpacking…" });
+							shown = percent;
+						}
+					},
+				});
+				return { version: result.version, upToDate: false };
+			});
+			if (outcome.upToDate) {
+				vscode.window.showInformationMessage(`Codex CLI ${outcome.version} is up to date.`);
+				return true;
+			}
+			vscode.window.showInformationMessage(wasInUse
+				? `Codex CLI ${outcome.version} installed. Reload the window to switch to it.`
+				: `Codex CLI ${outcome.version} installed.`);
+			for (const provider of codexProviders.values()) {
+				void provider.refreshStatus();
+			}
+			refreshAllCodexCatalogs();
+			quickActionsProvider.refresh();
+			return true;
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return false;
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			vscode.window.showErrorMessage(`Unable to install the Codex CLI: ${message}`);
+			return false;
+		}
+	};
+	/** Without a CLI nothing can sign in: offer the download first. */
+	const ensureCodexCli = async (provider: CodexChatModelProvider): Promise<boolean> => {
+		if (provider.cliAvailable) {
+			return true;
+		}
+		const choice = await vscode.window.showWarningMessage(
+			"The Codex CLI was not found. Download it from npm? About 185 MB to download and 530 MB on disk, kept in the extension's storage.",
+			{ modal: true },
+			"Download"
+		);
+		return choice === "Download" && await installCodexCliWithProgress();
+	};
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.codexInstallCli", () => installCodexCliWithProgress())
+	);
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.codexSignIn", async () => {
 			try {
+				if (!await ensureCodexCli(activeCodex())) {
+					return;
+				}
 				await activeCodex().signIn();
 				quickActionsProvider.refresh();
 			} catch (error) {
@@ -1783,6 +1882,9 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 				return;
 			}
 			try {
+				if (!await ensureCodexCli(codexProviderFor(account.id))) {
+					return;
+				}
 				await codexProviderFor(account.id).signIn();
 				quickActionsProvider.refresh();
 			} catch (error) {
@@ -1922,7 +2024,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.claudeSignOut", async () => {
 			const confirmed = await vscode.window.showWarningMessage(
-				"Sign out of Claude? This clears the cached OAuth token.",
+				"Sign out of Claude? This signs Claude Code out on this computer, the Claude Code extension included.",
 				{ modal: true },
 				"Sign Out"
 			);

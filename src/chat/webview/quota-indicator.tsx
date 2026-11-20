@@ -25,7 +25,8 @@ export function QuotaIndicator({ quota, provider, onRefresh }: QuotaIndicatorPro
 	useKeepInView(popupRef, open);
 
 	const current = provider === undefined ? undefined : quota.find(entry => entry.provider === provider);
-	const chip = current ? formatQuotaChip(current) : "";
+	const now = Date.now();
+	const chip = current ? formatQuotaChip(current, now) : "";
 	if (!current || !chip) {
 		return null;
 	}
@@ -49,7 +50,7 @@ export function QuotaIndicator({ quota, provider, onRefresh }: QuotaIndicatorPro
 			<button
 				type="button"
 				ref={triggerRef}
-				class={`quota-chip quota-${quotaSeverity(current)}`}
+				class={`quota-chip quota-${quotaSeverity(current, now)}`}
 				aria-haspopup="dialog"
 				aria-expanded={open}
 				title={formatQuotaTitle(current)}

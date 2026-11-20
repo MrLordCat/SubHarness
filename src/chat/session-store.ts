@@ -547,6 +547,7 @@ function isChatMessage(value: unknown): value is ChatMessage {
 		&& (value.memoryRevisions === undefined || (Array.isArray(value.memoryRevisions) && value.memoryRevisions.every(isMemoryRevision)))
 		&& (value.attachments === undefined || (Array.isArray(value.attachments) && value.attachments.every(isChatAttachment)))
 		&& (value.attachmentContext === undefined || typeof value.attachmentContext === "string")
+		&& (value.images === undefined || (Array.isArray(value.images) && value.images.every(isChatToolImage)))
 		&& (value.usage === undefined || isChatUsage(value.usage))
 		&& (value.usageTotals === undefined || isChatUsageTotals(value.usageTotals))
 		&& (value.promptCache === undefined || isChatPromptCache(value.promptCache));

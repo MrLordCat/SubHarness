@@ -1,5 +1,5 @@
 import { useCallback } from "preact/hooks";
-import type { ChatAttachment } from "../shared/protocol";
+import type { ChatAttachment, ChatPastedFile } from "../shared/protocol";
 import { postMessage } from "./api";
 import type { ChatStore } from "./store";
 
@@ -15,6 +15,8 @@ export function useComposerActions(store: ChatStore) {
 	}, [store]);
 	const onPickAttachments = useCallback(() => postMessage({ type: "pickAttachments" }), []);
 	const onAddAttachments = useCallback((uris: string[]) => postMessage({ type: "addAttachments", uris }), []);
+	const onPasteFiles = useCallback((files: ChatPastedFile[]) => postMessage({ type: "pasteFiles", files }), []);
+	const onSignIn = useCallback((provider: string) => postMessage({ type: "signIn", provider }), []);
 	const onOpenAttachment = useCallback((attachment: ChatAttachment) => postMessage({ type: "openAttachment", attachment }), []);
 	const onRemoveAttachment = useCallback((id: string) => store.removeAttachment(id), [store]);
 	return {
@@ -25,6 +27,8 @@ export function useComposerActions(store: ChatStore) {
 		onSetToolsEnabled,
 		onPickAttachments,
 		onAddAttachments,
+		onPasteFiles,
+		onSignIn,
 		onOpenAttachment,
 		onRemoveAttachment,
 	};

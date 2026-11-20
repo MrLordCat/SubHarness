@@ -186,9 +186,22 @@ than staying `running` forever.
 
 The provider resolves the executable in this order:
 
-1. `llamacpp.codexCliPath`
+1. the account's `cliPath`, then `llamacpp.codexCliPath`
 2. Codex bundled with the official `openai.chatgpt` VS Code extension
-3. `codex` on `PATH`
+3. the Codex CLI downloaded by **Install or Update Codex CLI**
+4. `codex` on `PATH` (on Windows only `codex.exe`; an npm `codex.cmd` shim
+   cannot be started without a shell)
+
+When none is found, `AI Agent Bridge: Sign In to Codex Subscription` offers to
+download the CLI first. `AI Agent Bridge: Install or Update Codex CLI` (also in
+Quick Access → Codex and the Providers Manager) downloads the latest
+`@openai/codex` platform package from `registry.npmjs.org`, about 185 MB, and
+unpacks only `vendor/<target>` without the voice runtime, about 530 MB, into
+`<globalStorage>/codex-cli/<version>`. The tarball must come from the registry
+host over HTTPS and match the registry's sha512 `dist.integrity`; entries that
+leave the folder are refused, and the new binary must answer `--version`
+before `current.json` points to it. A newer version replaces the older one; a
+running app-server switches to it after Reload Window.
 
 Use `AI Agent Bridge: Sign In to Codex Subscription` for a managed browser OAuth
 flow. An existing ChatGPT session created with `codex login` is shared
@@ -242,9 +255,10 @@ does not use `OPENAI_API_KEY`.
 
 ### Codex CLI cannot be started
 
-Install the official OpenAI extension, install `@openai/codex`, or set an
-absolute `llamacpp.codexCliPath`. After changing the path, reload VS Code and
-refresh models.
+Run `AI Agent Bridge: Install or Update Codex CLI`, install the official OpenAI
+extension, or set an absolute `llamacpp.codexCliPath`. After changing the path,
+reload VS Code and refresh models. The install logs
+`codex.cli_install.start` and `codex.cli_install.done`.
 
 ### Commands or searches remain inside the thinking block
 

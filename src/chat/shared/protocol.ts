@@ -98,6 +98,19 @@ export interface ChatAttachment {
 	languageId?: string;
 }
 
+/** A subscription the chat could use after the user signs in; the model picker offers it. */
+export interface ChatSignInOffer {
+	provider: string;
+	label: string;
+	detail?: string;
+}
+
+/** What the composer of a chat holds before it is sent; kept per chat across reloads. */
+export interface ChatDraft {
+	text: string;
+	attachments: ChatAttachment[];
+}
+
 /** A message sent while the agent works; it is delivered after the current tool round. */
 export interface ChatQueuedMessage {
 	id: string;
@@ -128,6 +141,20 @@ export interface ChatMessage {
 	attachments?: ChatAttachment[];
 	/** The rendered <attachments> block sent to the model; kept so later requests repeat it byte for byte. */
 	attachmentContext?: string;
+	/** Image attachments of a user message, sent after its text to models that accept images; left out of webview views. */
+	images?: ChatToolImage[];
+}
+
+/** Each pasted file; larger ones are not attached. */
+export const PASTED_FILE_MAX_BYTES = 20 * 1024 * 1024;
+export const PASTED_FILES_LIMIT = 10;
+
+/** A file pasted into the composer; the webview has its bytes but no path. */
+export interface ChatPastedFile {
+	name: string;
+	mimeType: string;
+	/** Base64. */
+	data: string;
 }
 
 export interface ChatSessionMeta {
@@ -333,9 +360,12 @@ export type HostMessage =
 		quota: ChatProviderQuota[];
 		activity: ChatSessionActivity[];
 		queued?: ChatQueuedMessage[];
+		/** The shown chat's unsent text and attachments; the composer takes them over when the chat changes. */
+		draft?: ChatDraft;
+		signIn?: ChatSignInOffer[];
 	}
 	| { type: "changes"; changes: ChatChangeSet }
-	| { type: "models"; models: ChatModelGroup[]; selectedModelId?: string; selectedThinking?: string }
+	| { type: "models"; models: ChatModelGroup[]; selectedModelId?: string; selectedThinking?: string; signIn?: ChatSignInOffer[] }
 	| { type: "quota"; quota: ChatProviderQuota[] }
 	/** The shared memory entries visible here; notice is the last save or delete error. */
 	| { type: "memory"; enabled: boolean; projectLabel?: string; entries: ChatMemoryEntry[]; notice?: string }
@@ -368,18 +398,26 @@ export type HostMessage =
 	/** The shown chat's queue changed. */
 	| { type: "queued"; queued: ChatQueuedMessage[] }
 	/** Puts messages taken back from the queue into the composer, e.g. after Stop. */
-	| { type: "restoreDraft"; text: string; attachments: ChatAttachment[] };
+	| { type: "restoreDraft"; text: string; attachments: ChatAttachment[] }
+	/** Another view of the shown chat changed its draft; the composer replaces its content. */
+	| { type: "draft"; sessionId: string; draft: ChatDraft };
 
 /** Webview → host. */
 export type WebviewMessage =
 	| { type: "ready" }
 	| { type: "send"; text: string; attachments?: ChatAttachment[] }
+	/** The composer's unsent text and attachments of a chat; empty ones remove the draft. */
+	| { type: "saveDraft"; sessionId: string; text: string; attachments: ChatAttachment[] }
 	/** Removes a queued message before it is delivered. */
 	| { type: "removeQueued"; id: string }
 	/** Opens the attachment picker; the picked files come back as "attachmentsAdded". */
 	| { type: "pickAttachments" }
 	/** Files dropped on the composer. */
 	| { type: "addAttachments"; uris: string[] }
+	/** Screenshots and files pasted or dropped from outside VS Code; they come back as "attachmentsAdded". */
+	| { type: "pasteFiles"; files: ChatPastedFile[] }
+	/** Starts the sign-in of a subscription from the model picker's offers. */
+	| { type: "signIn"; provider: string }
 	| { type: "openAttachment"; attachment: ChatAttachment }
 	/**
 	 * Replaces an earlier user message: it and everything after it are dropped, then the text is sent as a new turn.

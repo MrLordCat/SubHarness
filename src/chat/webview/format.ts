@@ -403,29 +403,34 @@ export function quotaLevel(percent: number): QuotaLevel {
 	return percent >= 80 ? "warning" : "normal";
 }
 
-/** The worst window decides the colour of the chip. */
-export function quotaSeverity(quota: ChatProviderQuota): QuotaLevel {
-	let level: QuotaLevel = "normal";
-	for (const window of quota.windows) {
-		const candidate = quotaLevel(window.percent);
-		if (candidate === "error") {
-			return "error";
-		}
-		if (candidate === "warning") {
-			level = "warning";
-		}
+/**
+ * The window the chip and the picker show: a used-up window (the one that resets last),
+ * otherwise the 5h one; the weekly window appears only when it is used up. A provider
+ * without a 5h window shows its most used one.
+ */
+export function displayedQuotaWindow(quota: ChatProviderQuota, now?: number): ChatQuotaWindow | undefined {
+	const exhausted = exhaustedWindow(quota, now);
+	if (exhausted) {
+		return exhausted;
 	}
-	return level;
+	return quota.windows.find(window => window.label === "5h")
+		?? quota.windows.reduce<ChatQuotaWindow | undefined>(
+			(best, window) => (best === undefined || window.percent > best.percent ? window : best),
+			undefined,
+		);
 }
 
-/** The most used window ("Week 81%"), or the balance when the provider reports no windows. */
-export function formatQuotaChip(quota: ChatProviderQuota): string {
-	const worst = quota.windows.reduce<ChatProviderQuota["windows"][number] | undefined>(
-		(best, window) => (best === undefined || window.percent > best.percent ? window : best),
-		undefined,
-	);
-	if (worst) {
-		return `${worst.label} ${Math.round(worst.percent)}%`;
+/** The shown window decides the colour of the chip. */
+export function quotaSeverity(quota: ChatProviderQuota, now?: number): QuotaLevel {
+	const window = displayedQuotaWindow(quota, now);
+	return window ? quotaLevel(window.percent) : "normal";
+}
+
+/** The shown window ("5h 42%", "Week 100%"), or the balance when the provider reports no windows. */
+export function formatQuotaChip(quota: ChatProviderQuota, now?: number): string {
+	const window = displayedQuotaWindow(quota, now);
+	if (window) {
+		return `${window.label} ${Math.round(window.percent)}%`;
 	}
 	return quota.balance?.trim() ?? "";
 }
@@ -439,9 +444,10 @@ export function formatQuotaTitle(quota: ChatProviderQuota): string {
 	return parts.length > 0 ? `${quota.provider} limits: ${parts.join(" · ")}` : `${quota.provider} limits`;
 }
 
-/** Every window with its used share, then the balance: "5h 42% · Week 18% · $12.30". */
-export function formatQuotaSummary(quota: ChatProviderQuota): string {
-	const parts = quota.windows.map(window => `${window.label} ${Math.round(window.percent)}%`);
+/** The shown window, then the balance: "5h 42% · $12.30"; the tooltip lists every window. */
+export function formatQuotaSummary(quota: ChatProviderQuota, now?: number): string {
+	const window = displayedQuotaWindow(quota, now);
+	const parts = window ? [`${window.label} ${Math.round(window.percent)}%`] : [];
 	if (quota.balance?.trim()) {
 		parts.push(quota.balance.trim());
 	}

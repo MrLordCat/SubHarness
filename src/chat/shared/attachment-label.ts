@@ -1,5 +1,24 @@
 import type { ChatAttachment } from "./protocol";
 
+const IMAGE_TYPES: Record<string, string> = {
+	png: "image/png",
+	jpg: "image/jpeg",
+	jpeg: "image/jpeg",
+	gif: "image/gif",
+	webp: "image/webp",
+};
+
+/** The image type models accept for a file name, or undefined for any other file. */
+export function imageMimeType(path: string): string | undefined {
+	const extension = /\.([A-Za-z0-9]+)$/.exec(path)?.[1]?.toLowerCase();
+	return extension ? IMAGE_TYPES[extension] : undefined;
+}
+
+/** The file extension for an image type, for pasted images that come without a name. */
+export function imageExtension(mimeType: string): string | undefined {
+	return Object.entries(IMAGE_TYPES).find(([, type]) => type === mimeType.toLowerCase())?.[0];
+}
+
 export function attachmentLabel(attachment: ChatAttachment): string {
 	const name = attachment.path.split(/[\\/]/).pop() || attachment.path;
 	if (attachment.kind !== "selection" || attachment.startLine === undefined) {

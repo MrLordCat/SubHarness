@@ -11,6 +11,7 @@ You are a subagent that another AI agent started for one subtask. That agent see
 </subagent>`;
 
 const MAX_STEPS = 200;
+const SUBAGENT_MAX_ROUNDS = 100;
 const MAX_TEXT_STEP_CHARS = 4_000;
 const MAX_SUMMARY_CHARS = 160;
 const MAX_INPUT_CHARS = 4_000;
@@ -154,6 +155,8 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<stri
 			sink,
 			token,
 			system: [options.system, SUBAGENT_INSTRUCTIONS].filter(Boolean).join("\n\n"),
+			// A delegated task nobody watches step by step keeps a bound; the chat turn itself has none.
+			maxRounds: SUBAGENT_MAX_ROUNDS,
 			// The composite then keeps the run off the parent's conversation, journal and native session.
 			modelOptions: { _copilotSubagentInvocationId: `chat-subagent-${options.callId}`, _aabStrictTools: true },
 		});

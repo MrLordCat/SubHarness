@@ -5,7 +5,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { renderAttachments, type AttachmentContent } from "../chat/attachments";
 import type { ChatChangeTrackerLike, TurnSnapshot } from "../chat/changes/change-tracker";
-import { ChatController, type ChatAttachmentsDeps, type ChatControllerDeps, type ChatQuotaSource } from "../chat/chat-controller";
+import { ChatController, type ChatAccountSource, type ChatAttachmentsDeps, type ChatControllerDeps, type ChatQuotaSource } from "../chat/chat-controller";
 import type { ChatCompactionPlan } from "../chat/compaction";
 import { compactionSummaryText } from "../chat/lm-messages";
 import type { ChatMemoryContext, ChatMemorySource } from "../chat/memory-context";
@@ -23,7 +23,9 @@ import {
 	type ChatMemoryEntry,
 	type ChatMemorySaveInput,
 	type ChatMessage,
+	type ChatPastedFile,
 	type ChatProviderQuota,
+	type ChatSignInOffer,
 	type ChatToolGroup,
 	type ChatToolImage,
 	type HostMessage,
@@ -73,6 +75,7 @@ const NEVER_FIRES: vscode.Event<void> = () => new vscode.Disposable(() => undefi
 const ACTIVE_SESSION_KEY = "llamacpp.chat.activeSession";
 const LAST_MODEL_KEY = "llamacpp.chat.lastModel";
 const THINKING_KEY = "llamacpp.chat.thinking";
+const DRAFTS_KEY = "llamacpp.chat.drafts";
 const INTERRUPTED_TEXT = "This answer was interrupted: VS Code closed or reloaded while it was running.";
 
 type Round = (progress: vscode.Progress<vscode.LanguageModelResponsePart>, token: vscode.CancellationToken) => void | Promise<void>;
@@ -165,6 +168,42 @@ function fakeQuota(initial: ChatProviderQuota[]): FakeQuota {
 	return fake;
 }
 
+interface FakeAccounts {
+	source: ChatAccountSource;
+	current: ChatSignInOffer[];
+	readonly signIns: string[];
+	/** Runs inside signIn, e.g. to drop the offer the way a finished sign-in does. */
+	onSignIn?: (provider: string) => void;
+	fire(): void;
+	dispose(): void;
+}
+
+function fakeAccounts(initial: ChatSignInOffer[]): FakeAccounts {
+	const emitter = new vscode.EventEmitter<void>();
+	const fake: FakeAccounts = {
+		current: initial,
+		signIns: [],
+		source: {
+			offers: () => fake.current,
+			signIn: async provider => {
+				fake.signIns.push(provider);
+				fake.onSignIn?.(provider);
+			},
+			onDidChange: emitter.event,
+		},
+		fire() {
+			emitter.fire();
+		},
+		dispose() {
+			emitter.dispose();
+		},
+	};
+	return fake;
+}
+
+const CODEX_OFFER: ChatSignInOffer = { provider: "codex", label: "Sign in to Codex", detail: "ChatGPT subscription" };
+const CLAUDE_OFFER: ChatSignInOffer = { provider: "claude", label: "Sign in to Claude" };
+
 class FakeAttachments implements ChatAttachmentsDeps {
 	readonly reads: ChatAttachment[][] = [];
 	readonly opened: ChatAttachment[] = [];
@@ -189,6 +228,14 @@ class FakeAttachments implements ChatAttachmentsDeps {
 
 	async open(attachment: ChatAttachment): Promise<void> {
 		this.opened.push(attachment);
+	}
+
+	readonly pastes: ChatPastedFile[][] = [];
+	pasted: ChatAttachment[] = [];
+
+	async savePasted(files: readonly ChatPastedFile[]): Promise<ChatAttachment[]> {
+		this.pastes.push([...files]);
+		return this.pasted;
 	}
 }
 
@@ -495,7 +542,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "confirm" | "notify" | "attachments" | "memory" | "memoryStore">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "attachments" | "memory" | "memoryStore">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -590,6 +637,7 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(init.messages, []);
 		assert.deepStrictEqual(init.run, { running: false });
 		assert.deepStrictEqual(init.activity, []);
+		assert.deepStrictEqual(init.signIn, []);
 		assert.strictEqual(backend.modelInfoRequests, 1);
 		assert.strictEqual(current.state.get<string>(ACTIVE_SESSION_KEY), init.session.id);
 	});
@@ -1233,6 +1281,96 @@ suite("chat controller", () => {
 		} finally {
 			quota.dispose();
 		}
+	});
+
+	test("init carries the sign-in offers", async () => {
+		const accounts = fakeAccounts([CODEX_OFFER, CLAUDE_OFFER]);
+		try {
+			const current = createHarness(root, new FakeBackend(), undefined, undefined, { accounts: accounts.source });
+			harness = current;
+			current.webview.receive({ type: "ready" });
+			await waitFor(() => current.webview.ofType("init").length === 1, "init");
+			assert.deepStrictEqual(current.webview.ofType("init")[0].signIn, [CODEX_OFFER, CLAUDE_OFFER]);
+		} finally {
+			accounts.dispose();
+		}
+	});
+
+	test("signIn starts an offered sign-in and then re-sends the models with the offers left", async () => {
+		const accounts = fakeAccounts([CODEX_OFFER, CLAUDE_OFFER]);
+		accounts.onSignIn = provider => {
+			accounts.current = accounts.current.filter(offer => offer.provider !== provider);
+		};
+		try {
+			const current = createHarness(root, new FakeBackend(), undefined, undefined, { accounts: accounts.source });
+			harness = current;
+			current.webview.receive({ type: "ready" });
+			await waitFor(() => current.webview.ofType("init").length === 1, "init");
+			const before = current.webview.ofType("models").length;
+
+			current.webview.receive({ type: "signIn", provider: "codex" });
+			await waitFor(() => current.webview.ofType("models").length > before, "models after the sign-in");
+			assert.deepStrictEqual(accounts.signIns, ["codex"]);
+			assert.deepStrictEqual(current.webview.ofType("models").at(-1)?.signIn, [CLAUDE_OFFER]);
+		} finally {
+			accounts.dispose();
+		}
+	});
+
+	test("signIn ignores providers that are not offered or not valid ids", async () => {
+		const accounts = fakeAccounts([CODEX_OFFER]);
+		try {
+			const current = createHarness(root, new FakeBackend(), undefined, undefined, { accounts: accounts.source });
+			harness = current;
+			current.webview.receive({ type: "ready" });
+			await waitFor(() => current.webview.ofType("init").length === 1, "init");
+			const before = current.webview.ofType("models").length;
+
+			current.webview.receive({ type: "signIn", provider: "claude" });
+			current.webview.receive({ type: "signIn", provider: "Bad Provider!" });
+			current.webview.receive({ type: "signIn" });
+			await new Promise<void>(resolve => setTimeout(resolve, 50));
+			assert.deepStrictEqual(accounts.signIns, []);
+			assert.strictEqual(current.webview.ofType("models").length, before);
+		} finally {
+			accounts.dispose();
+		}
+	});
+
+	test("a change of the account source re-sends the models with the new offers", async () => {
+		const accounts = fakeAccounts([]);
+		try {
+			const current = createHarness(root, new FakeBackend(), undefined, undefined, { accounts: accounts.source });
+			harness = current;
+			current.webview.receive({ type: "ready" });
+			await waitFor(() => current.webview.ofType("init").length === 1, "init");
+			assert.deepStrictEqual(current.webview.ofType("init")[0].signIn, []);
+
+			accounts.current = [CLAUDE_OFFER];
+			accounts.fire();
+			await waitFor(() => current.webview.ofType("models").some(message => message.signIn?.length === 1), "models with the new offer");
+			assert.deepStrictEqual(current.webview.ofType("models").at(-1)?.signIn, [CLAUDE_OFFER]);
+		} finally {
+			accounts.dispose();
+		}
+	});
+
+	test("failing offers are logged and leave init without offers", async () => {
+		const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+		const accounts: ChatAccountSource = {
+			offers: () => {
+				throw new Error("status check failed");
+			},
+			signIn: async () => undefined,
+		};
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, { accounts, log: (event, data) => events.push({ event, data }) });
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const init = current.webview.ofType("init")[0];
+		assert.deepStrictEqual(init.signIn, []);
+		assert.deepStrictEqual(init.models, groupModels(MODELS));
+		assert.ok(events.some(entry => entry.event === "chat.accounts.offers_failed" && entry.data.message === "status check failed"));
 	});
 
 	test("newChat creates another session and sends init", async () => {
@@ -3044,5 +3182,154 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "openSession", sessionId: first });
 		await waitFor(() => current.webview.ofType("init").length === 3, "third init");
 		assert.deepStrictEqual(tracker.recovered, [first, second, first]);
+	});
+
+	test("attaches pasted files and sends their images to a model that accepts images", async () => {
+		const model: vscode.LanguageModelChatInformation = {
+			id: "codex::eye", name: "Eye (Codex)", family: "codex", version: "1", maxInputTokens: 100_000, maxOutputTokens: 4_000,
+			capabilities: { toolCalling: true, imageInput: true },
+		};
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("A cat."))], [model]);
+		const attachments = new FakeAttachments();
+		const shot: ChatAttachment = { id: "shot", kind: "file", path: "pasted-20261120-090507.png", uri: "file:///store/pasted-20261120-090507.png" };
+		attachments.pasted = [shot];
+		attachments.contents = [{ attachment: shot, image: { mimeType: "image/png", data: "iVBORw==", byteLength: 4, name: shot.path } }];
+		const current = createHarness(root, backend, undefined, undefined, { attachments });
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+
+		current.webview.receive({ type: "pasteFiles", files: [{ name: "image.png", mimeType: "image/png", data: "iVBORw==" }] });
+		await waitFor(() => current.webview.ofType("attachmentsAdded").length === 1, "pasted attachment");
+		assert.deepStrictEqual(attachments.pastes, [[{ name: "image.png", mimeType: "image/png", data: "iVBORw==" }]]);
+		assert.deepStrictEqual(current.webview.ofType("attachmentsAdded")[0].attachments, [shot]);
+		// A malformed paste is dropped before it reaches the attachment source.
+		current.webview.receive({ type: "pasteFiles", files: [{ name: "x.png", mimeType: "image/png" }] });
+
+		current.webview.receive({ type: "send", text: "What is this?", attachments: [shot] });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		const user = backend.requests[0].messages.find(message => message.role === vscode.LanguageModelChatMessageRole.User);
+		const image = user?.content.find((part): part is vscode.LanguageModelDataPart => part instanceof vscode.LanguageModelDataPart);
+		assert.strictEqual(image?.mimeType, "image/png");
+		assert.deepStrictEqual(Buffer.from(image.data), Buffer.from("iVBORw==", "base64"));
+		const shown = current.webview.ofType("messageAdded").find(message => message.message.role === "user")?.message;
+		assert.strictEqual(shown?.images, undefined, "the webview gets the chip, not the bytes");
+		assert.deepStrictEqual(attachments.pastes.length, 1);
+	});
+
+	test("keeps a draft per chat and gives it back after a reload", async () => {
+		const current = createHarness(root, new FakeBackend());
+		harness = current;
+		const drafts = (): Record<string, { text: string }> => current.state.get<Record<string, { text: string }>>(DRAFTS_KEY) ?? {};
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const first = current.webview.ofType("init")[0];
+		assert.strictEqual(first.draft, undefined);
+
+		current.webview.receive({ type: "saveDraft", sessionId: first.session.id, text: "half a thought", attachments: [FILE_ATTACHMENT] });
+		await waitFor(() => drafts()[first.session.id]?.text === "half a thought", "first draft saved");
+
+		// The new chat starts empty; the first one has no messages, but its draft keeps it.
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		const second = current.webview.ofType("init")[1];
+		assert.notStrictEqual(second.session.id, first.session.id);
+		assert.strictEqual(second.draft, undefined);
+		assert.ok(await current.store.get(first.session.id), "a chat with a draft is not removed when left");
+		current.webview.receive({ type: "listSessions" });
+		await waitFor(() => current.webview.ofType("sessions").length > 0, "sessions");
+		assert.ok(current.webview.ofType("sessions").at(-1)?.sessions.some(meta => meta.id === first.session.id));
+
+		current.webview.receive({ type: "saveDraft", sessionId: second.session.id, text: "another", attachments: [] });
+		await waitFor(() => drafts()[second.session.id]?.text === "another", "second draft saved");
+
+		current.webview.receive({ type: "openSession", sessionId: first.session.id });
+		await waitFor(() => current.webview.ofType("init").length === 3, "third init");
+		assert.deepStrictEqual(current.webview.ofType("init")[2].draft, { text: "half a thought", attachments: [FILE_ATTACHMENT] });
+
+		// Reload: a new controller over the same storage shows the same chat with its draft.
+		await current.store.flush();
+		const reloaded = new ChatController({
+			backend: new FakeBackend(),
+			onDidChangeModels: NEVER_FIRES,
+			store: new ChatSessionStore(root),
+			tools: fakeTools(() => ({ text: "", isError: false })).executor,
+			state: current.state,
+		});
+		const view = new FakeWebview();
+		reloaded.attach(view.asWebview());
+		try {
+			view.receive({ type: "ready" });
+			await waitFor(() => view.ofType("init").length === 1, "init after reload");
+			const restored = view.ofType("init")[0];
+			assert.strictEqual(restored.session.id, first.session.id);
+			assert.deepStrictEqual(restored.draft, { text: "half a thought", attachments: [FILE_ATTACHMENT] });
+		} finally {
+			reloaded.dispose();
+			view.dispose();
+		}
+	});
+
+	test("clears a draft when its chat sends or is deleted, and drops an untouched empty chat", async () => {
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("ok"))]);
+		const current = createHarness(root, backend);
+		harness = current;
+		const drafts = (): Record<string, unknown> => current.state.get<Record<string, unknown>>(DRAFTS_KEY) ?? {};
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const first = current.webview.ofType("init")[0].session.id;
+
+		current.webview.receive({ type: "saveDraft", sessionId: first, text: "hello", attachments: [] });
+		await waitFor(() => first in drafts(), "draft saved");
+		current.webview.receive({ type: "send", text: "hello" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.ok(!(first in drafts()), "sending clears the draft");
+
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 2, "second init");
+		const second = current.webview.ofType("init")[1].session.id;
+		current.webview.receive({ type: "saveDraft", sessionId: second, text: "doomed", attachments: [] });
+		await waitFor(() => second in drafts(), "second draft saved");
+		current.webview.receive({ type: "deleteSession", sessionId: second });
+		await waitFor(() => current.webview.ofType("init").length === 3, "init after delete");
+		assert.ok(!(second in drafts()), "deleting a chat deletes its draft");
+
+		// A late save of the deleted chat does not bring its draft back.
+		current.webview.receive({ type: "saveDraft", sessionId: second, text: "late", attachments: [] });
+		await new Promise<void>(resolve => setTimeout(resolve, 50));
+		assert.ok(!(second in drafts()));
+
+		// An empty chat whose draft was emptied again is removed when left, as before.
+		current.webview.receive({ type: "newChat" });
+		await waitFor(() => current.webview.ofType("init").length === 4, "fourth init");
+		const third = current.webview.ofType("init")[3].session.id;
+		current.webview.receive({ type: "saveDraft", sessionId: third, text: "x", attachments: [] });
+		await waitFor(() => third in drafts(), "third draft saved");
+		current.webview.receive({ type: "saveDraft", sessionId: third, text: "  ", attachments: [] });
+		await waitFor(() => !(third in drafts()), "empty draft removed");
+		current.webview.receive({ type: "openSession", sessionId: first });
+		await waitFor(() => current.webview.ofType("init").length === 5, "fifth init");
+		await waitForAsync(async () => (await current.store.get(third)) === undefined, "untouched chat removed");
+	});
+
+	test("shares the shown chat's draft with the other views and caps its text", async () => {
+		const current = createHarness(root, new FakeBackend());
+		harness = current;
+		const other = new FakeWebview();
+		current.controller.attach(other.asWebview());
+		try {
+			current.webview.receive({ type: "ready" });
+			await waitFor(() => current.webview.ofType("init").length === 1, "init");
+			const sessionId = current.webview.ofType("init")[0].session.id;
+			current.webview.receive({ type: "saveDraft", sessionId, text: "x".repeat(100_050), attachments: [STORED_ATTACHMENT] });
+			await waitFor(() => other.ofType("draft").length === 1, "draft in the other view");
+			const shared = other.ofType("draft")[0];
+			assert.strictEqual(shared.sessionId, sessionId);
+			assert.strictEqual(shared.draft.text.length, 100_000);
+			assert.deepStrictEqual(shared.draft.attachments, [STORED_ATTACHMENT]);
+			assert.strictEqual(current.webview.ofType("draft").length, 0, "the sender keeps its own composer");
+		} finally {
+			other.dispose();
+		}
 	});
 });

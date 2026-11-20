@@ -103,8 +103,8 @@ the normal Chat picker.
 | Local llama.cpp / compatible server | Start the server, then run **Set Local Server URL** |
 | Custom API, including OpenRouter and Cloudflare | Quick Access → **Providers Manager** → add a profile and API key |
 | DeepSeek | Run **Configure DeepSeek** and enter the API key |
-| Codex with a ChatGPT account | Install the official Codex runtime, then run **Sign In to Codex Subscription** |
-| Claude | The VSIX includes its platform runtime; run **Sign In to Claude Subscription** |
+| Codex with a ChatGPT account | Run **Sign In to Codex Subscription**; without the OpenAI extension or `codex` on PATH it offers to download the official Codex CLI |
+| Claude | The VSIX includes its platform runtime; run **Sign In to Claude Subscription** (the Claude Code extension is not needed) |
 | Snowflake Coco | Install the Snowflake extension, configure a CLI connection, then check Quick Access → **Coco** |
 
 Command names above use the **AI Agent Bridge:** prefix. Accounts, model access
@@ -194,16 +194,16 @@ See [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md),
 [provider architecture](docs/PROVIDER_ARCHITECTURE.md), and
 [Quick Access](docs/QUICK_ACCESS.md) for the current maintenance contracts.
 
-**Stable release: 1.21.0. Current build: 1.21.35.**
+**Stable release: 1.21.0. Current build: 1.21.37.**
 
 ```sh
 npm ci
 npm run compile
 npm run check:metadata
 npm run lint
-npm test              # 1413 extension-host tests on VS Code 1.143.1 in the current 1.21.35 build
+npm test              # 1446 extension-host tests on VS Code 1.143.1 in the current 1.21.37 build
 npm run package       # builds the local VSIX
-code --install-extension ./llama-vscode-chat-1.21.35.vsix --force
+code --install-extension ./llama-vscode-chat-1.21.37.vsix --force
 ```
 
 The extension ID is `mrlordcat.llama-vscode-chat`; settings and commands retain

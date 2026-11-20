@@ -48,6 +48,7 @@ import {
 	createClaudeNativeUsage,
 	hasClaudeAccountEvidence,
 	isClaudeVsCodeToolName,
+	mergeClaudeStreamUsage,
 	parseClaudeAssistantUsage,
 	resolveClaudeCodeBinary,
 	type ClaudeAgentSessionOptions,
@@ -616,6 +617,115 @@ test("marks the session stream as closed after an interrupt", async () => {
 			prompt_tokens_details: { cached_tokens: 65_987 },
 		});
 		session.dispose();
+	});
+
+	test("reports Claude stream usage once per model segment at tool boundaries", () => {
+		const session = new ClaudeAgentSession({
+			model: "claude-opus-5",
+			cwd: process.cwd(),
+			executable: "claude",
+			extensionVersion: "test",
+			tools: [],
+			callbacks: {
+				onUsage: () => undefined,
+				onRateLimit: () => undefined,
+			},
+		});
+		const internals = session as unknown as {
+			logicalTurn: { usageSegments: Map<string, { outputTokens: number; index: number }> } & Record<string, unknown>;
+			activeTurn: unknown;
+			completeActiveTurn(): void;
+			recordModelEvent(event?: unknown): void;
+		};
+		internals.logicalTurn = {
+			requestId: "request-usage",
+			startedAt: Date.now() - 100,
+			context: { sessionMode: "warm", inputMode: "user-turn", messageCount: 2, toolCount: 1, toolSchemaTokens: 10 },
+			outputChars: 0,
+			thinkingChars: 0,
+			usageSegments: new Map(),
+			steps: new Map(),
+			terminal: false,
+		};
+		const timeouts: NodeJS.Timeout[] = [];
+		const boundary = (): unknown[] => {
+			const parts: vscode.LanguageModelResponsePart[] = [];
+			const timeout = setTimeout(() => undefined, 10_000);
+			timeouts.push(timeout);
+			internals.activeTurn = {
+				progress: { report: (part: vscode.LanguageModelResponsePart) => parts.push(part) },
+				resolve: () => undefined,
+				reject: () => undefined,
+				cancellation: new vscode.Disposable(() => undefined),
+				timeout,
+				settled: false,
+				partialTextSeen: false,
+				partialThinkingSeen: false,
+				reportedTextChars: 0,
+			};
+			internals.completeActiveTurn();
+			return parts
+				.filter((part): part is vscode.LanguageModelDataPart => part instanceof vscode.LanguageModelDataPart && part.mimeType === "usage")
+				.map(part => JSON.parse(new TextDecoder().decode(part.data)));
+		};
+		try {
+			// The tool call of this step is dispatched before the full assistant message arrives.
+			internals.recordModelEvent({
+				type: "message_start",
+				message: { id: "msg-1", usage: { input_tokens: 5, cache_read_input_tokens: 900, cache_creation_input_tokens: 10, output_tokens: 1 } },
+			});
+			assert.deepStrictEqual(boundary(), [{
+				prompt_tokens: 915,
+				completion_tokens: 1,
+				total_tokens: 916,
+				prompt_tokens_details: { cached_tokens: 900 },
+			}]);
+
+			// A queued call of the same step ends another round: nothing new to count.
+			internals.recordModelEvent({ type: "message_delta", usage: { output_tokens: 42 } });
+			assert.strictEqual(internals.logicalTurn.usageSegments.get("msg-1")?.outputTokens, 42);
+			assert.deepStrictEqual(boundary(), []);
+
+			internals.recordModelEvent({
+				type: "message_start",
+				message: { id: "msg-2", usage: { input_tokens: 3, cache_read_input_tokens: 950, cache_creation_input_tokens: 0, output_tokens: 2 } },
+			});
+			assert.strictEqual(internals.logicalTurn.usageSegments.get("msg-2")?.index, 2);
+			assert.deepStrictEqual(boundary(), [{
+				prompt_tokens: 953,
+				completion_tokens: 2,
+				total_tokens: 955,
+				prompt_tokens_details: { cached_tokens: 950 },
+			}]);
+			// The terminal boundary after the last step repeats nothing.
+			assert.deepStrictEqual(boundary(), []);
+		} finally {
+			for (const timeout of timeouts) {
+				clearTimeout(timeout);
+			}
+			session.dispose();
+		}
+	});
+
+	test("merges Claude message_delta usage over a recorded segment", () => {
+		assert.deepStrictEqual(mergeClaudeStreamUsage({
+			id: "msg-1",
+			index: 1,
+			recordedAt: "2026-11-20T08:00:00.000Z",
+			freshInputTokens: 5,
+			cacheReadInputTokens: 900,
+			cacheCreationInputTokens: 10,
+			inputTokens: 915,
+			outputTokens: 1,
+			thinkingTokens: 0,
+			totalTokens: 916,
+		}, { output_tokens: 42 }), {
+			input_tokens: 5,
+			cache_read_input_tokens: 900,
+			cache_creation_input_tokens: 10,
+			output_tokens: 42,
+			output_tokens_details: { thinking_tokens: 0 },
+		});
 	});
 
 	test("canonicalizes Claude tool and schema order across Copilot reloads", () => {

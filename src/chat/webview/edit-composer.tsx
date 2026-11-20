@@ -60,6 +60,9 @@ export function EditComposer({ store, message, changedFilesSinceTurn, context }:
 			onSetToolsEnabled={actions.onSetToolsEnabled}
 			onPickAttachments={actions.onPickAttachments}
 			onAddAttachments={actions.onAddAttachments}
+			onPasteFiles={actions.onPasteFiles}
+			signIn={store.signIn}
+			onSignIn={actions.onSignIn}
 			onOpenAttachment={actions.onOpenAttachment}
 			onRemoveAttachment={id => store.removeEditAttachment(id)}
 			footer={(

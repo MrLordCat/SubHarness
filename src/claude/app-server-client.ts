@@ -71,6 +71,21 @@ export function createClaudeNativeUsage(usage: ClaudeAgentUsage): ClaudeNativeUs
 	};
 }
 
+/** Stream usage over a recorded segment: fields the event carries win, the rest stay. */
+export function mergeClaudeStreamUsage(segment: ClaudeAgentUsageSegment, usage: Record<string, unknown>): Record<string, unknown> {
+	const pick = (key: string, fallback: number): number => typeof usage[key] === "number" ? usage[key] as number : fallback;
+	const details = asRecord(usage.output_tokens_details);
+	return {
+		input_tokens: pick("input_tokens", segment.freshInputTokens),
+		cache_read_input_tokens: pick("cache_read_input_tokens", segment.cacheReadInputTokens),
+		cache_creation_input_tokens: pick("cache_creation_input_tokens", segment.cacheCreationInputTokens),
+		output_tokens: pick("output_tokens", segment.outputTokens),
+		output_tokens_details: {
+			thinking_tokens: typeof details.thinking_tokens === "number" ? details.thinking_tokens : segment.thinkingTokens,
+		},
+	};
+}
+
 export function createClaudeNativeContextUsage(
 	aggregate: ClaudeAgentUsage,
 	segments: readonly ClaudeAgentUsageSegment[]
@@ -351,6 +366,10 @@ interface ClaudeLogicalTurn {
 	thinkingChars: number;
 	usage?: ClaudeAgentUsage;
 	usageSegments: Map<string, ClaudeAgentUsageSegment>;
+	/** Model message whose stream is open; message_delta events carry no id. */
+	streamingSegmentId?: string;
+	/** Segment the last usage part described; a boundary without a newer one reports nothing. */
+	lastReportedUsageKey?: string;
 	steps: Map<string, ClaudeAgentTurnStep>;
 	currentModelStepId?: string;
 	terminal: boolean;
@@ -1058,9 +1077,30 @@ export class ClaudeAgentSession implements vscode.Disposable {
 			const message = asRecord(record.message);
 			const id = typeof message.id === "string" ? message.id : `segment-${turn.usageSegments.size + 1}`;
 			this.beginModelStep(id);
+			this.recordStreamUsage(turn, id, asRecord(message.usage));
+		} else if (record.type === "message_delta" && turn.streamingSegmentId !== undefined) {
+			this.recordStreamUsage(turn, turn.streamingSegmentId, asRecord(record.usage));
 		}
 		if (firstEvent) {
 			this.emitTurnUpdate("running");
+		}
+	}
+
+	/**
+	 * The SDK can dispatch a tool call before it yields the full assistant message, so the
+	 * stream's usage stands in for the segment until that message replaces it. message_start
+	 * carries the final input and cache counts; message_delta the final output count.
+	 */
+	private recordStreamUsage(turn: ClaudeLogicalTurn, id: string, usage: Record<string, unknown>): void {
+		turn.streamingSegmentId = id;
+		if (Object.keys(usage).length === 0) {
+			return;
+		}
+		const existing = turn.usageSegments.get(id);
+		const merged = existing ? mergeClaudeStreamUsage(existing, usage) : usage;
+		const segment = parseClaudeAssistantUsage({ id, usage: merged }, id, existing?.index ?? turn.usageSegments.size + 1);
+		if (segment) {
+			turn.usageSegments.set(id, existing ? { ...segment, recordedAt: existing.recordedAt } : segment);
 		}
 	}
 
@@ -1323,6 +1363,15 @@ export class ClaudeAgentSession implements vscode.Disposable {
 				emittedToNativeChat: false,
 			}, "warn");
 			return;
+		}
+		// Each usage part counts as one more request in the bridge chat, so a boundary
+		// without a newer model segment (a queued call of the same step) reports nothing.
+		const usageKey = finalSegment ? `segment:${finalSegment.id}` : "aggregate";
+		if (turn?.lastReportedUsageKey === usageKey) {
+			return;
+		}
+		if (turn) {
+			turn.lastReportedUsageKey = usageKey;
 		}
 		const nativeUsage = createClaudeNativeContextUsage(aggregate, segments);
 		active.progress.report(vscode.LanguageModelDataPart.text(

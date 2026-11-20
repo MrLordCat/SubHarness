@@ -18,6 +18,8 @@ import {
 	appendChatText,
 	CHAT_MEMORY_CONTENT_MAX_CHARS,
 	CHAT_MEMORY_TITLE_MAX_CHARS,
+	PASTED_FILE_MAX_BYTES,
+	PASTED_FILES_LIMIT,
 	WEBVIEW_THINKING_PREVIEW_CHARS,
 	WEBVIEW_TOOL_RESULT_PREVIEW_CHARS,
 } from "./shared/protocol";
@@ -25,10 +27,12 @@ import type {
 	ChatApprovalRequest,
 	ChatAttachment,
 	ChatChangeSet,
+	ChatDraft,
 	ChatMemoryEntry,
 	ChatMemorySaveInput,
 	ChatMessage,
 	ChatPart,
+	ChatPastedFile,
 	ChatPromptCache,
 	ChatProviderQuota,
 	ChatQueuedMessage,
@@ -39,9 +43,11 @@ import type {
 	ChatSessionActivity,
 	ChatSessionActivityState,
 	ChatSessionMeta,
+	ChatSignInOffer,
 	ChatStructuredPart,
 	ChatTextKind,
 	ChatToolGroup,
+	ChatToolImage,
 	ChatUsage,
 	ChatUsageTotals,
 	HostMessage,
@@ -73,6 +79,8 @@ export interface ChatControllerDeps {
 	notify?: (message: string, action: string) => Promise<boolean>;
 	/** Subscription limits and balances shown next to the model picker. */
 	quota?: ChatQuotaSource;
+	/** Sign-in offers in the model picker. */
+	accounts?: ChatAccountSource;
 	/** Editor selections and files the user attaches to a message. */
 	attachments?: ChatAttachmentsDeps;
 	/** Shared durable memory shown to the model in <memory> blocks before user requests. */
@@ -84,8 +92,17 @@ export interface ChatControllerDeps {
 export interface ChatAttachmentsDeps {
 	pick(): Promise<ChatAttachment[]>;
 	fromUris(uris: readonly string[]): Promise<ChatAttachment[]>;
+	/** Saves pasted screenshots and files and returns them as attachments. */
+	savePasted?(files: readonly ChatPastedFile[]): Promise<ChatAttachment[]>;
 	read(attachments: readonly ChatAttachment[]): Promise<AttachmentContent[]>;
 	open(attachment: ChatAttachment): Promise<void>;
+}
+
+/** Subscriptions that need a sign-in before their models appear. */
+export interface ChatAccountSource {
+	offers(): ChatSignInOffer[];
+	signIn(provider: string): Promise<void>;
+	onDidChange?: vscode.Event<void>;
 }
 
 export interface ChatQuotaSource {
@@ -121,6 +138,12 @@ const INTERRUPTED_NOTICE = "This answer was interrupted: VS Code closed or reloa
 const COMPACTING_DETAIL = "Compacting context…";
 const SEND_ATTACHMENT_LIMIT = 20;
 const ADD_ATTACHMENT_LIMIT = 50;
+/** Unsent composer content per chat id. */
+const DRAFTS_KEY = "llamacpp.chat.drafts";
+const DRAFT_MAX_CHARS = 100_000;
+const DRAFT_LIMIT = 50;
+/** Base64 of a pasted file at PASTED_FILE_MAX_BYTES, with room for padding. */
+const PASTED_FILE_MAX_BASE64 = Math.ceil(PASTED_FILE_MAX_BYTES / 3) * 4 + 4;
 const MAX_QUESTION_ANSWERS = 5;
 const MAX_QUESTION_SELECTED = 10;
 const MAX_ANSWER_CHARS = 2_000;
@@ -161,6 +184,28 @@ interface SessionRuntime {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
+}
+
+interface StoredDraft extends ChatDraft {
+	updatedAt: number;
+}
+
+/** Drafts as saved, without entries a newer version or a damaged state could not read. */
+function readDrafts(value: unknown): Map<string, StoredDraft> {
+	const drafts = new Map<string, StoredDraft>();
+	if (!isRecord(value)) {
+		return drafts;
+	}
+	for (const [id, entry] of Object.entries(value)) {
+		if (!SESSION_ID.test(id) || !isRecord(entry) || typeof entry.text !== "string" || typeof entry.updatedAt !== "number") {
+			continue;
+		}
+		const attachments = asAttachmentList(entry.attachments ?? [], SEND_ATTACHMENT_LIMIT, true);
+		if (attachments) {
+			drafts.set(id, { text: entry.text, attachments, updatedAt: entry.updatedAt });
+		}
+	}
+	return drafts;
 }
 
 function asAttachment(value: unknown, allowText: boolean): ChatAttachment | undefined {
@@ -327,12 +372,34 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			const attachments = asAttachmentList(value.attachments, SEND_ATTACHMENT_LIMIT, true);
 			return attachments ? { type: "send", text: value.text, attachments } : { type: "send", text: value.text };
 		}
+		case "saveDraft": {
+			if (typeof value.sessionId !== "string" || !SESSION_ID.test(value.sessionId) || typeof value.text !== "string") {
+				return undefined;
+			}
+			const attachments = asAttachmentList(value.attachments ?? [], SEND_ATTACHMENT_LIMIT, true);
+			return attachments ? { type: "saveDraft", sessionId: value.sessionId, text: value.text.slice(0, DRAFT_MAX_CHARS), attachments } : undefined;
+		}
 		case "removeQueued": return typeof value.id === "string" ? { type: "removeQueued", id: value.id } : undefined;
 		case "pickAttachments": return { type: "pickAttachments" };
 		case "addAttachments":
 			return Array.isArray(value.uris) && value.uris.length <= ADD_ATTACHMENT_LIMIT && value.uris.every(uri => typeof uri === "string")
 				? { type: "addAttachments", uris: value.uris as string[] }
 				: undefined;
+		case "pasteFiles": {
+			if (!Array.isArray(value.files) || value.files.length === 0 || value.files.length > PASTED_FILES_LIMIT) {
+				return undefined;
+			}
+			const files: ChatPastedFile[] = [];
+			for (const file of value.files) {
+				if (!isRecord(file) || typeof file.name !== "string" || file.name.length > 255
+					|| typeof file.mimeType !== "string" || file.mimeType.length > 100
+					|| typeof file.data !== "string" || file.data.length > PASTED_FILE_MAX_BASE64) {
+					return undefined;
+				}
+				files.push({ name: file.name, mimeType: file.mimeType, data: file.data });
+			}
+			return { type: "pasteFiles", files };
+		}
 		case "openAttachment": {
 			const attachment = asAttachment(value.attachment, true);
 			return attachment ? { type: "openAttachment", attachment } : undefined;
@@ -383,6 +450,8 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			return answers ? { type: "answerQuestions", id: value.id, answers } : undefined;
 		}
 		case "newChat": return { type: "newChat" };
+		case "signIn":
+			return typeof value.provider === "string" && /^[a-z][a-z0-9-]{0,39}$/.test(value.provider) ? { type: "signIn", provider: value.provider } : undefined;
 		case "listSessions": return { type: "listSessions" };
 		case "openSession":
 		case "deleteSession":
@@ -454,6 +523,8 @@ function viewPart(part: ChatPart, keepFull?: boolean): ChatPart {
 
 function viewMessage(message: ChatMessage, keepFull = false): ChatMessage {
 	const view: ChatMessage = { ...message, parts: message.parts.map(part => viewPart(part, keepFull)) };
+	// The chips under the message name the images; their bytes stay in the host.
+	delete view.images;
 	delete view.attachmentContext;
 	delete view.memoryContext;
 	delete view.memoryRevisions;
@@ -481,15 +552,23 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	private _quotaTimer: ReturnType<typeof setTimeout> | undefined;
 	private _quotaRefreshedAt = 0;
 	private readonly _memorySubscription: vscode.Disposable | undefined;
+	private readonly _accountSubscription: vscode.Disposable | undefined;
 	private _memoryTimer: ReturnType<typeof setTimeout> | undefined;
 	private _lastQuota: string | undefined;
 	private _lastActivity: string | undefined;
+	/** Read once; changed synchronously so a chat switch right after a save sees the draft. */
+	private _draftCache: Map<string, StoredDraft> | undefined;
 
 	constructor(deps: ChatControllerDeps) {
 		this._deps = deps;
 		this._modelChangeSubscription = deps.onDidChangeModels(() => { void this._onModelsChanged(); });
 		this._quotaSubscription = deps.quota?.onDidChange?.(() => this._scheduleQuotaBroadcast());
 		this._memorySubscription = deps.memoryStore?.onDidChange?.(() => this._scheduleMemoryBroadcast());
+		this._accountSubscription = deps.accounts?.onDidChange?.(() => {
+			if (this._modelsLoaded) {
+				this._broadcastModels();
+			}
+		});
 	}
 
 	attach(webview: vscode.Webview): vscode.Disposable {
@@ -609,6 +688,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			this._runtimes.delete(sessionId);
 		}
 		await this._deps.store.delete(sessionId);
+		await this._clearDraft(sessionId);
 		try {
 			await this._deps.changes?.forgetSession?.(sessionId);
 		} catch (error) {
@@ -631,8 +711,75 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 
 	private async _sessionsMessage(): Promise<HostMessage> {
 		const listed = await this._deps.store.list();
-		const sessions = listed.filter(meta => meta.messageCount > 0 || meta.id === this._activeId);
+		const drafts = this._drafts();
+		const sessions = listed.filter(meta => meta.messageCount > 0 || meta.id === this._activeId || drafts.has(meta.id));
+		// Drafts of chats that no longer exist would only take up the limit.
+		const known = new Set(listed.map(meta => meta.id));
+		const stale = [...drafts.keys()].filter(id => !known.has(id) && !this._runtimes.has(id));
+		if (stale.length > 0) {
+			for (const id of stale) {
+				drafts.delete(id);
+			}
+			await this._persistDrafts();
+		}
 		return { type: "sessions", sessions, activeId: this._activeId ?? "" };
+	}
+
+	private _drafts(): Map<string, StoredDraft> {
+		this._draftCache ??= readDrafts(this._deps.state.get<unknown>(DRAFTS_KEY));
+		return this._draftCache;
+	}
+
+	private _draft(sessionId: string): ChatDraft | undefined {
+		const draft = this._drafts().get(sessionId);
+		return draft ? { text: draft.text, attachments: [...draft.attachments] } : undefined;
+	}
+
+	private async _persistDrafts(): Promise<void> {
+		const drafts = this._drafts();
+		try {
+			await this._deps.state.update(DRAFTS_KEY, drafts.size > 0 ? Object.fromEntries(drafts) : undefined);
+		} catch (error) {
+			this._log("chat.draft.persist_failed", { message: errorMessage(error) });
+		}
+	}
+
+	/** Keeps a chat's unsent composer content; other views of the shown chat take it over. */
+	private async _saveDraft(sender: vscode.Webview | undefined, sessionId: string, text: string, attachments: ChatAttachment[]): Promise<void> {
+		// A late save of a chat that was deleted meanwhile must not bring its draft back.
+		if (!this._runtimes.has(sessionId)) {
+			return;
+		}
+		const drafts = this._drafts();
+		const empty = !text.trim() && attachments.length === 0;
+		if (empty && !drafts.has(sessionId)) {
+			return;
+		}
+		if (empty) {
+			drafts.delete(sessionId);
+		} else {
+			drafts.delete(sessionId);
+			drafts.set(sessionId, { text: text.slice(0, DRAFT_MAX_CHARS), attachments: attachments.slice(0, SEND_ATTACHMENT_LIMIT), updatedAt: Date.now() });
+			const oldest = [...drafts.entries()].sort(([, left], [, right]) => left.updatedAt - right.updatedAt);
+			for (const [id] of oldest.slice(0, Math.max(0, drafts.size - DRAFT_LIMIT))) {
+				drafts.delete(id);
+			}
+		}
+		if (sessionId === this._activeId) {
+			const draft: ChatDraft = { text: empty ? "" : text, attachments: empty ? [] : attachments };
+			for (const webview of this._attachments.keys()) {
+				if (webview !== sender) {
+					this._post(webview, { type: "draft", sessionId, draft });
+				}
+			}
+		}
+		await this._persistDrafts();
+	}
+
+	private async _clearDraft(sessionId: string): Promise<void> {
+		if (this._drafts().delete(sessionId)) {
+			await this._persistDrafts();
+		}
 	}
 
 	/** A chat that still works stays in memory; an idle untouched one would only clutter the history. */
@@ -644,7 +791,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		await this._abandon(sessionId);
 		try {
 			const meta = await this._deps.store.get(sessionId);
-			if (meta && meta.messageCount === 0) {
+			// An untouched chat goes; one with unsent text stays in the history.
+			if (meta && meta.messageCount === 0 && !this._drafts().has(sessionId)) {
 				await this._deps.store.delete(sessionId);
 				await this._deps.changes?.forgetSession?.(sessionId);
 			}
@@ -685,6 +833,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 		this._modelChangeSubscription.dispose();
 		this._quotaSubscription?.dispose();
+		this._accountSubscription?.dispose();
 		if (this._quotaTimer) {
 			clearTimeout(this._quotaTimer);
 			this._quotaTimer = undefined;
@@ -710,6 +859,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "send":
 				await this._send(message.text, message.attachments);
 				return;
+			case "saveDraft":
+				await this._saveDraft(webview, message.sessionId, message.text, message.attachments);
+				return;
 			case "removeQueued": {
 				const runtime = this._active();
 				const queued = runtime?.queued.filter(entry => entry.id !== message.id);
@@ -728,6 +880,13 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			}
 			case "addAttachments": {
 				const added = await this._deps.attachments?.fromUris(message.uris) ?? [];
+				if (added.length) {
+					this._post(webview, { type: "attachmentsAdded", attachments: added });
+				}
+				return;
+			}
+			case "pasteFiles": {
+				const added = await this._deps.attachments?.savePasted?.(message.files) ?? [];
 				if (added.length) {
 					this._post(webview, { type: "attachmentsAdded", attachments: added });
 				}
@@ -800,6 +959,12 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "newChat":
 				await this.newChat();
 				return;
+			case "signIn":
+				if (this._deps.accounts?.offers().some(offer => offer.provider === message.provider)) {
+					await this._deps.accounts.signIn(message.provider);
+					this._broadcastModels();
+				}
+				return;
 			case "listSessions":
 				await this._ensureSession();
 				this._post(webview, await this._sessionsMessage());
@@ -828,6 +993,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		if (!runtime) {
 			return;
 		}
+		await this._clearDraft(runtime.meta.id);
 		await this._sendTo(runtime, text, attachments);
 	}
 
@@ -953,7 +1119,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			}
 			this._emit(runtime, { type: "truncated", messageId });
 			if (attachments === undefined || sameAttachmentIds(attachments, edited.attachments)) {
-				await this._sendTurn(runtime, text, undefined, { attachments: edited.attachments, attachmentContext: edited.attachmentContext });
+				await this._sendTurn(runtime, text, undefined, { attachments: edited.attachments, attachmentContext: edited.attachmentContext, images: edited.images });
 			} else {
 				await this._sendTurn(runtime, text, attachments);
 			}
@@ -992,7 +1158,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		runtime: SessionRuntime,
 		text: string,
 		attachments?: ChatAttachment[],
-		preserved?: { attachments?: ChatAttachment[]; attachmentContext?: string },
+		preserved?: { attachments?: ChatAttachment[]; attachmentContext?: string; images?: ChatToolImage[] },
 	): Promise<void> {
 		await this._ensureModels();
 		const messages = runtime.messages;
@@ -1013,13 +1179,17 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		const hostContext = this._turnContext();
 		let display: ChatAttachment[] | undefined;
 		let attachmentContext = "";
+		let images: ChatToolImage[] = [];
 		if (preserved) {
 			display = preserved.attachments;
 			attachmentContext = preserved.attachmentContext ?? "";
+			images = preserved.images ?? [];
 		} else if (attachments && attachments.length > 0 && this._deps.attachments) {
 			display = attachments;
 			try {
-				attachmentContext = renderAttachments(await this._deps.attachments.read(attachments));
+				const contents = await this._deps.attachments.read(attachments);
+				attachmentContext = renderAttachments(contents);
+				images = contents.flatMap(content => content.image ? [content.image] : []);
 			} catch (error) {
 				this._log("chat.attachments.read_failed", { message: errorMessage(error) });
 			}
@@ -1035,6 +1205,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			...(memory ? { memoryContext: memory.text, memoryRevisions: memory.revisions.map(revision => ({ ...revision })) } : {}),
 			...(attachmentContext ? { attachmentContext } : {}),
 			...(display && display.length > 0 ? { attachments: display.map(storedAttachment) } : {}),
+			...(images.length > 0 ? { images } : {}),
 		};
 		await this._appendMessage(runtime, user);
 		await this._refreshSessionMeta(runtime);
@@ -1962,6 +2133,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		if (!runtime) {
 			throw new Error("The chat session is not loaded.");
 		}
+		const draft = this._draft(runtime.meta.id);
 		return {
 			type: "init",
 			session: { ...runtime.meta },
@@ -1977,7 +2149,18 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			quota: this._quota(),
 			activity: this._activity(),
 			queued: [...runtime.queued],
+			...(draft ? { draft } : {}),
+			signIn: this._signInOffers(),
 		};
+	}
+
+	private _signInOffers(): ChatSignInOffer[] {
+		try {
+			return this._deps.accounts?.offers() ?? [];
+		} catch (error) {
+			this._log("chat.accounts.offers_failed", { message: errorMessage(error) });
+			return [];
+		}
 	}
 
 	private _broadcastModels(): void {
@@ -1986,6 +2169,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			models: groupModels(this._models),
 			selectedModelId: this._selectedModelId,
 			selectedThinking: this._thinkingFor(this._selectedModelId),
+			signIn: this._signInOffers(),
 		});
 	}
 

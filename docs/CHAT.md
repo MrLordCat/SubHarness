@@ -11,22 +11,29 @@ tab show the same chat.
 ## Writing a message
 
 - **Enter** sends, **Shift+Enter** adds a line.
+- Unsent text and attachments stay with their chat: they come back when you
+  return to the chat and after VS Code reloads. A new chat that holds only
+  such a draft stays in the history.
 - You can write while the agent works. **Send** queues the message above the
   input, and the agent reads it after the tool calls it is running now. Several
   queued messages go out together; **×** removes one. **Stop** ends the answer
   and puts the queued messages back into the input.
 - The model picker groups models by provider and has a search box. Each group
-  shows that provider's limits or balance, fetched again when the picker opens
-  or a model is picked. A provider with a used-up limit is dimmed with its reset
+  shows that provider's 5-hour window, the weekly one only once it is used up,
+  or its balance, fetched again when the picker opens or a model is picked. A provider with a used-up limit is dimmed with its reset
   time, and a warning above the input says so while one of its models is
-  selected.
+  selected. While Codex or Claude is enabled but not signed in, the picker ends
+  with **Sign in to Codex** or **Sign in to Claude**; Codex without a CLI
+  downloads it first.
 - **Thinking** appears for models with reasoning levels. The choice is
   remembered per model.
 - **Tools** lists every tool the model may use. The bridge's own tools are on;
   tools of other extensions and MCP servers are off until you enable them.
   The choice is remembered.
-- The limits chip shows the most used Codex or Claude window or the DeepSeek
-  balance of the selected provider. Click it for all providers and reset times.
+- The limits chip shows the 5-hour window of the selected Codex or Claude
+  subscription, the weekly window instead once it is used up, or the DeepSeek
+  balance. Hover it for every window; click it for all providers and reset
+  times.
 - The counter on the right is the last request's prompt size against the
   model's context window.
 - **cache N%** is the share of prompt tokens the provider served from its
@@ -44,10 +51,18 @@ workspace file or any file on disk. You can also Shift+drag files from the
 Explorer onto the input, or use **Add Selection to Chat** in the editor context
 menu and **Add File to Chat** in the Explorer context menu.
 
+**Ctrl+V** pastes a screenshot, or files copied in the system file manager,
+as attachments; files dragged from the file manager work the same way. Text
+that comes with a picture of itself, such as a spreadsheet range, pastes as
+text. Pasted files are saved in the extension's storage and kept for 30 days;
+each can be up to 20 MB, ten at a time.
+
 Attachments show as chips above the input and under the sent message; click
 one to open it. Files are read when the message is sent, including unsaved
 editor content. Each file is capped at 60,000 characters and a message at
 150,000; binary files and files over 2 MB are named but not included.
+Images (PNG, JPEG, GIF or WebP up to 3.75 MB) go to models that accept images
+after the message text; other models get a note that they were left out.
 
 ## Tools and approvals
 
@@ -58,6 +73,9 @@ pages (`fetch_webpage`), work with symbols through the language servers
 (`list_code_usages`, `rename_symbol`, `workspace_symbols`), report problems and
 start subagents. Images returned by MCP and extension tools also reach the
 model; the chat shows their name and size.
+
+A turn has no limit on tool rounds: it runs until the model answers without a
+tool call or you press **Stop**. A subagent stops after 100 tool rounds.
 
 For longer work the agent keeps a todo list (`manage_todo_list`), shown above
 the input as **Todos done/total**; click it for the whole list. With
@@ -192,5 +210,7 @@ interrupted turn are not listed for Keep/Undo; the changes panel says so.
 ## Where chats are stored
 
 Chats are saved per workspace in the extension's workspace storage:
-`chat-sessions` holds one JSONL log per chat and an index, and `chat-changes`
-holds the Keep/Undo state and the private snapshots.
+`chat-sessions` holds one JSONL log per chat and an index, `chat-changes`
+holds the Keep/Undo state and the private snapshots, and `chat-attachments`
+holds pasted files. Images sent with a message are kept in its chat log.
+Drafts are kept in the workspace state.

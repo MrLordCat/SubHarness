@@ -161,6 +161,7 @@ function renderBuiltinProviders(state: ApiProviderManagerRenderState): string {
 				{ command: "llamacpp.toggleCodexSubscription", label: codex.enabled ? "Disable source" : "Enable source" },
 				{ command: "llamacpp.codexSignIn", label: "Sign in", primary: true },
 				{ command: "llamacpp.codexShowStatus", label: "Account status" },
+				{ command: "llamacpp.codexInstallCli", label: "Install or update CLI" },
 			]));
 	}
 

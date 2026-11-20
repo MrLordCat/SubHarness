@@ -18,6 +18,7 @@ import {
 	type HostMessage,
 	type WebviewMessage,
 } from "../shared/protocol";
+import { HARNESS_FONTS, HARNESS_THEMES } from "./harness-themes";
 
 interface HarnessVsCodeApi {
 	postMessage(message: WebviewMessage): void;
@@ -28,6 +29,7 @@ interface HarnessVsCodeApi {
 interface HarnessStats {
 	readonly messageCount: number;
 	readonly lastStreamMs: number;
+	readonly theme: string;
 	showSessions(): void;
 	setActivity(activity: ChatSessionActivity[]): void;
 }
@@ -156,6 +158,23 @@ const TOOL_GROUPS: ChatToolGroup[] = [
 const requestedCount = Number.parseInt(new URLSearchParams(window.location.search).get("count") ?? "", 10);
 const initialCount = Number.isFinite(requestedCount) && requestedCount >= 0 ? requestedCount : 5000;
 
+const harnessParams = new URLSearchParams(window.location.search);
+const requestedTheme = harnessParams.get("theme") ?? "";
+const themeKey = Object.hasOwn(HARNESS_THEMES, requestedTheme) ? requestedTheme : "dark";
+const harnessTheme = HARNESS_THEMES[themeKey];
+for (const [key, value] of Object.entries({ ...HARNESS_FONTS, ...harnessTheme.colors })) {
+	document.documentElement.style.setProperty(`--vscode-${key}`, value);
+}
+document.body.classList.add(harnessTheme.kind);
+if (harnessTheme.kind === "vscode-high-contrast-light") {
+	document.body.classList.add("vscode-high-contrast");
+}
+document.body.dataset.vscodeThemeKind = harnessTheme.kind;
+const host = harnessParams.get("host") === "editor" ? "editor" : "sidebar";
+document.documentElement.style.background = host === "editor" ? "var(--vscode-editor-background)" : "var(--vscode-sideBar-background)";
+const requestedCache = harnessParams.get("cache") ?? "";
+const cacheMode = requestedCache === "low" || requestedCache === "na" ? requestedCache : "normal";
+
 const FINISHED_SUBAGENT_CALL_ID = "call-subagent-finished";
 const LIVE_SUBAGENT_CALL_ID = "call-subagent-live";
 const LIVE_SUBAGENT_STARTED_AT = Date.now() - 12_000;
@@ -253,6 +272,9 @@ window.__harness = {
 	},
 	get lastStreamMs(): number {
 		return lastStreamMs;
+	},
+	get theme(): string {
+		return themeKey;
 	},
 	showSessions(): void {
 		emit({ type: "showSessions" });
@@ -952,10 +974,14 @@ function createMessages(count: number): ChatMessage[] {
 	for (let offset = 0; offset < recent.length; offset += 1) {
 		const message = recent[offset];
 		const promptTokens = 12_000 + offset * 1_500;
-		const cachedTokens = Math.round(promptTokens * (0.82 + offset * 0.02));
+		const cachedTokens = cacheMode === "low" ? Math.round(promptTokens * 0.1) : Math.round(promptTokens * (0.82 + offset * 0.02));
 		message.modelId = "gpt-5.5-codex";
-		message.usage = { promptTokens, completionTokens: 1_400, totalTokens: promptTokens + 1_400, cachedTokens };
-		message.usageTotals = { requests: 2, promptTokens: promptTokens * 2, cachedTokens: cachedTokens * 2, completionTokens: 2_800, cacheReported: 2 };
+		message.usage = cacheMode === "na"
+			? { promptTokens, completionTokens: 1_400, totalTokens: promptTokens + 1_400 }
+			: { promptTokens, completionTokens: 1_400, totalTokens: promptTokens + 1_400, cachedTokens };
+		message.usageTotals = cacheMode === "na"
+			? { requests: 2, promptTokens: promptTokens * 2, cachedTokens: 0, completionTokens: 2_800, cacheReported: 0 }
+			: { requests: 2, promptTokens: promptTokens * 2, cachedTokens: cachedTokens * 2, completionTokens: 2_800, cacheReported: 2 };
 	}
 	const compacted = result[3];
 	const kept = result[6];

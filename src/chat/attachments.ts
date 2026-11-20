@@ -1,16 +1,20 @@
 import { attachmentLabel } from "./shared/attachment-label";
-import type { ChatAttachment } from "./shared/protocol";
+import type { ChatAttachment, ChatToolImage } from "./shared/protocol";
 
 export { attachmentLabel };
 
 export interface AttachmentContent {
 	attachment: ChatAttachment;
 	text?: string;
+	/** An image file: the model gets it after the message text, the block only names it. */
+	image?: ChatToolImage;
 	error?: string;
 }
 
 export const ATTACHMENT_MAX_CHARS = 60_000;
 export const ATTACHMENTS_TOTAL_MAX_CHARS = 150_000;
+/** The view_image limit; providers reject larger images. */
+export const IMAGE_ATTACHMENT_MAX_BYTES = 3_750_000;
 
 /** Fence names for common VS Code language ids. */
 const FENCE_LANGUAGES: Record<string, string> = {
@@ -111,6 +115,10 @@ export function renderAttachments(contents: readonly AttachmentContent[]): strin
 		const path = escapeAttribute(content.attachment.path);
 		if (content.error) {
 			blocks.push(`<attachment path="${path}">(not included: ${content.error})</attachment>`);
+			continue;
+		}
+		if (content.image) {
+			blocks.push(`<attachment path="${path}" image="${escapeAttribute(content.image.mimeType)}">(an image; it follows this message)</attachment>`);
 			continue;
 		}
 		if (remaining <= 0) {

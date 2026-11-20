@@ -1,8 +1,25 @@
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
-import { ATTACHMENT_MAX_CHARS, attachmentLabel, looksBinary, type AttachmentContent } from "./attachments";
+import { ATTACHMENT_MAX_CHARS, attachmentLabel, IMAGE_ATTACHMENT_MAX_BYTES, looksBinary, type AttachmentContent } from "./attachments";
 import type { ChatAttachmentsDeps } from "./chat-controller";
-import type { ChatAttachment } from "./shared/protocol";
+import { imageExtension, imageMimeType } from "./shared/attachment-label";
+import { PASTED_FILE_MAX_BYTES, PASTED_FILES_LIMIT, type ChatAttachment, type ChatPastedFile } from "./shared/protocol";
+
+/** Pasted files stay this long; a sent message keeps its images in the chat log. */
+const PASTED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** A file name Windows and Linux accept; pasted screenshots get a dated one. */
+export function pastedFileName(name: string, mimeType: string, now = new Date()): string {
+	const safe = Array.from(name, character => character.charCodeAt(0) < 32 || "\\/:*?\"<>|".includes(character) ? "_" : character).join("");
+	const cleaned = safe.replace(/^[\s.]+|[\s.]+$/g, "").slice(0, 120);
+	const extension = imageExtension(mimeType);
+	if (cleaned && !(extension && /^image\.(png|jpe?g|gif|webp)$/i.test(cleaned))) {
+		return cleaned;
+	}
+	const pad = (value: number): string => String(value).padStart(2, "0");
+	const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+	return `pasted-${stamp}.${extension ?? "bin"}`;
+}
 
 interface AttachmentPickItem extends vscode.QuickPickItem {
 	attachment?: ChatAttachment;
@@ -34,10 +51,58 @@ function dedupe(attachments: readonly ChatAttachment[]): ChatAttachment[] {
 
 /** Feeds the chat window with editor selections and files. */
 export class ChatAttachmentSource implements ChatAttachmentsDeps {
-	private readonly _options: { log?: (event: string, data: Record<string, unknown>) => void };
+	private readonly _options: { log?: (event: string, data: Record<string, unknown>) => void; pasteDir?: vscode.Uri };
 
-	constructor(options: { log?: (event: string, data: Record<string, unknown>) => void } = {}) {
+	/** pasteDir: where pasted screenshots and files are saved; without it pasting attaches nothing. */
+	constructor(options: { log?: (event: string, data: Record<string, unknown>) => void; pasteDir?: vscode.Uri } = {}) {
 		this._options = options;
+	}
+
+	/** Saves pasted bytes as files, one folder per file so names never clash, and attaches them. */
+	async savePasted(files: readonly ChatPastedFile[]): Promise<ChatAttachment[]> {
+		const root = this._options.pasteDir;
+		if (!root) {
+			return [];
+		}
+		await this._prunePasted(root);
+		const attachments: ChatAttachment[] = [];
+		for (const file of files.slice(0, PASTED_FILES_LIMIT)) {
+			const data = Buffer.from(file.data, "base64");
+			if (data.byteLength === 0 || data.byteLength > PASTED_FILE_MAX_BYTES) {
+				continue;
+			}
+			const uri = vscode.Uri.joinPath(root, randomUUID(), pastedFileName(file.name, file.mimeType));
+			try {
+				await vscode.workspace.fs.writeFile(uri, data);
+				attachments.push(this.file(uri));
+			} catch (error) {
+				this._options.log?.("chat.attachment.paste_failed", { message: errorText(error) });
+			}
+		}
+		return attachments;
+	}
+
+	private async _prunePasted(root: vscode.Uri): Promise<void> {
+		let entries: [string, vscode.FileType][];
+		try {
+			entries = await vscode.workspace.fs.readDirectory(root);
+		} catch {
+			return;
+		}
+		const cutoff = Date.now() - PASTED_RETENTION_MS;
+		for (const [name, type] of entries) {
+			if (!(type & vscode.FileType.Directory)) {
+				continue;
+			}
+			const folder = vscode.Uri.joinPath(root, name);
+			try {
+				if ((await vscode.workspace.fs.stat(folder)).mtime < cutoff) {
+					await vscode.workspace.fs.delete(folder, { recursive: true, useTrash: false });
+				}
+			} catch {
+				// Another window may have removed it first.
+			}
+		}
 	}
 
 	selection(): ChatAttachment | undefined {
@@ -163,7 +228,12 @@ export class ChatAttachmentSource implements ChatAttachmentsDeps {
 		const selection = attachment.kind === "selection" && attachment.startLine !== undefined && attachment.endLine !== undefined
 			? new vscode.Range(attachment.startLine - 1, 0, attachment.endLine - 1, Number.MAX_SAFE_INTEGER)
 			: undefined;
-		await vscode.window.showTextDocument(uri, selection ? { preview: true, selection } : { preview: true });
+		if (!selection) {
+			// vscode.open also shows images and other binary files in their editor.
+			await vscode.commands.executeCommand("vscode.open", uri, { preview: true });
+			return;
+		}
+		await vscode.window.showTextDocument(uri, { preview: true, selection });
 	}
 
 	private async _search(): Promise<ChatAttachment[]> {
@@ -189,11 +259,20 @@ export class ChatAttachmentSource implements ChatAttachmentsDeps {
 			return { attachment, text: attachment.text ?? "" };
 		}
 		try {
+			const uri = vscode.Uri.parse(attachment.uri);
+			const mimeType = imageMimeType(uri.path);
+			if (mimeType) {
+				const size = (await vscode.workspace.fs.stat(uri)).size;
+				if (size > IMAGE_ATTACHMENT_MAX_BYTES) {
+					return { attachment, error: "the image is larger than 3.75 MB" };
+				}
+				const data = await vscode.workspace.fs.readFile(uri);
+				return { attachment, image: { mimeType, data: Buffer.from(data).toString("base64"), byteLength: data.byteLength, name: attachmentLabel(attachment) } };
+			}
 			const open = vscode.workspace.textDocuments.find(document => document.uri.toString() === attachment.uri);
 			if (open) {
 				return { attachment, text: open.getText() };
 			}
-			const uri = vscode.Uri.parse(attachment.uri);
 			const stat = await vscode.workspace.fs.stat(uri);
 			if (stat.size > 2 * 1024 * 1024) {
 				return { attachment, error: "the file is larger than 2 MB" };

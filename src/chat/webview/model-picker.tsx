@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
-import type { ChatModelEntry, ChatModelGroup, ChatProviderQuota } from "../shared/protocol";
+import type { ChatModelEntry, ChatModelGroup, ChatProviderQuota, ChatSignInOffer } from "../shared/protocol";
 import { OPEN_MODEL_PICKER_EVENT } from "./events";
 import { exhaustedWindow, formatQuotaExhausted, formatQuotaSummary, formatQuotaTitle, quotaSeverity } from "./format";
 import { matchesQuery, popupPlacement, useDismiss, useKeepInView } from "./popup";
@@ -10,6 +10,9 @@ interface ModelPickerProps {
 	quota?: ChatProviderQuota[];
 	onRefreshQuota?: () => void;
 	onSelectModel: (modelId: string) => void;
+	/** Subscriptions to sign in to, listed below the models. */
+	signIn?: ChatSignInOffer[];
+	onSignIn?: (provider: string) => void;
 }
 
 interface VisibleModel {
@@ -22,7 +25,7 @@ interface VisibleGroup {
 	models: VisibleModel[];
 }
 
-export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, onSelectModel }: ModelPickerProps) {
+export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, onSelectModel, signIn, onSignIn }: ModelPickerProps) {
 	const instanceId = useId();
 	const [open, setOpen] = useState(false);
 	const [placement, setPlacement] = useState<"above" | "below">("above");
@@ -187,8 +190,8 @@ export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, on
 					<div id={listId} class="picker-list" role="listbox" aria-label="Models">
 						{groups.map(group => {
 							const quotaEntry = quota?.find(candidate => candidate.provider === group.provider);
-							const summary = quotaEntry ? formatQuotaSummary(quotaEntry) : "";
 							const now = Date.now();
+							const summary = quotaEntry ? formatQuotaSummary(quotaEntry, now) : "";
 							const exhausted = quotaEntry ? exhaustedWindow(quotaEntry, now) : undefined;
 							const note = quotaEntry && exhausted ? formatQuotaExhausted(quotaEntry, now) : undefined;
 							return (
@@ -201,7 +204,7 @@ export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, on
 									<div class="picker-group-label">
 										<span class="picker-group-name">{group.provider}</span>
 										{quotaEntry && summary
-											? <span class={`picker-group-quota quota-${quotaSeverity(quotaEntry)}`} title={formatQuotaTitle(quotaEntry)}>{summary}</span>
+											? <span class={`picker-group-quota quota-${quotaSeverity(quotaEntry, now)}`} title={formatQuotaTitle(quotaEntry)}>{summary}</span>
 											: null}
 									</div>
 									{note ? <div class="picker-group-note">{note}</div> : null}
@@ -223,6 +226,24 @@ export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, on
 						})}
 						{flat.length === 0 ? <div class="picker-empty">No models match</div> : null}
 					</div>
+					{signIn && signIn.length > 0 && onSignIn ? (
+						<div class="picker-signin">
+							{signIn.map(offer => (
+								<button
+									type="button"
+									key={offer.provider}
+									class="picker-signin-button"
+									title={offer.detail}
+									onClick={() => {
+										setOpen(false);
+										onSignIn(offer.provider);
+									}}
+								>
+									{offer.label}
+								</button>
+							))}
+						</div>
+					) : null}
 				</div>
 			) : null}
 		</div>

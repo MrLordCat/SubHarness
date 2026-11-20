@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.21.37 (development patch) - 2026-11-20
+
+- Added: Codex works without the OpenAI extension. When no Codex CLI is found
+  (no `openai.chatgpt` extension, no `codex` on PATH, no `llamacpp.codexCliPath`),
+  **Sign In to Codex Subscription** offers to download the official CLI from
+  the npm registry: the `@openai/codex` platform package, about 185 MB to
+  download and 530 MB on disk, kept in the extension's storage. The download is
+  checked against the registry's sha512 and must start before it is used; the
+  voice runtime is left out. **Install or Update Codex CLI** (Quick Access →
+  Codex, Providers Manager) installs or updates it, and the new version
+  replaces the old one. Without a CLI the status says "Codex CLI not
+  installed".
+- Added: Claude signs in without the Claude Code extension. **Sign In to Claude
+  Subscription** runs the bundled Claude Code `auth login --claudeai` in a
+  terminal and reads the result with `auth status`; a sign-in with API billing
+  gets a warning. Sessions of the previous account are dropped. **Sign Out of
+  Claude** runs `auth logout`, which signs Claude Code out on this computer,
+  the Claude Code extension included. The account status names the sign-in
+  method and plan, never the email.
+- Added: the bridge chat's model picker offers **Sign in to Codex** and **Sign
+  in to Claude** while that subscription is enabled but not signed in.
+
+## 1.21.36 (development patch) - 2026-11-20
+
+- Added: the bridge chat keeps unsent text and attachments per chat. They come
+  back after switching chats and after Reload Window; a new chat that holds
+  only a draft is no longer removed when you leave it.
+- Added: Ctrl+V in the bridge chat attaches a screenshot or files copied in
+  the system file manager, and files dragged from the file manager attach as
+  well. Pasted files are saved in the extension's storage for 30 days. Image
+  attachments (PNG, JPEG, GIF, WebP up to 3.75 MB) now reach models that
+  accept images; other models get a note instead.
+- Changed: the limits chip and the model picker show the 5-hour window; the
+  weekly window appears only once it is used up. The tooltip and the popup
+  still list every window.
+- Changed: a bridge chat turn no longer stops after 100 tool rounds; it runs
+  until the model stops calling tools or you press Stop. Subagents keep their
+  100-round bound.
+- Fixed: Claude reported the same usage again when a tool round brought no new
+  model step (for example a second tool call of the same step), so the chat
+  counted extra requests and inflated its totals. Claude also took a step's
+  usage only from the full assistant message, which can arrive after the tool
+  call; a round then reported the previous step or nothing. Usage now comes
+  from the step's stream start and is reported once per step.
+
 ## 1.21.35 (development patch) - 2026-11-20
 
 - Fixed: Coco and Cursor sessions that continued, even after a window reload,

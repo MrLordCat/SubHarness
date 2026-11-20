@@ -46,11 +46,12 @@ suite("Chat webview quota formatting", () => {
 		return { provider, windows, ...(balance === undefined ? {} : { balance }) };
 	}
 
-	test("summarizes every window in order and appends the balance", () => {
+	test("summarizes the shown window and appends the balance", () => {
 		const windows = [{ label: "5h", percent: 42 }, { label: "Week", percent: 17.6 }];
-		assert.strictEqual(formatQuotaSummary(quota("Codex", windows)), "5h 42% · Week 18%");
+		assert.strictEqual(formatQuotaSummary(quota("Codex", windows)), "5h 42%");
+		assert.strictEqual(formatQuotaSummary(quota("Codex", [{ label: "5h", percent: 42 }, { label: "Week", percent: 100 }])), "Week 100%");
 		assert.strictEqual(formatQuotaSummary(quota("DeepSeek", [], "$12.30")), "$12.30");
-		assert.strictEqual(formatQuotaSummary(quota("Codex", windows, "$3.10")), "5h 42% · Week 18% · $3.10");
+		assert.strictEqual(formatQuotaSummary(quota("Codex", windows, "$3.10")), "5h 42% · $3.10");
 		assert.strictEqual(formatQuotaSummary(quota("Local", [])), "");
 	});
 

@@ -11,6 +11,21 @@ Claude authentication, subscription limits, model execution, and persisted SDK
 transcripts remain owned by the official Claude Code runtime. The extension
 does not read Claude credential files.
 
+## Sign-in
+
+The Claude Code extension is not needed. `AI Agent Bridge: Sign In to Claude
+Subscription` runs the bundled runtime (`claude-agent-sdk-<platform>/claude`,
+or `llamacpp.claudeCliPath`) as `claude auth login --claudeai` in a terminal:
+it opens the browser and may ask for a code. When the command ends or the
+terminal closes, `claude auth status` gives the result. Only `loggedIn`,
+`authMethod`, `subscriptionType` and `apiProvider` are kept; the email and
+organisation are dropped. A method other than `claude.ai` means API billing and
+gets a warning. A new sign-in may be another account, so open and durable
+sessions are dropped.
+
+`Sign Out of Claude` runs `claude auth logout`. Claude Code keeps one login
+per computer, so this also signs out the Claude Code extension and the CLI.
+
 ## Native VS Code Tool Boundary
 
 One `ClaudeAgentSession` owns a long-lived Agent SDK query and an asynchronous

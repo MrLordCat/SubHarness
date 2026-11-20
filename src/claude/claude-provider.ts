@@ -37,6 +37,7 @@ import {
 	estimateClaudeTokens,
 } from "./message-adapter";
 import { resolveClaudeKeepAliveSettings } from "./keepalive-settings";
+import { describeClaudeAuth, readClaudeAuthStatus, signInWithClaudeCli, signOutClaudeCli } from "./auth";
 
 const DEFAULT_CLAUDE_CONTEXT_LENGTH = 258_400;
 const DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS = 32_000;
@@ -740,6 +741,8 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 	private readonly contextUsageByModel = new Map<string, ClaudeContextUsageSnapshot>();
 	private pendingRollover: PendingClaudeSessionRollover | undefined;
 	private status: ClaudeProviderState = "signedOut";
+	/** The initial signedOut is a placeholder until the first status check. */
+	private statusKnown = false;
 	private requestCount = 0;
 	private warmReuseCount = 0;
 	private sessionInputTokens = 0;
@@ -791,6 +794,11 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 
 	refreshCacheKeepAliveStatus(): void {
 		void this.runCacheKeepAliveCycle();
+	}
+
+	/** Enabled, checked and not signed in: the bridge chat offers a sign-in. */
+	get needsSignIn(): boolean {
+		return this.statusKnown && this.status === "signedOut" && this.isEnabled();
 	}
 
 	get statusSummary(): string {
@@ -1126,18 +1134,39 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		return status;
 	}
 
+	/** Signs in with the bundled Claude Code CLI in a terminal; the Claude Code extension is not needed. */
 	async signIn(): Promise<void> {
-		// A fresh subscription sign-in may resolve to a different account/org.
-		// Durable sessions (and quarantined entries) from the previous account
-		// cannot be resumed — drop them so the next turn starts a clean session.
+		const executable = this.resolveExecutable();
+		if (!executable) {
+			throw new Error("The Claude Code runtime was not found. Reinstall the extension or set llamacpp.claudeCliPath.");
+		}
+		const status = await signInWithClaudeCli(executable);
+		if (!status?.loggedIn) {
+			await this.refreshStatus();
+			vscode.window.showWarningMessage("Claude sign-in did not finish. Run \"Sign In to Claude Subscription\" again.");
+			return;
+		}
+		// A fresh sign-in may be another account or organisation, whose sessions
+		// cannot resume the previous ones: the next turn starts a clean session.
+		this.closeAllSessions();
 		await this.clearDurableSessions();
+		this.lastSubscriptionUsage = undefined;
+		this.lastSubscriptionUsageAt = 0;
 		await this.refreshStatus();
-		vscode.window.showInformationMessage(
-			"Claude uses the account from the official Claude Code extension. Sign in there, then retry."
-		);
+		this.modelChanges.fire();
+		if (status.authMethod !== "claude.ai") {
+			vscode.window.showWarningMessage(`Claude Code is signed in with ${describeClaudeAuth(status)}. The bridge uses a Claude subscription: sign in again and choose the Claude account.`);
+			return;
+		}
+		vscode.window.showInformationMessage(`Claude signed in: ${describeClaudeAuth(status)}.`);
 	}
 
+	/** Signs Claude Code out on this computer, then drops the sessions of that account. */
 	async signOut(): Promise<void> {
+		const executable = this.resolveExecutable();
+		if (executable) {
+			await signOutClaudeCli(executable);
+		}
 		this.closeAllSessions();
 		this.lastSubscriptionUsage = undefined;
 		this.lastSubscriptionUsageAt = 0;
@@ -1158,7 +1187,9 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		await this.refreshSubscriptionUsage(true).catch(error => {
 			this.logSink?.logError("claude.usage_refresh.failed", error);
 		});
-		const details = [this.statusSummary];
+		const executable = this.resolveExecutable();
+		const auth = executable ? await readClaudeAuthStatus(executable).catch(() => undefined) : undefined;
+		const details = [this.statusSummary, `Account: ${executable ? describeClaudeAuth(auth) : "Claude Code runtime not found"}`];
 		for (const limit of this.subscriptionUsageLimits) {
 			details.push(`${limit.label}: ${limit.description}`);
 		}
@@ -2665,6 +2696,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 	}
 
 	private toStatus(status: ClaudeProviderState): ClaudeProviderStatus {
+		this.statusKnown = true;
 		if (this.status !== status) {
 			this.status = status;
 			this.statusChanges.fire({ state: status, summary: this.statusSummary });

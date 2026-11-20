@@ -1609,6 +1609,35 @@ body {
 	font-size: 12px;
 }
 
+.picker-signin {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	padding: 6px 4px 2px;
+	border-top: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
+}
+
+.picker-signin-button {
+	height: 22px;
+	padding: 0 8px;
+	border: 1px solid var(--vscode-button-border, transparent);
+	border-radius: 4px;
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	font-family: inherit;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.picker-signin-button:hover {
+	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.3));
+}
+
+.picker-signin-button:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
+}
+
 .history-trigger {
 	display: flex;
 	align-items: baseline;

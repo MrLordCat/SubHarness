@@ -1,7 +1,17 @@
 import type { ComponentChildren, TargetedDragEvent } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { attachmentLabel, attachmentTitle } from "../shared/attachment-label";
-import type { ChatAttachment, ChatModelGroup, ChatProviderQuota, ChatRunState, ChatToolGroup } from "../shared/protocol";
+import { attachmentLabel, attachmentTitle, imageMimeType } from "../shared/attachment-label";
+import {
+	PASTED_FILE_MAX_BYTES,
+	PASTED_FILES_LIMIT,
+	type ChatAttachment,
+	type ChatModelGroup,
+	type ChatPastedFile,
+	type ChatProviderQuota,
+	type ChatRunState,
+	type ChatSignInOffer,
+	type ChatToolGroup,
+} from "../shared/protocol";
 import { formatQuotaExhausted, parseUriList, type CacheHitLabel } from "./format";
 import { ModelPicker } from "./model-picker";
 import { QuotaIndicator } from "./quota-indicator";
@@ -24,6 +34,8 @@ interface ComposerProps {
 	autoFocus?: boolean;
 	/** Text the composer takes over when seq changes, e.g. what Stop took back from the queue. */
 	draft?: { text: string; seq: number };
+	/** Called with the text after every change, e.g. to keep it as the chat's draft. */
+	onTextChange?: (text: string) => void;
 	/** When given, Escape cancels, a Cancel button appears and Stop is never shown. */
 	onCancel?: () => void;
 	/** Rendered below the input row, e.g. the edit hint. */
@@ -39,6 +51,10 @@ interface ComposerProps {
 	onSetToolsEnabled: (names: string[], enabled: boolean) => void;
 	onPickAttachments: () => void;
 	onAddAttachments: (uris: string[]) => void;
+	/** Screenshots and files pasted or dropped from outside VS Code. */
+	onPasteFiles?: (files: ChatPastedFile[]) => void;
+	signIn?: ChatSignInOffer[];
+	onSignIn?: (provider: string) => void;
 	onOpenAttachment: (attachment: ChatAttachment) => void;
 	onRemoveAttachment: (id: string) => void;
 }
@@ -48,7 +64,52 @@ function carriesAttachments(transfer: DataTransfer | null): boolean {
 		return false;
 	}
 	const types = Array.from(transfer.types);
-	return types.includes("application/vnd.code.uri-list") || types.includes("text/uri-list");
+	return types.includes("application/vnd.code.uri-list") || types.includes("text/uri-list") || types.includes("Files");
+}
+
+/** file: and untitled: entries of a uri list; a copied web link stays text. */
+function fileUris(transfer: DataTransfer): string[] {
+	const payload = transfer.getData("application/vnd.code.uri-list") || transfer.getData("text/uri-list");
+	return parseUriList(payload).filter(uri => /^(file|untitled):/i.test(uri));
+}
+
+function toBase64(buffer: ArrayBuffer): string {
+	const bytes = new Uint8Array(buffer);
+	let binary = "";
+	for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+		binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+	}
+	return btoa(binary);
+}
+
+/** The webview gets pasted files without a path, so their bytes go to the host. */
+async function readPastedFiles(files: readonly File[]): Promise<{ read: ChatPastedFile[]; skipped: string[] }> {
+	const read: ChatPastedFile[] = [];
+	const skipped: string[] = [];
+	for (const file of files.slice(0, PASTED_FILES_LIMIT)) {
+		const name = file.name || "file";
+		if (file.size === 0 || file.size > PASTED_FILE_MAX_BYTES) {
+			skipped.push(name);
+			continue;
+		}
+		try {
+			read.push({ name: file.name, mimeType: file.type, data: toBase64(await file.arrayBuffer()) });
+		} catch {
+			// A pasted folder has no readable bytes.
+			skipped.push(name);
+		}
+	}
+	if (files.length > PASTED_FILES_LIMIT) {
+		skipped.push(`${files.length - PASTED_FILES_LIMIT} more`);
+	}
+	return { read, skipped };
+}
+
+function attachmentIcon(attachment: ChatAttachment): string {
+	if (attachment.kind === "selection") {
+		return "✂";
+	}
+	return imageMimeType(attachment.path) ? "🖼" : "📄";
 }
 
 export function Composer({
@@ -64,6 +125,7 @@ export function Composer({
 	initialText,
 	autoFocus,
 	draft,
+	onTextChange,
 	onCancel,
 	footer,
 	placeholder,
@@ -76,11 +138,15 @@ export function Composer({
 	onSetToolsEnabled,
 	onPickAttachments,
 	onAddAttachments,
+	onPasteFiles,
+	signIn,
+	onSignIn,
 	onOpenAttachment,
 	onRemoveAttachment,
 }: ComposerProps) {
 	const [text, setText] = useState(initialText ?? "");
 	const [dragOver, setDragOver] = useState(false);
+	const [pasteNote, setPasteNote] = useState<string | undefined>(undefined);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const focusDraft = useRef(false);
 	const draftSeq = draft?.seq;
@@ -129,6 +195,52 @@ export function Composer({
 		textarea.focus();
 		textarea.setSelectionRange(textarea.value.length, textarea.value.length);
 	}, [text]);
+
+	useEffect(() => {
+		onTextChange?.(text);
+	}, [text]);
+
+	useEffect(() => {
+		if (!pasteNote) {
+			return;
+		}
+		const timer = setTimeout(() => setPasteNote(undefined), 6_000);
+		return () => clearTimeout(timer);
+	}, [pasteNote]);
+
+	const attachFiles = (files: File[]) => {
+		if (!onPasteFiles) {
+			return;
+		}
+		void readPastedFiles(files).then(({ read, skipped }) => {
+			if (read.length > 0) {
+				onPasteFiles(read);
+			}
+			if (skipped.length > 0) {
+				setPasteNote(`Not attached: ${skipped.join(", ")} (empty, a folder or over 20 MB).`);
+			}
+		});
+	};
+
+	const onPaste = (event: ClipboardEvent) => {
+		const transfer = event.clipboardData;
+		if (!transfer) {
+			return;
+		}
+		const uris = fileUris(transfer);
+		if (uris.length > 0) {
+			event.preventDefault();
+			onAddAttachments(uris);
+			return;
+		}
+		const files = Array.from(transfer.files);
+		// Text that comes with a picture of itself (a spreadsheet range, a web page) pastes as text.
+		if (files.length === 0 || !onPasteFiles || transfer.getData("text/plain")) {
+			return;
+		}
+		event.preventDefault();
+		attachFiles(files);
+	};
 
 	useEffect(() => {
 		const textarea = textareaRef.current;
@@ -216,10 +328,15 @@ export function Composer({
 		if (!transfer) {
 			return;
 		}
-		const payload = transfer.getData("application/vnd.code.uri-list") || transfer.getData("text/uri-list");
-		const uris = parseUriList(payload);
+		const uris = fileUris(transfer);
 		if (uris.length > 0) {
 			onAddAttachments(uris);
+			return;
+		}
+		// Files dragged from the system file manager carry no VS Code uri list.
+		const files = Array.from(transfer.files);
+		if (files.length > 0) {
+			attachFiles(files);
 		}
 	};
 
@@ -232,6 +349,7 @@ export function Composer({
 			onDrop={onDrop}
 		>
 			{quotaWarning ? <div class="quota-warning-line" role="status">{quotaWarning} Pick another model or wait.</div> : null}
+			{pasteNote ? <div class="quota-warning-line" role="status">{pasteNote}</div> : null}
 			<div class="composer-box">
 				{attachments.length > 0 ? (
 					<div class="attachment-chips">
@@ -243,7 +361,7 @@ export function Composer({
 									title={attachmentTitle(attachment)}
 									onClick={() => onOpenAttachment(attachment)}
 								>
-									{attachment.kind === "selection" ? "✂" : "📄"}
+									{attachmentIcon(attachment)}
 									<span class="attachment-chip-label">{attachmentLabel(attachment)}</span>
 								</button>
 								<button
@@ -267,6 +385,7 @@ export function Composer({
 					value={text}
 					onInput={event => setText(event.currentTarget.value)}
 					onKeyDown={onKeyDown}
+					onPaste={onPaste}
 				/>
 				<div class="composer-row">
 					<div class="composer-tools">
@@ -281,7 +400,7 @@ export function Composer({
 								<path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
 							</svg>
 						</button>
-						<ModelPicker models={models} selectedModelId={selectedModelId} quota={quota} onRefreshQuota={onRefreshQuota} onSelectModel={onSelectModel} />
+						<ModelPicker models={models} selectedModelId={selectedModelId} quota={quota} onRefreshQuota={onRefreshQuota} onSelectModel={onSelectModel} signIn={signIn} onSignIn={onSignIn} />
 						{selectedModel?.thinking
 							? <ThinkingPicker thinking={selectedModel.thinking} selected={selectedThinking} onSelect={onSelectThinking} />
 							: null}

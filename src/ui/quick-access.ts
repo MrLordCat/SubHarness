@@ -894,6 +894,12 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 						}),
 					],
 				}),
+				new QuickAccessItem("codex.cli", "Codex CLI", {
+					description: "Install or update",
+					tooltip: "Downloads the official Codex CLI from npm (checked against its sha512) into the extension's storage. Used when the OpenAI extension is not installed and no codex is on PATH.",
+					icon: new vscode.ThemeIcon("cloud-download"),
+					command: command("llamacpp.codexInstallCli", "Install or Update Codex CLI"),
+				}),
 				new QuickAccessItem("codex.contextTarget", "Working Context", {
 					description: codexMetrics?.contextWindowTokens
 						? `${formatCompactTokenCount(Math.min(sharedContext, codexMetrics.contextWindowTokens))} shared / ${formatCompactTokenCount(codexMetrics.contextWindowTokens)} max`

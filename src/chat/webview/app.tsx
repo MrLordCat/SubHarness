@@ -33,6 +33,8 @@ export function App({ store }: { store: ChatStore }) {
 		onSetToolsEnabled,
 		onPickAttachments,
 		onAddAttachments,
+		onPasteFiles,
+		onSignIn,
 		onOpenAttachment,
 		onRemoveAttachment,
 	} = useComposerActions(store);
@@ -40,10 +42,20 @@ export function App({ store }: { store: ChatStore }) {
 	const onAnswer = useCallback((id: string, answers?: ChatQuestionAnswer[]) => postMessage(answers ? { type: "answerQuestions", id, answers } : { type: "answerQuestions", id }), []);
 	const onListSessions = useCallback(() => postMessage({ type: "listSessions" }), []);
 	const onListMemory = useCallback(() => postMessage({ type: "listMemory" }), []);
-	const onOpenSession = useCallback((sessionId: string) => postMessage({ type: "openSession", sessionId }), []);
-	const onDeleteSession = useCallback((sessionId: string) => postMessage({ type: "deleteSession", sessionId }), []);
+	// The pending draft goes first, so the host keeps a chat that has only unsent text.
+	const onOpenSession = useCallback((sessionId: string) => {
+		store.flushDraft();
+		postMessage({ type: "openSession", sessionId });
+	}, [store]);
+	const onDeleteSession = useCallback((sessionId: string) => {
+		store.flushDraft();
+		postMessage({ type: "deleteSession", sessionId });
+	}, [store]);
 	const onShowActivity = useCallback(() => setBadgeOpens(count => count + 1), []);
-	const onNewChat = useCallback(() => postMessage({ type: "newChat" }), []);
+	const onNewChat = useCallback(() => {
+		store.flushDraft();
+		postMessage({ type: "newChat" });
+	}, [store]);
 	const onRemoveQueued = useCallback((id: string) => postMessage({ type: "removeQueued", id }), []);
 
 	const title = store.session?.title ?? "Chat";
@@ -97,6 +109,9 @@ export function App({ store }: { store: ChatStore }) {
 			) : null}
 			<QueuedMessages queued={store.queued} onRemove={onRemoveQueued} />
 			<Composer
+				key={`composer-${store.composerKey}`}
+				initialText={store.draftText}
+				onTextChange={store.setDraftText}
 				run={store.run}
 				models={store.models}
 				tools={store.tools}
@@ -115,6 +130,9 @@ export function App({ store }: { store: ChatStore }) {
 				onSetToolsEnabled={onSetToolsEnabled}
 				onPickAttachments={onPickAttachments}
 				onAddAttachments={onAddAttachments}
+				onPasteFiles={onPasteFiles}
+				signIn={store.signIn}
+				onSignIn={onSignIn}
 				onOpenAttachment={onOpenAttachment}
 				onRemoveAttachment={onRemoveAttachment}
 			/>

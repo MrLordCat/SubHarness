@@ -1,6 +1,6 @@
 import { Component, type ComponentChildren } from "preact";
 import { useEffect, useState } from "preact/hooks";
-import { attachmentLabel, attachmentTitle } from "../shared/attachment-label";
+import { attachmentLabel, attachmentTitle, imageMimeType } from "../shared/attachment-label";
 import type { ChatLimitInfo, ChatMessage, ChatPart, ChatSubagentRun, ChatSubagentStep } from "../shared/protocol";
 import { SUBAGENT_TOOL_NAME } from "../tools/subagent-tool";
 import { postMessage } from "./api";
@@ -124,7 +124,7 @@ function MessageView({ message, running, editing, compactionBoundary, isLast, ch
 												postMessage({ type: "openAttachment", attachment });
 											}}
 										>
-											{attachment.kind === "selection" ? "✂" : "📄"}
+											{attachment.kind === "selection" ? "✂" : imageMimeType(attachment.path) ? "🖼" : "📄"}
 											<span class="attachment-chip-label">{attachmentLabel(attachment)}</span>
 										</button>
 									</span>

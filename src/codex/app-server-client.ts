@@ -4,6 +4,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 
 import type { LlamaLogSink } from "../logger";
+import { installedCodexCliPath } from "./cli-installer";
 
 type JsonRpcId = number | string;
 
@@ -110,6 +111,49 @@ export function resolveBundledCodexCliPath(): string | undefined {
 	return existsSync(candidate) ? candidate : undefined;
 }
 
+let downloadedCliRoot: string | undefined;
+
+/** Where installCodexCli keeps the CLI it downloads; set once at activation. */
+export function setCodexCliStorage(root: string | undefined): void {
+	downloadedCliRoot = root;
+}
+
+export function codexCliStorage(): string | undefined {
+	return downloadedCliRoot;
+}
+
+/** spawn without a shell runs only real executables, so a Windows codex.cmd shim does not count. */
+function findOnPath(name: string): string | undefined {
+	for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+		if (!directory) {
+			continue;
+		}
+		const candidate = path.join(directory.replace(/^"|"$/g, ""), name);
+		if (existsSync(candidate)) {
+			return candidate;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * The Codex CLI to start: an explicit path (account or setting) wins, then the
+ * OpenAI extension's copy, the one the bridge downloaded, and codex on PATH.
+ */
+export function resolveCodexCliPath(cliPath?: string): string | undefined {
+	const configured = cliPath?.trim() || vscode.workspace.getConfiguration("llamacpp").get<string>("codexCliPath", "").trim();
+	if (configured) {
+		return configured;
+	}
+	return resolveBundledCodexCliPath()
+		?? (downloadedCliRoot ? installedCodexCliPath(downloadedCliRoot) : undefined)
+		?? findOnPath(process.platform === "win32" ? "codex.exe" : "codex");
+}
+
+export function isCodexCliAvailable(cliPath?: string): boolean {
+	return resolveCodexCliPath(cliPath) !== undefined;
+}
+
 export interface CodexAppServerOptions {
 	/** Codex home for this account; the built-in account keeps the process default (~/.codex). */
 	codexHome?: string;
@@ -193,9 +237,7 @@ export class CodexAppServerClient implements vscode.Disposable {
 	}
 
 	private async start(): Promise<void> {
-		const configuredPath = this.options.cliPath?.trim()
-			|| vscode.workspace.getConfiguration("llamacpp").get<string>("codexCliPath", "").trim();
-		const executable = configuredPath || resolveBundledCodexCliPath() || "codex";
+		const executable = resolveCodexCliPath(this.options.cliPath) ?? "codex";
 		// A named account needs its own home; Codex refuses a home that does not exist.
 		// File credentials keep the two logins from collapsing into one keyring entry,
 		// and writing them into a fresh config.toml avoids CLI flags older versions reject.
