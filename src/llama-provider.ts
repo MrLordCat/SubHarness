@@ -4444,7 +4444,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         }
 
         let sharedMemoryContext: SharedMemoryPromptContext | undefined;
-        if (sharedMemoryEnabled && sharedMemoryAutoInject && this.sharedMemory) {
+        const skipSharedMemory = options.modelOptions?._aabSkipSharedMemory === true;
+        if (sharedMemoryEnabled && sharedMemoryAutoInject && this.sharedMemory && !skipSharedMemory) {
             try {
                 const frozen = conversationScope
                     ? this.frozenSharedMemoryByScope.get(conversationScope)
@@ -4501,6 +4502,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             } catch (error) {
                 this.logError("chat.memory.context_error", error, { requestId });
             }
+        } else if (skipSharedMemory) {
+            // The caller already put memory into the history; an overlay would duplicate it.
+            if (conversationScope) {
+                this.frozenSharedMemoryByScope.delete(conversationScope);
+            }
+            this.log("chat.memory.context", { requestId, enabled: sharedMemoryEnabled, source: "skipped-by-caller" });
         } else if (conversationScope) {
             // A later settings change must not revive a block selected before
             // memory injection was disabled.

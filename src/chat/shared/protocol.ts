@@ -107,6 +107,10 @@ export interface ChatMessage {
 	usageTotals?: ChatUsageTotals;
 	/** Host context sent with this user message (date, active file); kept so every later request repeats it byte for byte. */
 	hostContext?: string;
+	/** Shared memory block sent before this user message; kept so later requests repeat it byte for byte. */
+	memoryContext?: string;
+	/** Revisions of the memory entries and index this message already shows. */
+	memoryRevisions?: Array<{ id: string; revision: string }>;
 	/** Display info of the attached files and selections; never their text. */
 	attachments?: ChatAttachment[];
 	/** The rendered <attachments> block sent to the model; kept so later requests repeat it byte for byte. */

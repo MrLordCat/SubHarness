@@ -63,6 +63,17 @@ the input as **Todos done/total**; click it for the whole list. With
 input and waits: pick an option, type an answer, or **Skip**. Sending a message
 instead also skips the questions, and the agent reads your message next.
 
+## Memory
+
+The chat gives every model the bridge's shared memory, whatever the provider.
+Each message you send carries a `<memory>` block with the index of entries for
+this project and the global ones, the pinned entries and the entries that match
+the message. Later messages carry only what changed since then, so earlier
+requests stay the same and the provider's prompt cache keeps working. The agent
+saves, searches and deletes entries with the `llamacpp_*_memory` tools without
+asking. The settings `llamacpp.memoryEnabled` and `llamacpp.memoryAutoInject`
+turn this off.
+
 The model runs tools without asking, with one exception: a terminal command
 that matches a rule in `llamacpp.chat.dangerousCommands` waits for your
 approval in the chat. The default rules cover force pushes, hard resets,

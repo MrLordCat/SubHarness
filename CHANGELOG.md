@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.21.29 (development patch) - 2026-11-20
+
+- Added: the bridge chat gives every provider the shared memory, not only the
+  HTTP one. A message carries the index of entries, the pinned entries and the
+  ones that match it; later messages carry only changes, so prompt caches stay
+  valid. The HTTP provider skips its own memory overlay for chat requests.
+- Fixed: a flaky teardown in the chat controller tests (ENOTEMPTY while
+  deleting the temp folder).
+
 ## 1.21.28 (development patch) - 2026-11-20
 
 - Added: the bridge chat's own manage_todo_list and ask_questions tools. The

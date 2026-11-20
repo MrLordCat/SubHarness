@@ -31,13 +31,14 @@ export function compactionSummaryText(part: ChatCompactionPart): string {
 	return `<conversation_summary>\nThe earlier part of this conversation (${part.summarizedMessages} messages) was compacted. Summary:\n\n${part.summary}\n</conversation_summary>`;
 }
 
-/** The user's text in the form the model receives: host context, attachments, then the request itself. */
+/** The user's text in the form the model receives: host context, memory, attachments, then the request itself. */
 export function userRequestText(message: ChatMessage): string {
 	const text = message.parts.filter(part => part.kind === "text").map(part => part.text).join("");
 	if (!text) {
 		return text;
 	}
-	const context = [message.hostContext, message.attachmentContext].filter((part): part is string => !!part);
+	const context = [message.hostContext, message.memoryContext, message.attachmentContext]
+		.filter((part): part is string => !!part);
 	if (context.length === 0) {
 		return text;
 	}

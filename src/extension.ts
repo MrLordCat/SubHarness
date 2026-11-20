@@ -730,6 +730,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		composite: compositeProvider,
 		log: (event, data) => logService.log(event, data),
 		userAgent: ua,
+		memory: memoryService,
 		quota: {
 			snapshot: () => [
 				subscriptionQuota("Codex", activeCodex().subscriptionWindows),

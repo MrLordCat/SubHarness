@@ -1,13 +1,17 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { CocoTerminalManager } from "../coco/terminal-manager";
+import { CONFIG_SECTION } from "../constants";
 import { resolveProviderSwitchContextTokens } from "../context/provider-handoff";
+import { getCurrentWorkspaceScopeId } from "../memory/scope";
+import type { SharedMemoryService } from "../memory/shared-memory-service";
 import { ChatAttachmentSource } from "./attachment-source";
 import { ChatChangeTracker } from "./changes/change-tracker";
 import { findGitExecutable } from "./changes/shadow-git";
 import { ChatController, type ChatQuotaSource } from "./chat-controller";
 import { registerChatView } from "./chat-view";
 import { CHAT_COMPACTION_TARGET_TOKENS, createChatSummarizer } from "./compaction";
+import { createChatMemorySource } from "./memory-context";
 import { ChatPromptSource } from "./prompt/instructions";
 import { ChatSessionStore } from "./session-store";
 import { createChatToolSource } from "./tool-executor";
@@ -32,6 +36,8 @@ export interface ChatWindowDeps {
 	/** Sent with DeepSeek summary requests. */
 	userAgent?: string;
 	quota?: ChatQuotaSource;
+	/** Shared durable memory the chat shows to every provider. */
+	memory?: SharedMemoryService;
 }
 
 const DEEPSEEK_KEY_SECRET = "llamacpp.deepSeekApiKey";
@@ -78,6 +84,15 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 	const folders = () => (vscode.workspace.workspaceFolders ?? [])
 		.filter(folder => folder.uri.scheme === "file")
 		.map(folder => ({ name: folder.name, fsPath: folder.uri.fsPath }));
+	// The same two switches the HTTP provider reads for its own auto-injection.
+	const memoryEnabled = (): boolean => {
+		const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
+		return cfg.get<boolean>("memoryEnabled", true) !== false
+			&& cfg.get<boolean>("memoryAutoInject", true) !== false;
+	};
+	const memory = deps.memory
+		? createChatMemorySource(deps.memory, { enabled: memoryEnabled, workspaceId: getCurrentWorkspaceScopeId })
+		: undefined;
 	const changes = new ChatChangeTracker({
 		storageDir: path.join(storage, "chat-changes"),
 		folders,
@@ -113,8 +128,9 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		log: deps.log,
 		changes,
 		openChange: registerChangeDiff(context, changes),
-		prompt: new ChatPromptSource({ folders }),
+		prompt: new ChatPromptSource({ folders, memoryEnabled }),
 		attachments,
+		memory,
 		abandonConversation: async id => { await deps.composite.abandonConversation?.(id); },
 		confirm: async (message, action) => (await vscode.window.showWarningMessage(message, { modal: true }, action)) === action,
 		notify: async (message, action) => {

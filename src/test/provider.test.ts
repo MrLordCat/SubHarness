@@ -2184,6 +2184,99 @@ suite("Llama.cpp Chat Provider Extension", () => {
             }
         });
 
+        test("skips shared memory when the caller already provided it", async () => {
+            let memoryBuildCalls = 0;
+            const memoryProvider = {
+                buildPromptContext: async () => {
+                    memoryBuildCalls += 1;
+                    return undefined;
+                },
+            };
+            const isolatedProvider = new LlamaCppChatModelProvider(
+                new MockSecretStorage(),
+                "test-user-agent",
+                undefined,
+                memoryProvider
+            );
+            const providerAny = isolatedProvider as unknown as {
+                getModelSources: () => Promise<Array<{
+                    key: string;
+                    label: string;
+                    serverUrl: string;
+                    familyOverride?: string;
+                    contextLengthFallback?: number;
+                }>>;
+                getRuntimeContextLengthWithCache: () => Promise<number | undefined>;
+                acquireChatRequestSlot: (
+                    requestId: string,
+                    queueTimeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<{ release: () => void; waitMs: number }>;
+                sendChatCompletion: (
+                    serverUrl: string,
+                    headers: Record<string, string>,
+                    requestBody: Record<string, unknown>,
+                    timeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<Response>;
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+            const sent: Array<Record<string, unknown>> = [];
+            providerAny.getModelSources = async () => [{
+                key: "local",
+                label: "Local",
+                serverUrl: "http://localhost:8000",
+                familyOverride: "qwen",
+                contextLengthFallback: 65536,
+            }];
+            providerAny.getRuntimeContextLengthWithCache = async () => 65536;
+            providerAny.acquireChatRequestSlot = async () => ({ release: () => undefined, waitMs: 0 });
+            providerAny.sendChatCompletion = async (_serverUrl, _headers, requestBody) => {
+                sent.push(JSON.parse(JSON.stringify(requestBody)) as Record<string, unknown>);
+                return new Response(new ReadableStream<Uint8Array>({
+                    start(controller) { controller.close(); },
+                }), { status: 200 });
+            };
+            providerAny.processStreamingResponse = async (_responseBody, progress) => {
+                progress.report(new vscode.LanguageModelTextPart("done"));
+            };
+
+            const model = {
+                id: "local::qwen3-local",
+                name: "qwen3-local (Local)",
+                family: "qwen",
+                version: "1",
+                maxInputTokens: 60000,
+                maxOutputTokens: 4096,
+                capabilities: {},
+            } as unknown as vscode.LanguageModelChatInformation;
+            const options = {
+                modelOptions: {
+                    _copilotConversationId: "memory-skip-conversation",
+                    _aabSkipSharedMemory: true,
+                },
+                tools: [],
+                toolMode: vscode.LanguageModelChatToolMode.Auto,
+            } satisfies vscode.ProvideLanguageModelChatResponseOptions;
+            await isolatedProvider.provideLanguageModelChatResponse(
+                model,
+                [vscode.LanguageModelChatMessage.User("the chat already put memory in the history")],
+                options,
+                { report: () => undefined },
+                new vscode.CancellationTokenSource().token
+            );
+
+            assert.strictEqual(memoryBuildCalls, 0, "the caller's flag must skip memory retrieval");
+            assert.strictEqual(sent.length, 1);
+            const contents = (sent[0].messages as Array<{ content?: unknown }>)
+                .map(message => String(message.content ?? ""));
+            assert.ok(contents.every(content => !content.includes("Shared durable memory")));
+        });
+
         test("builds an exclusive ordered prompt breakdown with memory and message subsections", () => {
             const providerAny = provider as unknown as {
                 buildPromptSegments: (

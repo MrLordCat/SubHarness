@@ -5,6 +5,8 @@ import { runAgentTurn, type AgentTurnSink, type ChatToolExecutor } from "./agent
 import { renderAttachments, type AttachmentContent } from "./attachments";
 import type { ChatWebviewBridge } from "./chat-view";
 import { compactChatHistory, estimateTextTokens, planChatCompaction, previousModelId, type ChatCompactionLimits, type ChatSummarizer } from "./compaction";
+import { activeCompaction } from "./lm-messages";
+import { MEMORY_INDEX_ID, type ChatMemoryContext, type ChatMemorySource } from "./memory-context";
 import type { ChatSessionStore } from "./session-store";
 import { runChatSubagent } from "./subagent-runner";
 import { ASK_QUESTIONS_TOOL_NAME, TODO_TOOL_NAME } from "./tools/interaction-tools";
@@ -62,6 +64,8 @@ export interface ChatControllerDeps {
 	quota?: ChatQuotaSource;
 	/** Editor selections and files the user attaches to a message. */
 	attachments?: ChatAttachmentsDeps;
+	/** Shared durable memory shown to the model in <memory> blocks before user requests. */
+	memory?: ChatMemorySource;
 }
 
 export interface ChatAttachmentsDeps {
@@ -403,6 +407,8 @@ function viewPart(part: ChatPart, keepFull?: boolean): ChatPart {
 function viewMessage(message: ChatMessage, keepFull = false): ChatMessage {
 	const view: ChatMessage = { ...message, parts: message.parts.map(part => viewPart(part, keepFull)) };
 	delete view.attachmentContext;
+	delete view.memoryContext;
+	delete view.memoryRevisions;
 	return view;
 }
 
@@ -953,6 +959,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				this._log("chat.attachments.read_failed", { message: errorMessage(error) });
 			}
 		}
+		const memory = await this._memoryContext(text, messages);
 		const user: ChatMessage = {
 			id: randomUUID(),
 			role: "user",
@@ -960,6 +967,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			createdAt: Date.now(),
 			parts: [{ kind: "text", text }],
 			...(hostContext ? { hostContext } : {}),
+			...(memory ? { memoryContext: memory.text, memoryRevisions: memory.revisions.map(revision => ({ ...revision })) } : {}),
 			...(attachmentContext ? { attachmentContext } : {}),
 			...(display && display.length > 0 ? { attachments: display.map(storedAttachment) } : {}),
 		};
@@ -1111,7 +1119,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				token: running.cts.token,
 				system,
 				initialParts,
-				modelOptions: thinking ? { reasoningEffort: thinking } : undefined,
+				// Memory arrives in the history as <memory> blocks, so the HTTP provider must not add its own overlay.
+				modelOptions: { ...(thinking ? { reasoningEffort: thinking } : {}), _aabSkipSharedMemory: true },
 				shouldYield: () => runtime.queued.length > 0,
 			});
 		} catch (error) {
@@ -1203,6 +1212,32 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			return this._deps.prompt?.turnContext();
 		} catch (error) {
 			this._log("chat.prompt.context_failed", { message: errorMessage(error) });
+			return undefined;
+		}
+	}
+
+	/** Retrieves memory the earlier messages do not show yet; a failure leaves the turn without memory. */
+	private async _memoryContext(text: string, messages: readonly ChatMessage[]): Promise<ChatMemoryContext | undefined> {
+		const memory = this._deps.memory;
+		if (!memory) {
+			return undefined;
+		}
+		const start = activeCompaction(messages)?.start ?? 0;
+		const known = new Map<string, string>();
+		for (const message of messages.slice(start)) {
+			for (const revision of message.memoryRevisions ?? []) {
+				known.set(revision.id, revision.revision);
+			}
+		}
+		try {
+			const context = await memory.context(text, known);
+			if (context) {
+				const entries = context.revisions.filter(revision => revision.id !== MEMORY_INDEX_ID).length;
+				this._log("chat.memory.context", { entries, index: context.revisions.length > entries, chars: context.text.length });
+			}
+			return context;
+		} catch (error) {
+			this._log("chat.memory.context_failed", { message: errorMessage(error) });
 			return undefined;
 		}
 	}

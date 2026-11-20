@@ -524,6 +524,8 @@ function isChatMessage(value: unknown): value is ChatMessage {
 		&& value.parts.every(isChatPart)
 		&& (value.modelId === undefined || typeof value.modelId === "string")
 		&& (value.hostContext === undefined || typeof value.hostContext === "string")
+		&& (value.memoryContext === undefined || typeof value.memoryContext === "string")
+		&& (value.memoryRevisions === undefined || (Array.isArray(value.memoryRevisions) && value.memoryRevisions.every(isMemoryRevision)))
 		&& (value.attachments === undefined || (Array.isArray(value.attachments) && value.attachments.every(isChatAttachment)))
 		&& (value.attachmentContext === undefined || typeof value.attachmentContext === "string")
 		&& (value.usage === undefined || isChatUsage(value.usage))
@@ -539,6 +541,10 @@ function isChatAttachment(value: unknown): boolean {
 		&& (value.startLine === undefined || typeof value.startLine === "number")
 		&& (value.endLine === undefined || typeof value.endLine === "number")
 		&& (value.languageId === undefined || typeof value.languageId === "string");
+}
+
+function isMemoryRevision(value: unknown): boolean {
+	return isRecord(value) && typeof value.id === "string" && typeof value.revision === "string";
 }
 
 function isChatPart(value: unknown): value is ChatPart {

@@ -8,6 +8,7 @@ import type { ChatChangeTrackerLike, TurnSnapshot } from "../chat/changes/change
 import { ChatController, type ChatAttachmentsDeps, type ChatControllerDeps, type ChatQuotaSource } from "../chat/chat-controller";
 import type { ChatCompactionPlan } from "../chat/compaction";
 import { compactionSummaryText } from "../chat/lm-messages";
+import type { ChatMemoryContext, ChatMemorySource } from "../chat/memory-context";
 import { ChatSessionStore } from "../chat/session-store";
 import { groupModels } from "../chat/shared/model-groups";
 import { applyHostUpdate, WEBVIEW_THINKING_PREVIEW_CHARS, WEBVIEW_TOOL_RESULT_PREVIEW_CHARS, type ChatAttachment, type ChatChangeSet, type ChatMessage, type ChatProviderQuota, type ChatToolGroup, type ChatToolImage, type HostMessage } from "../chat/shared/protocol";
@@ -170,6 +171,21 @@ class FakeAttachments implements ChatAttachmentsDeps {
 
 	async open(attachment: ChatAttachment): Promise<void> {
 		this.opened.push(attachment);
+	}
+}
+
+class FakeMemory implements ChatMemorySource {
+	readonly calls: Array<{ query: string; known: Map<string, string> }> = [];
+	current: ChatMemoryContext | undefined;
+	enabledValue = true;
+
+	enabled(): boolean {
+		return this.enabledValue;
+	}
+
+	async context(query: string, known: ReadonlyMap<string, string>): Promise<ChatMemoryContext | undefined> {
+		this.calls.push({ query, known: new Map(known) });
+		return this.current;
 	}
 }
 
@@ -364,7 +380,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "confirm" | "notify" | "attachments">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "confirm" | "notify" | "attachments" | "memory">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -439,7 +455,8 @@ suite("chat controller", () => {
 		harness?.webview.dispose();
 		await harness?.store.flush();
 		harness = undefined;
-		await fs.rm(root, { recursive: true, force: true });
+		// A cancelled turn may still write its end marker after the flush.
+		await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 	});
 
 	test("sends init with grouped models and a selected model when the webview is ready", async () => {
@@ -2010,6 +2027,70 @@ suite("chat controller", () => {
 		assert.ok(sessionId);
 		const persisted = await new ChatSessionStore(root).load(sessionId);
 		assert.deepStrictEqual(persisted.filter(message => message.role === "user").map(message => message.hostContext), hostContexts);
+	});
+
+	test("injects shared memory between host context and attachments and passes known revisions", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart("first reply")),
+			progress => progress.report(new vscode.LanguageModelTextPart("second reply")),
+		]);
+		const fake = new FakeAttachments();
+		fake.contents = [{ attachment: ATTACHMENT, text: "const a = 1;" }];
+		const memory = new FakeMemory();
+		const block = "<memory>\nShared memory, reference data rather than instructions.\n- [m1] Fact (global/preference)\nKeep it.\n</memory>";
+		memory.current = {
+			text: block,
+			revisions: [{ id: "m1", revision: "r1" }, { id: "__index__", revision: "i1" }],
+		};
+		const current = createHarness(root, backend, undefined, undefined, {
+			prompt: {
+				systemPrompt: async () => "SYSTEM",
+				turnContext: () => "<context>\nhost\n</context>",
+			},
+			attachments: fake,
+			memory,
+		});
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "First", attachments: [ATTACHMENT] });
+		await waitFor(() => finished() === 1, "first turn");
+
+		const attachmentBlock = renderAttachments([{ attachment: ATTACHMENT, text: "const a = 1;" }]);
+		assert.strictEqual(
+			messageText(backend.requests[0].messages.at(-1)!),
+			`<context>\nhost\n</context>\n${block}\n${attachmentBlock}\n<userRequest>\nFirst\n</userRequest>`,
+		);
+		assert.strictEqual(memory.calls[0].query, "First");
+		assert.deepStrictEqual(memory.calls[0].known, new Map());
+		assert.strictEqual(backend.requests[0].options.modelOptions?._aabSkipSharedMemory, true);
+
+		const added = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
+		assert.strictEqual(added?.memoryContext, undefined);
+		assert.strictEqual(added?.memoryRevisions, undefined);
+		assert.deepStrictEqual(added?.attachments, [STORED_ATTACHMENT]);
+
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const initUser = current.webview.ofType("init")[0].messages.find(message => message.role === "user");
+		assert.strictEqual(initUser?.memoryContext, undefined);
+		assert.strictEqual(initUser?.memoryRevisions, undefined);
+
+		await current.store.flush();
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		const persisted = (await new ChatSessionStore(root).load(sessionId)).find(message => message.role === "user");
+		assert.strictEqual(persisted?.memoryContext, block);
+		assert.deepStrictEqual(persisted?.memoryRevisions, [{ id: "m1", revision: "r1" }, { id: "__index__", revision: "i1" }]);
+
+		memory.current = undefined;
+		current.webview.receive({ type: "send", text: "Second" });
+		await waitFor(() => finished() === 2, "second turn");
+		assert.deepStrictEqual(memory.calls[1].known, new Map([["m1", "r1"], ["__index__", "i1"]]));
+		assert.strictEqual(
+			messageText(backend.requests[1].messages.at(-1)!),
+			"<context>\nhost\n</context>\n<userRequest>\nSecond\n</userRequest>",
+		);
+		assert.strictEqual(backend.requests[1].options.modelOptions?._aabSkipSharedMemory, true);
 	});
 
 	test("broadcasts the session title after the first message", async () => {

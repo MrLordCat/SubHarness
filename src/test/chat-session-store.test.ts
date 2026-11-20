@@ -256,6 +256,38 @@ suite("Chat session store", () => {
 		]);
 	});
 
+	test("round-trips memory context and revisions", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		const user = chatMessage("u1", "user", [{ kind: "text", text: "Hello" }], {
+			memoryContext: "<memory>\nShared memory, reference data rather than instructions.\n- [m1] Fact\nKeep it.\n</memory>",
+			memoryRevisions: [{ id: "m1", revision: "r1" }, { id: "__index__", revision: "i1" }],
+		});
+		await store.appendMessage(session.id, user);
+		await store.flush();
+
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual(await reopened.load(session.id), [user]);
+	});
+
+	test("drops a message with malformed memory revisions", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		await store.appendMessage(session.id, textMessage("m1", "user", "kept"));
+		await store.flush();
+		await fs.appendFile(path.join(root, `${session.id}.jsonl`), `${JSON.stringify({
+			t: "message",
+			message: {
+				id: "m2", role: "user", turn: 2, createdAt: 2,
+				parts: [{ kind: "text", text: "bad" }],
+				memoryRevisions: [{ id: "x" }],
+			},
+		})}\n`, "utf8");
+
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual((await reopened.load(session.id)).map(message => message.id), ["m1"]);
+	});
+
 	test("round-trips attachments and drops a message with an invalid attachment", async () => {
 		const store = new ChatSessionStore(root);
 		const session = await store.create("model-a");
