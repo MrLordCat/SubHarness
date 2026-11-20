@@ -266,6 +266,8 @@ export interface ChatQuestionOption {
 	label: string;
 	description?: string;
 	recommended?: boolean;
+	/** Preselected in the card without the "Recommended" tag. */
+	checked?: boolean;
 }
 
 export interface ChatQuestion {
@@ -289,6 +291,10 @@ export interface ChatQuestionRequest {
 	messageId: string;
 	callId: string;
 	questions: ChatQuestion[];
+	/** Heading above the questions; the card's aria-label uses it too. */
+	title?: string;
+	submitLabel?: string;
+	skipLabel?: string;
 }
 
 /** A tool call held until the user allows or denies it. */

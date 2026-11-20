@@ -1,5 +1,5 @@
 import type * as vscode from "vscode";
-import type { ChatQuestion, ChatQuestionAnswer, ChatToolImage } from "../shared/protocol";
+import type { ChatQuestion, ChatQuestionAnswer, ChatToolGroup, ChatToolImage } from "../shared/protocol";
 
 export interface ChatToolOutput {
 	text: string;
@@ -31,6 +31,17 @@ export interface SubagentRequest {
 	model: SubagentModelOption;
 }
 
+/** What the user did with a request_tools call. */
+export interface ChatToolRequestResult {
+	enabled: string[];
+	declined: string[];
+	alreadyEnabled: string[];
+	unknown: string[];
+	dismissed: boolean;
+	/** When the enabled tools reach the model; absent means the next request. */
+	availableFrom?: "nextRequest" | "nextMessage";
+}
+
 /** Host services for one call; only the chat controller can provide them. */
 export interface ChatToolInvokeContext {
 	callId?: string;
@@ -38,6 +49,10 @@ export interface ChatToolInvokeContext {
 	runSubagent?(request: SubagentRequest, token: vscode.CancellationToken): Promise<string>;
 	/** Asks the user in the chat and resolves with the answers; undefined when skipped; absent inside a subagent. */
 	askQuestions?(questions: ChatQuestion[], token: vscode.CancellationToken): Promise<ChatQuestionAnswer[] | undefined>;
+	/** Every tool the chat can offer, with its on/off state; absent inside a subagent. */
+	listTools?(): ChatToolGroup[];
+	/** Asks the user to enable tools; absent inside a subagent. */
+	requestTools?(names: string[], reason: string, token: vscode.CancellationToken): Promise<ChatToolRequestResult>;
 }
 
 /** A tool the chat can call; invoke throws on failure and the message becomes an error result. */

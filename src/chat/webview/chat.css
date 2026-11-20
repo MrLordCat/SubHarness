@@ -1953,6 +1953,11 @@ body {
 	background: var(--vscode-editorWidget-background, var(--vscode-input-background));
 }
 
+.question-card-title {
+	font-weight: 600;
+	margin-bottom: 2px;
+}
+
 .question-fieldset {
 	margin: 0;
 	padding: 0;

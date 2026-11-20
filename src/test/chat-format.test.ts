@@ -359,6 +359,15 @@ suite("Chat webview tool call descriptions", () => {
 		assert.deepStrictEqual(describeToolCall("ask_questions", { questions: [] }), { title: "ask_questions", detail: "{\"questions\":[]}" });
 	});
 
+	test("describes the tool list and the tool request", () => {
+		assert.deepStrictEqual(describeToolCall("list_tools", {}), { title: "Listed tools" });
+		assert.deepStrictEqual(describeToolCall("list_tools", { query: "mcp server" }), { title: "Listed tools matching \"mcp server\"" });
+		assert.deepStrictEqual(describeToolCall("list_tools", { query: "" }), { title: "Listed tools" });
+		assert.deepStrictEqual(describeToolCall("request_tools", { names: ["a"], reason: "x" }), { title: "Requested 1 tool" });
+		assert.deepStrictEqual(describeToolCall("request_tools", { names: ["a", "b"] }), { title: "Requested 2 tools" });
+		assert.deepStrictEqual(describeToolCall("request_tools", {}), { title: "request_tools", detail: "{}" });
+	});
+
 	test("survives malformed input", () => {
 		const circular: Record<string, unknown> = {};
 		circular.self = circular;

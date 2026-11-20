@@ -159,6 +159,8 @@ interface ClaudeConversationSession {
 	client: ClaudeAgentSession;
 	modelId: string;
 	runtimeKey: string;
+	/** Tools registered when the SDK session started; the MCP server cannot add more later. */
+	toolNames: string[];
 	conversationId?: string;
 	copilotTurnIndex?: number;
 	userSignatures: string[];
@@ -713,6 +715,12 @@ export function buildClaudeUsageLimits(
 	return items;
 }
 
+/** Test seams for the Claude CLI binary and the SDK session; production uses the defaults. */
+export interface ClaudeProviderDependencies {
+	resolveExecutable?: () => string | undefined;
+	createSessionClient?: (options: ConstructorParameters<typeof ClaudeAgentSession>[0]) => ClaudeAgentSession;
+}
+
 export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider, vscode.Disposable {
 	private readonly modelChanges = new vscode.EventEmitter<void>();
 	readonly onDidChangeLanguageModelChatInformation = this.modelChanges.event;
@@ -765,7 +773,8 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 	constructor(
 		private readonly extensionVersion: string,
 		private readonly logSink?: LlamaLogSink,
-		private readonly workspaceState?: vscode.Memento
+		private readonly workspaceState?: vscode.Memento,
+		private readonly dependencies: ClaudeProviderDependencies = {}
 	) {
 		this.loadDurableSessions();
 		this.loadPendingRollover();
@@ -1237,14 +1246,14 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		if (this.usageRefresh) {
 			return this.usageRefresh;
 		}
-		const executable = resolveClaudeCodeBinary();
+		const executable = this.resolveExecutable();
 		if (!this.isEnabled() || !executable) {
 			return;
 		}
 		const config = vscode.workspace.getConfiguration("llamacpp");
 		const contextTarget = resolveClaudeContextLength(resolveSharedContextLimit(config));
 		const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-		const probe = new ClaudeAgentSession({
+		const probe = this.createSessionClient({
 			model: resolveClaudeRuntimeModel(CLAUDE_SUBSCRIPTION_MODELS[0].id),
 			cwd,
 			executable,
@@ -1340,7 +1349,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 				return;
 			}
 		}
-		const executable = resolveClaudeCodeBinary();
+		const executable = this.resolveExecutable();
 		if (!executable) {
 			throw new Error("Claude Code CLI not found. Install and sign in to the official Anthropic Claude Code extension.");
 		}
@@ -1476,6 +1485,37 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		let restored = false;
 		let rolledOver = false;
 		let runtimeChanged: boolean | undefined;
+		let toolRestart: { previous: ClaudeConversationSession } | undefined;
+		// The SDK registers this.options.tools once per query; a widened catalog needs a new query.
+		if (session && options.modelOptions?._aabStrictTools === true) {
+			const startedTools = new Set(session.toolNames);
+			const added = nativeTools.filter(tool => !startedTools.has(tool.name)).length;
+			if (added > 0) {
+				const previous = session;
+				const resumed = previous.sdkSessionId !== undefined && this.durableSessionsEnabled();
+				session = resumed
+					? this.createSession({
+						modelId,
+						runtimeModelId,
+						contextTarget,
+						runtimeKey,
+						conversationId,
+						copilotTurnIndex,
+						userSignatures,
+						cwd,
+						executable,
+						effort,
+						tools: nativeTools,
+						safety,
+						resumeSessionId: previous.sdkSessionId,
+						resumeSessionAt: previous.client.stableAssistantMessageId ?? previous.resumeSessionAt,
+					})
+					: undefined;
+				restored = resumed;
+				toolRestart = { previous };
+				this.logSink?.log("claude.chat.tool_catalog_grew", { added, resumed });
+			}
+		}
 		let latestOnlyRecovery: {
 			reason: string;
 			input: SDKUserMessage;
@@ -1485,7 +1525,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		let recoveryReason: string | undefined;
 		let coldReplayTokens = 0;
 		let coldReplayDecision: ClaudeResumeFallbackDecision | undefined;
-		if (!session && conversationId && this.durableSessionsEnabled() && !providerSwitched) {
+		if (!session && !toolRestart && conversationId && this.durableSessionsEnabled() && !providerSwitched) {
 			const exact = this.durableSessions.get(this.durableSessionKey(modelId, conversationId));
 			if (exact?.quarantinedAt !== undefined) {
 				recoveryReason = `quarantined:${exact.quarantineReason ?? "unknown"}`;
@@ -1731,6 +1771,9 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			session.copilotTurnIndex = copilotTurnIndex;
 			session.lastUsedAt = Date.now();
 		}
+		if (toolRestart && toolRestart.previous.client.pendingCallIds.size === 0) {
+			this.removeSession(toolRestart.previous.key);
+		}
 
 		const sessionMode: ClaudeAgentTurnContext["sessionMode"] = latestOnlyRecovery || recoveryReason
 			? "resume-fallback"
@@ -1746,8 +1789,8 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		// a cold 200-500K-token first segment, and until now the live report had
 		// no way to tell "model switch" apart from "resume rebuild" or an
 		// unhealthy session.
-		let sessionMissReason: string | undefined;
-		if (!reused && !restored && !rolledOver) {
+		let sessionMissReason: string | undefined = toolRestart ? "tool_catalog_grew" : undefined;
+		if (!reused && !restored && !rolledOver && !toolRestart) {
 			const liveCandidates = [...this.sessions.values()].filter(candidate =>
 				candidate.modelId === modelId && candidate.conversationId === conversationId
 			);
@@ -2045,6 +2088,14 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		this.cacheKeepAliveChanges.dispose();
 	}
 
+	private resolveExecutable(): string | undefined {
+		return this.dependencies.resolveExecutable ? this.dependencies.resolveExecutable() : resolveClaudeCodeBinary();
+	}
+
+	private createSessionClient(options: ConstructorParameters<typeof ClaudeAgentSession>[0]): ClaudeAgentSession {
+		return this.dependencies.createSessionClient ? this.dependencies.createSessionClient(options) : new ClaudeAgentSession(options);
+	}
+
 	private createSession(value: {
 		modelId: string;
 		runtimeModelId: string;
@@ -2068,6 +2119,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			key,
 			modelId: value.modelId,
 			runtimeKey: value.runtimeKey,
+			toolNames: value.tools.map(tool => tool.name),
 			conversationId: value.conversationId,
 			copilotTurnIndex: value.copilotTurnIndex,
 			userSignatures: value.userSignatures,
@@ -2077,7 +2129,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			restoredFromDisk: value.resumeSessionId !== undefined,
 			client: undefined as unknown as ClaudeAgentSession,
 		};
-		session.client = new ClaudeAgentSession({
+		session.client = this.createSessionClient({
 			model: value.runtimeModelId,
 			cwd: value.cwd,
 			executable: value.executable,

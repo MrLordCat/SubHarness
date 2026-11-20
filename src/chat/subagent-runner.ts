@@ -154,7 +154,7 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<stri
 			token,
 			system: [options.system, SUBAGENT_INSTRUCTIONS].filter(Boolean).join("\n\n"),
 			// The composite then keeps the run off the parent's conversation, journal and native session.
-			modelOptions: { _copilotSubagentInvocationId: `chat-subagent-${options.callId}` },
+			modelOptions: { _copilotSubagentInvocationId: `chat-subagent-${options.callId}`, _aabStrictTools: true },
 		});
 		const text = report.trim();
 		if (!text && notices.length > 0) {

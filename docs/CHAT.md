@@ -63,6 +63,16 @@ the input as **Todos done/total**; click it for the whole list. With
 input and waits: pick an option, type an answer, or **Skip**. Sending a message
 instead also skips the questions, and the agent reads your message next.
 
+The agent can also look for tools you have not turned on. `list_tools` shows
+every tool the chat can offer, including disabled MCP and extension tools, and
+`request_tools` asks you to enable some of them: a card lists the tools with
+the agent's reason, all checked. **Enable** turns on the ones you leave
+checked; **Deny** turns on none. Enabled tools stay on, as if you had switched
+them on in the Tools picker. Codex, DeepSeek and other HTTP models can use them
+in the same answer. Claude, Coco and Cursor models get them with your next
+message; Claude then continues its session with the new tools instead of
+starting over.
+
 ## Memory
 
 The chat gives every model the bridge's shared memory, whatever the provider.

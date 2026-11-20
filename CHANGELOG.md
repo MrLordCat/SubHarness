@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.21.31 (development patch) - 2026-11-20
+
+- Added: the bridge chat agent can list every tool the chat offers, including
+  disabled ones (list_tools), and ask you to enable the ones it needs
+  (request_tools). You approve them in a card; approved tools stay on.
+- Fixed: in the bridge chat, Claude models now get tools enabled during a
+  conversation with the next message. The live session resumes as a fork with
+  the new tool list; before, it kept the tools it started with. Copilot chats
+  are unchanged.
+
 ## 1.21.30 (development patch) - 2026-11-20
 
 - Added: a memory panel in the bridge chat header. It lists this project's and

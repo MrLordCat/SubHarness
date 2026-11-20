@@ -12,7 +12,8 @@ import type { ChatSessionStore } from "./session-store";
 import { runChatSubagent } from "./subagent-runner";
 import { ASK_QUESTIONS_TOOL_NAME, TODO_TOOL_NAME } from "./tools/interaction-tools";
 import { SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
-import { groupModels, thinkingOptions } from "./shared/model-groups";
+import { LIST_TOOLS_TOOL_NAME, REQUEST_TOOLS_TOOL_NAME, shortToolDescription, toolsArriveMidTurn } from "./tools/tool-access-tools";
+import { groupModels, modelProvider, thinkingOptions } from "./shared/model-groups";
 import {
 	appendChatText,
 	CHAT_MEMORY_CONTENT_MAX_CHARS,
@@ -47,7 +48,7 @@ import type {
 } from "./shared/protocol";
 import type { ChatChangeTrackerLike, TurnSnapshot } from "./changes/change-tracker";
 import type { ChatToolSource } from "./tool-executor";
-import type { ChatToolConfirmation, SubagentRequest } from "./tools/types";
+import type { ChatToolConfirmation, ChatToolRequestResult, SubagentRequest } from "./tools/types";
 
 export interface ChatControllerDeps {
 	backend: Pick<vscode.LanguageModelChatProvider, "provideLanguageModelChatResponse" | "provideLanguageModelChatInformation">;
@@ -132,6 +133,7 @@ interface RunningTurn {
 	runtime: SessionRuntime;
 	sessionId: string;
 	message: ChatMessage;
+	model: vscode.LanguageModelChatInformation;
 	cts: vscode.CancellationTokenSource;
 	/** Parts [0, persistedParts) are already in the session log. */
 	persistedParts: number;
@@ -1046,6 +1048,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			runtime,
 			sessionId: runtime.meta.id,
 			message: assistant,
+			model,
 			cts: new vscode.CancellationTokenSource(),
 			persistedParts: 0,
 			buffer: undefined,
@@ -1148,6 +1151,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 							this._runSubagent(running, callId ?? randomUUID(), request, subagentTools, subagentToken),
 						askQuestions: (questions: ChatQuestion[], questionToken: vscode.CancellationToken) =>
 							this._askQuestions(running, callId, questions, questionToken),
+						listTools: () => this._toolGroups(),
+						requestTools: (names: string[], reason: string, requestToken: vscode.CancellationToken) =>
+							this._requestTools(running, callId, names, reason, requestToken),
 					}),
 				});
 			} finally {
@@ -1158,7 +1164,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		};
 		const subagentTools: ChatToolExecutor = {
 			get tools() {
-				return source.tools.filter(tool => tool.name !== SUBAGENT_TOOL_NAME && tool.name !== TODO_TOOL_NAME && tool.name !== ASK_QUESTIONS_TOOL_NAME);
+				return source.tools.filter(tool => tool.name !== SUBAGENT_TOOL_NAME
+					&& tool.name !== TODO_TOOL_NAME
+					&& tool.name !== ASK_QUESTIONS_TOOL_NAME
+					&& tool.name !== LIST_TOOLS_TOOL_NAME
+					&& tool.name !== REQUEST_TOOLS_TOOL_NAME);
 			},
 			invoke: (name, input, token, callId) => invoke(name, input, token, callId, true),
 		};
@@ -1182,7 +1192,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				system,
 				initialParts,
 				// Memory arrives in the history as <memory> blocks, so the HTTP provider must not add its own overlay.
-				modelOptions: { ...(thinking ? { reasoningEffort: thinking } : {}), _aabSkipSharedMemory: true },
+				modelOptions: { ...(thinking ? { reasoningEffort: thinking } : {}), _aabSkipSharedMemory: true, _aabStrictTools: true },
 				shouldYield: () => runtime.queued.length > 0,
 			});
 		} catch (error) {
@@ -1521,6 +1531,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		callId: string | undefined,
 		questions: ChatQuestion[],
 		token: vscode.CancellationToken,
+		options?: { title?: string; submitLabel?: string; skipLabel?: string },
 	): Promise<ChatQuestionAnswer[] | undefined> {
 		if (token.isCancellationRequested || this._disposed) {
 			return Promise.resolve(undefined);
@@ -1532,6 +1543,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			messageId: running.message.id,
 			callId: callId ?? "",
 			questions,
+			...(options?.title === undefined ? {} : { title: options.title }),
+			...(options?.submitLabel === undefined ? {} : { submitLabel: options.submitLabel }),
+			...(options?.skipLabel === undefined ? {} : { skipLabel: options.skipLabel }),
 		};
 		return new Promise<ChatQuestionAnswer[] | undefined>(resolve => {
 			const subscriptions: vscode.Disposable[] = [];
@@ -1564,6 +1578,76 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 
 	private _toolGroups(): ChatToolGroup[] {
 		return this._deps.tools.groups?.() ?? [];
+	}
+
+	/** Asks the user to enable tools the agent requested; only candidates reach the card. */
+	private async _requestTools(
+		running: RunningTurn,
+		callId: string | undefined,
+		names: readonly string[],
+		reason: string,
+		token: vscode.CancellationToken,
+	): Promise<ChatToolRequestResult> {
+		const availableFrom = toolsArriveMidTurn(modelProvider(running.model)) ? "nextRequest" : "nextMessage";
+		const known = new Map<string, { label: string; note?: string; description: string; enabled: boolean }>();
+		for (const group of this._toolGroups()) {
+			for (const tool of group.tools) {
+				if (!known.has(tool.name)) {
+					known.set(tool.name, {
+						label: group.label,
+						...(group.note === undefined ? {} : { note: group.note }),
+						description: tool.description,
+						enabled: tool.enabled,
+					});
+				}
+			}
+		}
+		const unknown: string[] = [];
+		const alreadyEnabled: string[] = [];
+		const candidates: string[] = [];
+		for (const name of new Set(names)) {
+			const tool = known.get(name);
+			if (!tool) {
+				unknown.push(name);
+			} else if (tool.enabled) {
+				alreadyEnabled.push(name);
+			} else {
+				candidates.push(name);
+			}
+		}
+		if (candidates.length === 0) {
+			return { enabled: [], declined: [], alreadyEnabled, unknown, dismissed: false, availableFrom };
+		}
+		const notes = [...new Set(candidates.flatMap(name => known.get(name)?.note === undefined ? [] : [known.get(name)!.note!]))];
+		const count = candidates.length;
+		const answers = await this._askQuestions(running, callId, [{
+			header: "Tools",
+			question: `Enable ${count} tool${count === 1 ? "" : "s"} for this chat?`,
+			message: [`Reason: ${reason}`, notes.join(" ")].filter(line => line.length > 0).join("\n"),
+			options: candidates.map(name => {
+				const tool = known.get(name)!;
+				return { label: name, description: `${tool.label}: ${shortToolDescription(tool.description)}`, checked: true };
+			}),
+			multiSelect: true,
+			allowFreeformInput: false,
+		}], token, { title: "The agent asks to enable tools", submitLabel: "Enable", skipLabel: "Deny" });
+		if (answers === undefined) {
+			return { enabled: [], declined: candidates, alreadyEnabled, unknown, dismissed: true, availableFrom };
+		}
+		const selected = answers.find(answer => answer.header === "Tools")?.selected ?? [];
+		const chosen = selected.filter((name, index) => candidates.includes(name) && selected.indexOf(name) === index);
+		let enabled = chosen;
+		if (chosen.length > 0) {
+			try {
+				await this._deps.tools.setEnabled?.(chosen, true);
+			} catch (error) {
+				this._log("chat.tools.enable_failed", { message: errorMessage(error) });
+				enabled = [];
+			}
+		}
+		this._broadcast({ type: "tools", tools: this._toolGroups() });
+		this._log("chat.tool.request_tools", { requested: names.length, enabled: enabled.length });
+		return { enabled, declined: candidates.filter(name => !chosen.includes(name)), alreadyEnabled, unknown, dismissed: false, availableFrom };
 	}
 
 	private async _selectModel(modelId: string): Promise<void> {

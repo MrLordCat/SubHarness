@@ -40,18 +40,24 @@ interface DerivedModel {
 	entryName: string;
 }
 
-function identify(model: ModelInfoLike): { provider: string; name: string } {
+/** The provider label groupModels puts this model under. */
+export function modelProvider(model: ModelInfoLike): string {
 	const suffixed = NAME_SUFFIX.exec(model.name);
 	if (suffixed) {
-		return { provider: suffixed[2], name: suffixed[1] };
+		return suffixed[2];
 	}
 	const separator = model.id.indexOf("::");
 	if (separator > 0) {
 		const prefix = model.id.slice(0, separator);
 		const alias = PROVIDER_ALIASES[prefix.toLowerCase()];
-		return { provider: alias ?? prefix.charAt(0).toUpperCase() + prefix.slice(1), name: model.name };
+		return alias ?? prefix.charAt(0).toUpperCase() + prefix.slice(1);
 	}
-	return { provider: "Other", name: model.name };
+	return "Other";
+}
+
+function identify(model: ModelInfoLike): { provider: string; name: string } {
+	const suffixed = NAME_SUFFIX.exec(model.name);
+	return { provider: modelProvider(model), name: suffixed ? suffixed[1] : model.name };
 }
 
 function compareProviders(a: string, b: string): number {

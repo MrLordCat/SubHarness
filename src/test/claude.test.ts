@@ -35,6 +35,7 @@ import {
 	resolveClaudeContextLength,
 	resolveClaudeCacheKeepAliveDecision,
 	resolveClaudeRuntimeModel,
+	ClaudeChatModelProvider,
 } from "../claude/claude-provider";
 import { buildClaudeModelAvailability } from "../claude/availability";
 import { resolveClaudeKeepAliveSettings } from "../claude/keepalive-settings";
@@ -49,6 +50,7 @@ import {
 	isClaudeVsCodeToolName,
 	parseClaudeAssistantUsage,
 	resolveClaudeCodeBinary,
+	type ClaudeAgentSessionOptions,
 } from "../claude/app-server-client";
 
 type UsageSnapshot = Parameters<typeof buildClaudeUsageLimits>[0];
@@ -1212,4 +1214,179 @@ suite("Claude durable session state", () => {
         test("does not throw when workspace state is unavailable", async () => {
                 await clearPersistedClaudeSessionState(undefined);
         });
+});
+
+class FakeClaudeMemento implements vscode.Memento {
+	private readonly values = new Map<string, unknown>();
+
+	get<T>(key: string): T | undefined;
+	get<T>(key: string, defaultValue: T): T;
+	get<T>(key: string, defaultValue?: T): T | undefined {
+		return (this.values.has(key) ? this.values.get(key) : defaultValue) as T | undefined;
+	}
+
+	update(key: string, value: unknown): Thenable<void> {
+		this.values.set(key, value);
+		return Promise.resolve();
+	}
+
+	keys(): readonly string[] {
+		return [...this.values.keys()];
+	}
+}
+
+class FakeClaudeToolSession {
+	readonly options: ClaudeAgentSessionOptions;
+	readonly pendingCallIds = new Map<string, unknown>();
+	readonly isStreamHealthy = true;
+	readonly hasActiveTurn = false;
+	isKeepAliveTurnActive = false;
+	canRetryLastTurn = false;
+	stableAssistantMessageId: string | undefined;
+	sdkSessionId: string | undefined;
+	disposed = false;
+
+	constructor(options: ClaudeAgentSessionOptions) {
+		this.options = options;
+	}
+
+	async runUserTurn(_input: unknown, progress: vscode.Progress<vscode.LanguageModelResponsePart>): Promise<void> {
+		this.sdkSessionId = `${this.options.resumeSessionId ?? "claude-new"}-${this.options.tools.length}`;
+		this.options.callbacks.onSessionId?.(this.sdkSessionId);
+		this.stableAssistantMessageId = `${this.sdkSessionId}-answer`;
+		progress.report(new vscode.LanguageModelTextPart("ok"));
+	}
+
+	hasPendingCall(): boolean {
+		return false;
+	}
+
+	resumeToolResults(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	annotateLastTurnContext(): void {
+		// The provider records resume-fallback diagnostics here.
+	}
+
+	dispose(): void {
+		this.disposed = true;
+	}
+}
+
+function claudeUser(text: string): vscode.LanguageModelChatMessage {
+	return new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, [new vscode.LanguageModelTextPart(text)]);
+}
+
+function claudeAssistantText(text: string): vscode.LanguageModelChatMessage {
+	return new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.Assistant, [new vscode.LanguageModelTextPart(text)]);
+}
+
+function claudeTool(name: string): vscode.LanguageModelChatTool {
+	return { name, description: `${name} tool`, inputSchema: { type: "object", properties: {} } };
+}
+
+function claudeChatFixture(): {
+	provider: ClaudeChatModelProvider;
+	clients: FakeClaudeToolSession[];
+	events: string[];
+	send(messages: readonly vscode.LanguageModelChatRequestMessage[], tools: readonly vscode.LanguageModelChatTool[], strict?: boolean): Promise<void>;
+} {
+	const clients: FakeClaudeToolSession[] = [];
+	const events: string[] = [];
+	const provider = new ClaudeChatModelProvider("test", {
+		log: (event: string) => { events.push(event); },
+		logError: () => undefined,
+		shouldLogStreamChunks: () => false,
+	}, new FakeClaudeMemento(), {
+		resolveExecutable: () => "claude-test",
+		createSessionClient: options => {
+			const client = new FakeClaudeToolSession(options);
+			clients.push(client);
+			return client as unknown as ClaudeAgentSession;
+		},
+	});
+	const internals = provider as unknown as { lastSubscriptionUsage?: unknown; lastSubscriptionUsageAt: number };
+	internals.lastSubscriptionUsage = { subscription_type: "pro", rate_limits_available: false };
+	internals.lastSubscriptionUsageAt = Date.now();
+	const tokenSource = new vscode.CancellationTokenSource();
+	const model = {
+		id: encodeClaudeModelId(CLAUDE_SUBSCRIPTION_MODELS[0].id),
+		name: "Opus 5 (Claude)",
+		family: "claude",
+		version: "1",
+		maxInputTokens: 200_000,
+		maxOutputTokens: 8_000,
+		capabilities: { toolCalling: true },
+	} as unknown as vscode.LanguageModelChatInformation;
+	return {
+		provider,
+		clients,
+		events,
+		send: async (messages, tools, strict = false) => {
+			await provider.provideLanguageModelChatResponse(model, messages, {
+				toolMode: vscode.LanguageModelChatToolMode.Auto,
+				tools,
+				modelOptions: {
+					_copilotConversationId: "claude-tools-chat",
+					...(strict ? { _aabStrictTools: true } : {}),
+				},
+			}, { report: () => undefined }, tokenSource.token);
+		},
+	};
+}
+
+suite("Claude tool catalog growth", () => {
+	test("a strict new turn with an added tool restarts the live session from its SDK id", async () => {
+		const fixture = claudeChatFixture();
+		try {
+			await fixture.send([claudeUser("FIRST")], [claudeTool("read_file")]);
+			assert.strictEqual(fixture.clients.length, 1);
+			const first = fixture.clients[0];
+
+			await fixture.send([claudeUser("FIRST"), claudeAssistantText("ok"), claudeUser("SECOND")],
+				[claudeTool("read_file"), claudeTool("search_repo")], true);
+
+			assert.strictEqual(fixture.clients.length, 2, "a widened catalog starts a new SDK query");
+			const second = fixture.clients[1];
+			assert.strictEqual(second.options.resumeSessionId, first.sdkSessionId);
+			assert.strictEqual(second.options.resumeSessionAt, first.stableAssistantMessageId);
+			assert.deepStrictEqual(second.options.tools.map(tool => tool.name), ["read_file", "search_repo"]);
+			assert.strictEqual(first.disposed, true, "the replaced live session is disposed");
+			assert.ok(fixture.events.includes("claude.chat.tool_catalog_grew"));
+		} finally {
+			fixture.provider.dispose();
+		}
+	});
+
+	test("without the marker the live session keeps its original catalog", async () => {
+		const fixture = claudeChatFixture();
+		try {
+			await fixture.send([claudeUser("FIRST")], [claudeTool("read_file")]);
+			await fixture.send([claudeUser("FIRST"), claudeAssistantText("ok"), claudeUser("SECOND")],
+				[claudeTool("read_file"), claudeTool("search_repo")]);
+
+			assert.strictEqual(fixture.clients.length, 1);
+			assert.strictEqual(fixture.clients[0].disposed, false);
+		} finally {
+			fixture.provider.dispose();
+		}
+	});
+
+	test("the marker alone does not restart a session whose catalog covers the turn", async () => {
+		const fixture = claudeChatFixture();
+		try {
+			await fixture.send([claudeUser("FIRST")], [claudeTool("read_file"), claudeTool("search_repo")]);
+			await fixture.send([claudeUser("FIRST"), claudeAssistantText("ok"), claudeUser("SECOND")],
+				[claudeTool("read_file")], true);
+			assert.strictEqual(fixture.clients.length, 1, "a removed tool does not trigger a restart");
+
+			await fixture.send([claudeUser("FIRST"), claudeAssistantText("ok"), claudeUser("SECOND"), claudeAssistantText("ok"), claudeUser("THIRD")],
+				[claudeTool("read_file"), claudeTool("search_repo")], true);
+			assert.strictEqual(fixture.clients.length, 1, "a tool the session already registered needs no restart");
+			assert.strictEqual(fixture.clients[0].disposed, false);
+		} finally {
+			fixture.provider.dispose();
+		}
+	});
 });

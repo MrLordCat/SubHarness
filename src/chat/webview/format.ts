@@ -181,6 +181,18 @@ export function describeToolCall(name: string, input: unknown): ToolCallDescript
 				const count = questions.length;
 				return { title: `Asked ${count} question${count === 1 ? "" : "s"}` };
 			}
+			case "list_tools": {
+				const query = textField(record, "query");
+				return query === undefined ? { title: "Listed tools" } : { title: `Listed tools matching "${query}"` };
+			}
+			case "request_tools": {
+				const names = record.names;
+				if (!Array.isArray(names) || names.length === 0) {
+					return fallbackDescription(name, input);
+				}
+				const count = names.length;
+				return { title: `Requested ${count} tool${count === 1 ? "" : "s"}` };
+			}
 			case "file_search": {
 				const query = textField(record, "query");
 				return query === undefined ? fallbackDescription(name, input) : { title: `Searched files for ${query}` };

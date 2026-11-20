@@ -8,8 +8,8 @@ interface QuestionCardProps {
 
 function initialSelection(request: ChatQuestionRequest): string[][] {
 	return request.questions.map(question => {
-		const recommended = (question.options ?? []).filter(option => option.recommended).map(option => option.label);
-		return question.multiSelect === true ? recommended : recommended.slice(0, 1);
+		const preselected = (question.options ?? []).filter(option => option.recommended || option.checked).map(option => option.label);
+		return question.multiSelect === true ? preselected : preselected.slice(0, 1);
 	});
 }
 
@@ -50,7 +50,8 @@ export function QuestionCard({ request, onAnswer }: QuestionCardProps) {
 	}, []);
 
 	return (
-		<div class="approval-card question-card" role="group" aria-label="Questions from the agent">
+		<div class="approval-card question-card" role="group" aria-label={request.title ?? "Questions from the agent"}>
+			{request.title ? <div class="question-card-title">{request.title}</div> : null}
 			{request.questions.map((question, index) => {
 				const options = question.options ?? [];
 				const freeformAllowed = question.allowFreeformInput !== false;
@@ -100,8 +101,8 @@ export function QuestionCard({ request, onAnswer }: QuestionCardProps) {
 				);
 			})}
 			<div class="approval-actions">
-				<button type="button" class="approval-allow" disabled={pending} onClick={submit}>Submit</button>
-				<button type="button" class="approval-deny" disabled={pending} onClick={skip}>Skip</button>
+				<button type="button" class="approval-allow" disabled={pending} onClick={submit}>{request.submitLabel ?? "Submit"}</button>
+				<button type="button" class="approval-deny" disabled={pending} onClick={skip}>{request.skipLabel ?? "Skip"}</button>
 			</div>
 		</div>
 	);

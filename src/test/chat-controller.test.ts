@@ -31,6 +31,7 @@ import {
 import { createChatToolSource, DENIED_TOOL_RESULT, type ChatToolSource } from "../chat/tool-executor";
 import { ASK_QUESTIONS_TOOL_NAME, createAskQuestionsTool, createTodoTool, TODO_TOOL_NAME } from "../chat/tools/interaction-tools";
 import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
+import { createToolAccessTools, LIST_TOOLS_TOOL_NAME, REQUEST_TOOLS_TOOL_NAME } from "../chat/tools/tool-access-tools";
 import type { ChatTool } from "../chat/tools/types";
 
 function withThinking(
@@ -370,14 +371,50 @@ function guardedCatalog(): { source: ChatToolSource; runs: unknown[]; toggles: A
 	return { source, runs, toggles };
 }
 
-/** A catalog with the two planning tools, which the controller wires to the chat. */
-function planningCatalog(): ChatToolSource {
-	const tools: ChatTool[] = [createTodoTool(), createAskQuestionsTool()];
-	return createChatToolSource({
-		enabledTools: () => tools,
-		groups: () => [],
-		setEnabled: async () => undefined,
-	});
+interface PlanningCatalog {
+	source: ChatToolSource;
+	toggles: Array<{ names: readonly string[]; enabled: boolean }>;
+}
+
+/** The planning and tool-access tools plus a disabled external tool, which the controller wires to the chat. */
+function planningCatalog(): PlanningCatalog {
+	const toggles: Array<{ names: readonly string[]; enabled: boolean }> = [];
+	let externalEnabled = false;
+	const external: ChatTool = {
+		name: "mcp_probe",
+		description: "Reads a probe from an MCP server. Requires the server.",
+		inputSchema: { type: "object", properties: {} },
+		group: "ext:mcp",
+		readOnly: true,
+		invoke: async () => "probed",
+	};
+	const planning: ChatTool[] = [createTodoTool(), createAskQuestionsTool(), ...createToolAccessTools()];
+	const groups = (): ChatToolGroup[] => [
+		{
+			id: "planning",
+			label: "Planning and questions",
+			tools: planning.map(tool => ({ name: tool.name, description: tool.description, enabled: true })),
+		},
+		{
+			id: "ext:mcp",
+			label: "MCP servers",
+			note: "Run through VS Code, which may ask for confirmation in a dialog.",
+			tools: [{ name: external.name, description: external.description, enabled: externalEnabled }],
+		},
+	];
+	return {
+		toggles,
+		source: createChatToolSource({
+			enabledTools: () => [...planning, ...(externalEnabled ? [external] : [])],
+			groups,
+			setEnabled: async (names, enabled) => {
+				toggles.push({ names, enabled });
+				if (names.includes(external.name)) {
+					externalEnabled = enabled;
+				}
+			},
+		}),
+	};
 }
 
 /** Records the controller's calls in one log shared with the tools, so the order is visible. */
@@ -1951,7 +1988,7 @@ suite("chat controller", () => {
 			progress => progress.report(new vscode.LanguageModelToolCallPart("call-q", ASK_QUESTIONS_TOOL_NAME, askInput)),
 			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
 		]);
-		const current = createHarness(root, backend, planningCatalog());
+		const current = createHarness(root, backend, planningCatalog().source);
 		harness = current;
 		current.webview.receive({ type: "send", text: "Plan it" });
 		await waitFor(() => current.webview.ofType("questions").length === 1, "question request");
@@ -1984,7 +2021,7 @@ suite("chat controller", () => {
 			})),
 			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
 		]);
-		const current = createHarness(root, backend, planningCatalog());
+		const current = createHarness(root, backend, planningCatalog().source);
 		harness = current;
 		current.webview.receive({ type: "send", text: "Plan it" });
 		await waitFor(() => current.webview.ofType("questions").length === 1, "question request");
@@ -2004,7 +2041,7 @@ suite("chat controller", () => {
 			})),
 			progress => progress.report(new vscode.LanguageModelTextPart("Using the typed hint")),
 		]);
-		const current = createHarness(root, backend, planningCatalog());
+		const current = createHarness(root, backend, planningCatalog().source);
 		harness = current;
 		current.webview.receive({ type: "send", text: "Plan it" });
 		await waitFor(() => current.webview.ofType("questions").length === 1, "question request");
@@ -2024,7 +2061,7 @@ suite("chat controller", () => {
 				questions: [{ header: "Approach", question: "Which one?" }],
 			})),
 		]);
-		const current = createHarness(root, backend, planningCatalog());
+		const current = createHarness(root, backend, planningCatalog().source);
 		harness = current;
 		current.webview.receive({ type: "send", text: "Plan it" });
 		await waitFor(() => current.webview.ofType("questions").length === 1, "question request");
@@ -2042,7 +2079,7 @@ suite("chat controller", () => {
 				questions: [{ header: "Approach", question: "Which one?" }],
 			})),
 		]);
-		const current = createHarness(root, backend, planningCatalog());
+		const current = createHarness(root, backend, planningCatalog().source);
 		harness = current;
 		current.webview.receive({ type: "send", text: "Plan it" });
 		await waitFor(() => current.webview.ofType("questions").length === 1, "question request");
@@ -2052,10 +2089,129 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(current.webview.ofType("init")[0].questions?.map(question => question.id), [request.id]);
 	});
 
-	test("a subagent gets neither planning tool", async () => {
+	test("request_tools asks for a disabled tool and enables it for the next request", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-r", REQUEST_TOOLS_TOOL_NAME, {
+				names: ["mcp_probe", "mcp_missing"],
+				reason: "Need the probe",
+			})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const catalog = planningCatalog();
+		const current = createHarness(root, backend, catalog.source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Look deeper" });
+		await waitFor(() => current.webview.ofType("questions").length === 1, "tool request");
+		const request = current.webview.ofType("questions")[0].request;
+		assert.strictEqual(request.title, "The agent asks to enable tools");
+		assert.strictEqual(request.submitLabel, "Enable");
+		assert.strictEqual(request.skipLabel, "Deny");
+		assert.deepStrictEqual(request.questions.map(question => question.header), ["Tools"]);
+		const question = request.questions[0];
+		assert.strictEqual(question.question, "Enable 1 tool for this chat?");
+		assert.ok(question.message?.startsWith("Reason: Need the probe"));
+		assert.ok(question.message?.includes("Run through VS Code, which may ask for confirmation in a dialog."));
+		assert.strictEqual(question.multiSelect, true);
+		assert.strictEqual(question.allowFreeformInput, false);
+		assert.deepStrictEqual(question.options, [{
+			label: "mcp_probe",
+			description: "MCP servers: Reads a probe from an MCP server",
+			checked: true,
+		}]);
+
+		current.webview.receive({ type: "answerQuestions", id: request.id, answers: [{ header: "Tools", selected: ["mcp_probe"] }] });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(catalog.toggles, [{ names: ["mcp_probe"], enabled: true }]);
+		assert.ok(current.webview.ofType("tools").some(message => message.tools.some(group => group.id === "ext:mcp" && group.tools[0].enabled === true)));
+		const result = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "toolResult" && part.callId === "call-r");
+		if (result?.kind !== "toolResult") {
+			throw new Error("expected a tool result");
+		}
+		assert.strictEqual(result.isError, false);
+		assert.strictEqual(result.text, "Enabled: mcp_probe. They are available from your next request.\nUnknown tools (check list_tools): mcp_missing.");
+		const names = (backend.requests[1].options.tools ?? []).map(tool => tool.name);
+		assert.ok(names.includes("mcp_probe"), "the next request of the same turn offers the enabled tool");
+		assert.strictEqual(backend.requests[0].options.modelOptions?._aabStrictTools, true);
+		assert.strictEqual(backend.requests[1].options.modelOptions?._aabStrictTools, true);
+	});
+
+	test("request_tools tells a Claude turn its new tools wait for the next user message", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-r", REQUEST_TOOLS_TOOL_NAME, {
+				names: ["mcp_probe"],
+				reason: "Need the probe",
+			})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const catalog = planningCatalog();
+		const current = createHarness(root, backend, catalog.source);
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		current.webview.receive({ type: "selectModel", modelId: "claude::smart" });
+		await waitFor(() => current.webview.ofType("models").some(message => message.selectedModelId === "claude::smart"), "model selection");
+		current.webview.receive({ type: "send", text: "Look deeper" });
+		await waitFor(() => current.webview.ofType("questions").length === 1, "tool request");
+		current.webview.receive({ type: "answerQuestions", id: current.webview.ofType("questions")[0].request.id, answers: [{ header: "Tools", selected: ["mcp_probe"] }] });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		const result = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "toolResult" && part.callId === "call-r");
+		if (result?.kind !== "toolResult") {
+			throw new Error("expected a tool result");
+		}
+		assert.strictEqual(result.text, "Enabled: mcp_probe. This model keeps its tool list for the current answer, so they become available with the user's next message; finish what you can now and say which step needs them.");
+		assert.strictEqual(backend.requests[1].options.modelOptions?._aabStrictTools, true);
+	});
+
+	test("denying request_tools leaves the tools off and tells the agent so", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-r", REQUEST_TOOLS_TOOL_NAME, {
+				names: ["mcp_probe"],
+				reason: "Need the probe",
+			})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const catalog = planningCatalog();
+		const current = createHarness(root, backend, catalog.source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Look deeper" });
+		await waitFor(() => current.webview.ofType("questions").length === 1, "tool request");
+		current.webview.receive({ type: "answerQuestions", id: current.webview.ofType("questions")[0].request.id });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(catalog.toggles, []);
+		assert.deepStrictEqual(current.webview.ofType("tools"), []);
+		const result = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "toolResult" && part.callId === "call-r");
+		if (result?.kind !== "toolResult") {
+			throw new Error("expected a tool result");
+		}
+		assert.strictEqual(result.text, "The user denied the request. Continue with the enabled tools, or explain in your reply what you need.\nDeclined by the user: mcp_probe.");
+	});
+
+	test("request_tools for an enabled tool asks nothing", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-r", REQUEST_TOOLS_TOOL_NAME, {
+				names: ["ask_questions"],
+				reason: "Ask the user",
+			})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const catalog = planningCatalog();
+		const current = createHarness(root, backend, catalog.source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Ask" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(current.webview.ofType("questions"), []);
+		assert.deepStrictEqual(catalog.toggles, []);
+		const result = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "toolResult" && part.callId === "call-r");
+		if (result?.kind !== "toolResult") {
+			throw new Error("expected a tool result");
+		}
+		assert.strictEqual(result.text, "Already enabled: ask_questions.");
+	});
+
+	test("a subagent gets neither planning nor tool-access tools", async () => {
 		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
 		const source = createChatToolSource({
-			enabledTools: () => [subagent, createTodoTool(), createAskQuestionsTool()],
+			enabledTools: () => [subagent, createTodoTool(), createAskQuestionsTool(), ...createToolAccessTools()],
 			groups: () => [],
 			setEnabled: async () => undefined,
 		});
@@ -2072,6 +2228,9 @@ suite("chat controller", () => {
 		assert.ok(!names.includes(SUBAGENT_TOOL_NAME));
 		assert.ok(!names.includes(TODO_TOOL_NAME));
 		assert.ok(!names.includes(ASK_QUESTIONS_TOOL_NAME));
+		assert.ok(!names.includes(LIST_TOOLS_TOOL_NAME));
+		assert.ok(!names.includes(REQUEST_TOOLS_TOOL_NAME));
+		assert.ok(backend.requests.every(request => request.options.modelOptions?._aabStrictTools === true), "main, subagent and continuation turns carry the marker");
 	});
 
 	test("tool toggles reach the catalog and every webview gets the new groups", async () => {
