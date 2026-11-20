@@ -39,11 +39,11 @@ suite("Snowflake Coco provider", () => {
 			await provider.refreshStatus();
 			assert.strictEqual(probes, 1, "a fresh catalog must be reused");
 			await provider.refreshStatus(true);
-			assert.strictEqual(probes, 2, "manual recheck must bypass the catalog TTL");
+			assert.strictEqual(probes, 2, "manual recheck must bypass the recorded catalog");
 			// Context-limit changes re-advertise models; they must not start another CLI process.
 			provider.refreshLanguageModelChatInformation();
 			await provider.refreshStatus();
-			assert.strictEqual(probes, 2, "an unchanged CLI and connection keep the fresh catalog");
+			assert.strictEqual(probes, 2, "an unchanged CLI and connection keep the recorded catalog");
 		} finally { subscription.dispose(); provider.dispose(); }
 	});
 
@@ -245,7 +245,7 @@ suite("Snowflake Coco provider", () => {
 			assert.strictEqual(probes, 2); assert.strictEqual(disposed, 1);
 			resolveSession(sessionResult()); await Promise.all([first, second]);
 			await provider.refreshStatus();
-			assert.strictEqual(probes, 2, "completion must restore the cache TTL after repeated refreshes");
+			assert.strictEqual(probes, 2, "a recorded discovery must not run again automatically");
 		} finally { provider.dispose(); source.dispose(); }
 	});
 

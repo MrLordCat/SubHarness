@@ -56,6 +56,8 @@ export class CocoAcpClient {
 	private nextId = 1;
 	private buffer = "";
 	private closed = false;
+	private closing = false;
+	private stderrTailText = "";
 	private readonly exit: Promise<void>;
 	private promptFailure?: string;
 	private promptActive = false;
@@ -87,7 +89,8 @@ export class CocoAcpClient {
 		this.exit = new Promise(resolve => { this.child.once("close", () => resolve()); });
 		this.child.stdout.setEncoding("utf8");
 		this.child.stdout.on("data", (chunk: string) => this.accept(chunk));
-		this.child.stderr.resume();
+		this.child.stderr.setEncoding("utf8");
+		this.child.stderr.on("data", (chunk: string) => { this.stderrTailText = (this.stderrTailText + chunk).slice(-2_048); });
 		this.child.stdin.on("error", error => this.failAll(new Error(`Coco IPC failed: ${error.message}`)));
 		this.child.on("error", error => { this.closed = true; this.failAll(new Error(`Cannot start Coco CLI: ${error.message}`)); });
 		// stdout may still contain the final reply when exit fires; close follows its drain.
@@ -135,6 +138,21 @@ export class CocoAcpClient {
 	}
 	async waitForExit(): Promise<void> { await this.exit; }
 	get isClosed(): boolean { return this.closed; }
+	get stderrTail(): string { return this.stderrTailText; }
+
+	/** Ends stdin, waits for the CLI to exit, then falls back to dispose(). */
+	async close(graceMs: number): Promise<void> {
+		if (this.closed || this.closing) {
+			return;
+		}
+		this.closing = true;
+		try { this.child.stdin.end(); } catch { /* dispose below */ }
+		const exited = this.child.exitCode !== null || this.child.signalCode !== null
+			? Promise.resolve()
+			: new Promise<void>(resolve => { this.child.once("close", () => resolve()); });
+		await Promise.race([exited, new Promise<void>(resolve => setTimeout(resolve, Math.max(0, graceMs)))]);
+		this.dispose();
+	}
 
 	dispose(): void {
 		if (this.closed) {
@@ -169,7 +187,7 @@ export class CocoAcpClient {
 	}
 
 	private send(message: JsonObject): void {
-		if (!this.closed && this.child.stdin.writable) {
+		if (!this.closed && !this.closing && this.child.stdin.writable) {
 			this.child.stdin.write(`${JSON.stringify(message)}\n`);
 		}
 	}

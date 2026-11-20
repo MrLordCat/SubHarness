@@ -19,14 +19,15 @@ import { parseCocoContextUsage } from "./usage-adapter";
 import { CocoSessionStore, cocoUserAnchors } from "./session-store";
 import { CocoHistoryArchive } from "./history-transfer";
 import { CocoTurnMetrics, type CocoLiveTurn, type CocoRecordedUsage } from "./turn-metrics";
+import { classifyCocoDiscoveryError, cocoDiscoveryFailureSummary, redactCocoDiagnostic, type CocoDiscoveryFailureKind } from "./discovery-diagnostics";
 import type { ProviderRuntimeMetrics } from "../provider-metrics";
 
-/**
- * Every background check starts its own CLI process, and every process repeats the CLI's sign-in work:
- * Cortex 1.44 opens a browser OAuth flow for each one. Checks stay rare, and native sessions refresh the catalog.
- */
-const DISCOVERY_RETRY_MS = 5 * 60_000;
-const DISCOVERY_CONNECTED_TTL_MS = 6 * 60 * 60_000;
+/** Automatic checks run once per source; only a source without a recorded catalog starts a CLI process. */
+const COCO_MANUAL_DISCOVERY_TIMEOUT_MS = 180_000;
+const COCO_SIGN_IN_HINT_MS = 10_000;
+const COCO_DISCOVERY_CLOSE_GRACE_MS = 5_000;
+const COCO_CATALOG_SOURCES = 8;
+export const COCO_CATALOG_KEY = "llamacpp.coco.catalog.v1";
 /** A native turn that ends after reasoning alone is asked to continue at most this often. */
 const COCO_EMPTY_TURN_NUDGES = 2;
 const COCO_EMPTY_TURN_NUDGE = "Your previous reply ended after reasoning, without visible text or a tool call, so VS Code Chat received an empty response. "
@@ -51,9 +52,22 @@ export interface CocoProviderDependencies {
 	createClient?: (...args: ConstructorParameters<typeof CocoAcpClient>) => CocoAcpClient;
 	createSessionClient?: (executable: string, cwd: string, connection: string | undefined, model: string, handlers: CocoAcpHandlers) => CocoSessionClient;
 	discoveryTimeoutMs?: number;
+	signInHintMs?: number;
 	state?: vscode.Memento;
+	catalogState?: vscode.Memento;
 	storageRoot?: string;
 	log?: (event: string, data: Record<string,unknown>) => void;
+}
+
+export interface CocoCatalogRecord {
+	source: string;
+	models: CocoModel[];
+	thinking?: CocoThinkingConfiguration;
+	imageInput: boolean;
+	state: "connected" | "unavailable";
+	summary: string;
+	modelCount: number;
+	checkedAt: number;
 }
 
 interface CocoActiveTurn {
@@ -103,6 +117,43 @@ export function listCocoConnections(): string[] {
 	}
 }
 
+function parseCocoCatalogThinking(value: unknown): CocoThinkingConfiguration | undefined {
+	if (!value || typeof value !== "object") {
+		return undefined;
+	}
+	const config = value as Partial<CocoThinkingConfiguration>;
+	if (typeof config.configId !== "string" || !config.configId || typeof config.currentValue !== "string" || !Array.isArray(config.options)) {
+		return undefined;
+	}
+	const options = config.options.filter(option => option && typeof option.value === "string" && option.value
+		&& typeof option.label === "string" && typeof option.description === "string");
+	return options.length ? { configId: config.configId, currentValue: config.currentValue, options } : undefined;
+}
+
+function parseCocoCatalogRecords(value: unknown): CocoCatalogRecord[] {
+	const records: CocoCatalogRecord[] = [];
+	for (const item of Array.isArray(value) ? value : []) {
+		if (!item || typeof item !== "object") {
+			continue;
+		}
+		const record = item as Partial<CocoCatalogRecord>;
+		if (typeof record.source !== "string" || !record.source
+			|| (record.state !== "connected" && record.state !== "unavailable")
+			|| typeof record.summary !== "string" || typeof record.checkedAt !== "number" || !Number.isFinite(record.checkedAt)
+			|| typeof record.modelCount !== "number" || !Number.isSafeInteger(record.modelCount) || record.modelCount < 0) {
+			continue;
+		}
+		const models = (Array.isArray(record.models) ? record.models : []).filter((model): model is CocoModel =>
+			Boolean(model) && typeof model.id === "string" && model.id.length > 0 && typeof model.name === "string");
+		records.push({
+			source: record.source, models, thinking: parseCocoCatalogThinking(record.thinking),
+			imageInput: record.imageInput === true, state: record.state, summary: record.summary,
+			modelCount: record.modelCount, checkedAt: record.checkedAt,
+		});
+	}
+	return records;
+}
+
 export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, vscode.Disposable {
 	private readonly changes = new vscode.EventEmitter<void>();
 	readonly onDidChangeLanguageModelChatInformation = this.changes.event;
@@ -118,7 +169,8 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 	private readonly spawnedThresholds = new WeakMap<CocoSessionClient, { modelId: string; threshold?: number }>();
 	private discovery?: Promise<void>;
 	private discoveryGeneration = 0;
-	private lastDiscoveryAt = 0;
+	private catalogRecords = new Map<string, CocoCatalogRecord>();
+	private readonly loggedCatalogSkips = new Set<string>();
 	private readonly clients = new Set<CocoSessionClient>();
 	private readonly activeTurns = new Set<CocoActiveTurn>();
 	private readonly failedCallbacks = new Map<string, Error>();
@@ -149,6 +201,9 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 	constructor(private readonly dependencies: CocoProviderDependencies = {}) {
 		this.sessions = new CocoSessionStore(dependencies.state, dependencies.storageRoot ? path.join(dependencies.storageRoot, "sessions.json") : undefined);
 		this.archive = new CocoHistoryArchive(dependencies.storageRoot ?? path.join(os.tmpdir(), "ai-agent-bridge", "coco-history"));
+		for (const record of parseCocoCatalogRecords(dependencies.catalogState?.get<unknown>(COCO_CATALOG_KEY))) {
+			this.catalogRecords.set(record.source, record);
+		}
 		void this.archive.prune(COCO_ARCHIVE_RETENTION_MS).catch(() => undefined);
 	}
 
@@ -166,15 +221,61 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 
 	async refreshStatus(force = false, token?: vscode.CancellationToken): Promise<CocoProviderStatus> {
 		if (token?.isCancellationRequested) { return this.providerStatus; }
-		if (force) {
-			this.lastDiscoveryAt = 0;
-		}
-		const check = this.discover();
+		const check = this.discover(force);
 		// Capture this check's stop function: a late cancellation must not stop a replacement check.
 		const stop = this.stopDiscovery;
 		const cancellation = token?.onCancellationRequested(() => stop?.());
 		try { await check; } finally { cancellation?.dispose(); }
 		return this.providerStatus;
+	}
+
+	private catalogKey(executable: string | undefined, connection: string | undefined): string {
+		return JSON.stringify([executable ?? "", connection ?? ""]);
+	}
+
+	private saveCatalogRecord(
+		executable: string | undefined, connection: string | undefined,
+		state: CocoCatalogRecord["state"], summary: string, modelCount: number
+	): void {
+		const record: CocoCatalogRecord = {
+			source: this.catalogKey(executable, connection), models: this.models, thinking: this.thinking,
+			imageInput: this.imageInput, state, summary, modelCount, checkedAt: Date.now(),
+		};
+		this.catalogRecords.delete(record.source);
+		this.catalogRecords.set(record.source, record);
+		const entries = [...this.catalogRecords.values()].sort((a, b) => b.checkedAt - a.checkedAt).slice(0, COCO_CATALOG_SOURCES);
+		this.catalogRecords = new Map(entries.map(entry => [entry.source, entry]));
+		try {
+			const update = this.dependencies.catalogState?.update(COCO_CATALOG_KEY, entries);
+			void Promise.resolve(update).catch(() => undefined);
+		} catch { /* A catalog write must not fail a status check. */ }
+	}
+
+	/** Seeds the current source from its record; only an unknown source resets the catalog. */
+	private syncCatalogSource(): boolean {
+		const executable = this.resolveCli(), connection = this.resolveConnection();
+		const source = JSON.stringify([this.enabled, executable, connection]);
+		if (this.catalogSource === source) {
+			return false;
+		}
+		if (this.catalogSource !== undefined) { this.sessions.dispose(); }
+		this.discoveryGeneration++;
+		this.stopDiscovery?.();
+		this.catalogSource = source;
+		this.observedContextWindows.clear();
+		const record = this.catalogRecords.get(this.catalogKey(executable, connection));
+		if (record) {
+			this.models = record.models.length ? record.models : [AUTO_MODEL];
+			this.thinking = record.thinking;
+			this.imageInput = record.imageInput;
+			this.setStatus(this.enabled ? record.state : "disabled", this.enabled ? record.summary : "Off", connection, record.modelCount, record.checkedAt);
+			return true;
+		}
+		this.models = [AUTO_MODEL];
+		this.thinking = undefined;
+		this.imageInput = false;
+		this.setStatus(this.enabled ? "checking" : "disabled", this.enabled ? "Checking..." : "Off", connection);
+		return true;
 	}
 
 	private resolveCli(): string | undefined {
@@ -240,26 +341,12 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 			for (const turn of [...this.activeTurns]) { turn.bridge.dispose(); }
 			this.sessions.dispose(); this.transport = transport;
 		}
-		const source = JSON.stringify([this.enabled, this.resolveCli(), this.resolveConnection()]);
-		const changed = this.catalogSource !== source;
-		if (changed) {
-			if (this.catalogSource !== undefined) { this.sessions.dispose(); }
-			this.discoveryGeneration++;
-			this.stopDiscovery?.();
-			this.catalogSource = source;
-			this.models = [AUTO_MODEL];
-			this.thinking = undefined;
-			this.imageInput = false;
-			this.observedContextWindows.clear();
-			this.setStatus(this.enabled ? "checking" : "disabled", this.enabled ? "Checking..." : "Off", this.resolveConnection());
-		}
+		this.syncCatalogSource();
 		for (const turn of this.activeTurns) {
 			if (!this.enabled || turn.connection !== this.resolveConnection() || turn.executable !== this.resolveCli()) {
 				turn.bridge.dispose();
 			}
 		}
-		// Context limits change often; only a new CLI or connection needs a new process to list models.
-		if (changed && !this.discovery) { this.lastDiscoveryAt = 0; }
 		this.releaseStaleCompaction();
 		this.changes.fire();
 	}
@@ -271,6 +358,7 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 		if (token.isCancellationRequested || this.disposed) {
 			return [];
 		}
+		this.syncCatalogSource();
 		void this.discover();
 		if (!this.enabled || !this.resolveCli()) {
 			return [];
@@ -415,12 +503,13 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 				sessionReady = true;
 				if (generation === this.discoveryGeneration) {
 					// A ready native session is a fresh status check; no separate CLI process is needed.
-					this.lastDiscoveryAt = Date.now();
 					this.catalogSource = JSON.stringify([this.enabled, executable, connection]);
 					if (discovered.length) { this.updateModels(discovered); }
 					this.updateThinking(thinking);
 					this.updateImageInput(imageInput);
-					this.setStatus("connected", "Connected", connection, discovered.length || this.models.length);
+					const modelCount = discovered.length || this.models.length;
+					this.setStatus("connected", "Connected", connection, modelCount);
+					this.saveCatalogRecord(executable, connection, "connected", "Connected", modelCount);
 					this.acceptDiscovery?.(discovered.length);
 				}
 				const effort = resolveCocoReasoningEffort(
@@ -533,10 +622,11 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 		this.statusChanges.dispose();
 	}
 
-	private discover(): Promise<void> {
+	private discover(forced = false): Promise<void> {
 		if (this.disposed) {
 			return Promise.resolve();
 		}
+		this.syncCatalogSource();
 		if (!this.enabled) {
 			this.setStatus("disabled", "Off", this.resolveConnection());
 			return Promise.resolve();
@@ -549,38 +639,65 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 		if (this.discovery) {
 			return this.discovery;
 		}
-		const cacheMs = this.status.state === "connected" ? DISCOVERY_CONNECTED_TTL_MS : DISCOVERY_RETRY_MS;
-		if (Date.now() - this.lastDiscoveryAt < cacheMs) {
+		const connection = this.resolveConnection();
+		const source = this.catalogKey(executable, connection);
+		const record = this.catalogRecords.get(source);
+		if (!forced && record) {
+			if (!this.loggedCatalogSkips.has(source)) {
+				this.loggedCatalogSkips.add(source);
+				this.diagnostic("coco.discovery.skipped", { reason: "recorded", state: record.state, ageMs: Math.max(0, Date.now() - record.checkedAt) });
+			}
 			return Promise.resolve();
 		}
-		this.lastDiscoveryAt = Date.now();
+		const started = Date.now();
+		this.diagnostic("coco.discovery.started", { forced, trigger: forced ? "manual" : "auto" });
 		const generation = this.discoveryGeneration;
-		const connection = this.resolveConnection();
-		this.catalogSource = JSON.stringify([this.enabled, executable, connection]);
 		const modelCount = this.status.modelCount;
-		const timeoutMs = Math.max(1, this.dependencies.discoveryTimeoutMs ?? COCO_DISCOVERY_TIMEOUT_MS);
+		const timeoutMs = Math.max(1, this.dependencies.discoveryTimeoutMs ?? (forced ? COCO_MANUAL_DISCOVERY_TIMEOUT_MS : COCO_DISCOVERY_TIMEOUT_MS));
+		const hintMs = Math.max(1, this.dependencies.signInHintMs ?? COCO_SIGN_IN_HINT_MS);
 		let client: CocoAcpClient | undefined;
+		let hintTimer: NodeJS.Timeout | undefined;
+		let waitedForSignIn = false;
 		let finished = false;
 		let resolve!: () => void;
 		const check = new Promise<void>(done => { resolve = done; });
-		const finish = (state: "connected" | "unavailable", summary: string, count = modelCount): void => {
+		const finish = (
+			state: "connected" | "unavailable", summary: string, count = modelCount,
+			failure?: { kind: CocoDiscoveryFailureKind; message: unknown }
+		): void => {
 			if (finished) { return; }
 			finished = true;
 			clearTimeout(timer);
+			clearTimeout(hintTimer);
+			const durationMs = Date.now() - started;
 			if (generation === this.discoveryGeneration) {
-				this.lastDiscoveryAt = Date.now();
 				this.setStatus(state, summary, connection, count);
 			}
-			try { client?.dispose(); } catch { /* A cleanup failure must not keep the status check pending. */ }
-			if (client) { this.clients.delete(client); }
-			if (this.discoveryClient === client) { this.discoveryClient = undefined; }
+			if (failure?.kind !== "cancelled") {
+				this.saveCatalogRecord(executable, connection, state, summary, count);
+			}
+			const checkedClient = client;
+			try {
+				if (state === "connected" && checkedClient?.close) {
+					void checkedClient.close(COCO_DISCOVERY_CLOSE_GRACE_MS).catch(() => { try { checkedClient.dispose(); } catch { /* ignore */ } });
+				} else if (checkedClient) {
+					checkedClient.dispose();
+				}
+			} catch { /* A cleanup failure must not keep the status check pending. */ }
+			if (checkedClient) { this.clients.delete(checkedClient); }
+			if (this.discoveryClient === checkedClient) { this.discoveryClient = undefined; }
 			if (this.discovery === check) { this.discovery = undefined; this.stopDiscovery = undefined; this.acceptDiscovery = undefined; }
+			this.diagnostic("coco.discovery.finished", { state, models: count, durationMs, waitedForSignIn });
+			if (failure) { this.diagnostic("coco.discovery.failed", { kind: failure.kind, message: redactCocoDiagnostic(failure.message) }); }
 			resolve();
 		};
+		const timeoutSeconds = Math.ceil(timeoutMs / 1_000);
 		const timer = setTimeout(() => finish("unavailable",
-			`Connection check timed out after ${Math.ceil(timeoutMs / 1_000)}s — retry or sign in to Snowflake`), timeoutMs);
+			cocoDiscoveryFailureSummary("timeout", timeoutSeconds), modelCount,
+			{ kind: "timeout", message: `Connection check timed out after ${timeoutSeconds}s` }), timeoutMs);
 		this.discovery = check;
-		this.stopDiscovery = () => finish("unavailable", "Connection check cancelled — retry from Quick Access");
+		this.stopDiscovery = () => finish("unavailable", cocoDiscoveryFailureSummary("cancelled"), modelCount,
+			{ kind: "cancelled", message: "Connection check cancelled" });
 		this.acceptDiscovery = count => finish("connected", "Connected", count);
 		this.setStatus("checking", "Starting Coco...", connection, modelCount);
 		void (async () => {
@@ -589,6 +706,13 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 				client = this.createClient(executable, cwd, connection, undefined);
 				this.discoveryClient = client;
 				this.clients.add(client);
+				if (hintMs < timeoutMs) {
+					hintTimer = setTimeout(() => {
+						if (finished || generation !== this.discoveryGeneration || this.discovery !== check) { return; }
+						waitedForSignIn = true;
+						this.setStatus("checking", "Waiting for Snowflake sign-in — finish it in the browser", connection, modelCount);
+					}, hintMs);
+				}
 				const initialized = await client.initialize();
 				if (finished || generation !== this.discoveryGeneration) { return; }
 				this.setStatus("checking", "Loading models from Snowflake...", connection, modelCount);
@@ -602,8 +726,9 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 				this.updateThinking(parseCocoThinkingConfiguration(session));
 				this.updateImageInput(initialized?.agentCapabilities?.promptCapabilities?.image === true);
 				finish("connected", "Connected", models.length);
-			} catch {
-				finish("unavailable", "Connection failed — check Snowflake / Azure sign-in");
+			} catch (error) {
+				const kind = classifyCocoDiscoveryError(error, client?.stderrTail ?? "");
+				finish("unavailable", cocoDiscoveryFailureSummary(kind), modelCount, { kind, message: error });
 			}
 		})();
 		return check;
@@ -611,14 +736,14 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 
 	private setStatus(
 		state: CocoProviderStatus["state"], summary: string,
-		connection?: string, modelCount = 0
+		connection?: string, modelCount = 0, checkedAt?: number
 	): void {
 		if (this.disposed) {
 			return;
 		}
 		const next: CocoProviderStatus = {
 			state, summary, connection, modelCount,
-			checkedAt: state === "connected" || state === "unavailable" ? Date.now() : undefined,
+			checkedAt: checkedAt ?? (state === "connected" || state === "unavailable" ? Date.now() : undefined),
 		};
 		if (JSON.stringify(next) !== JSON.stringify(this.status)) {
 			this.status = next;

@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.21.32 (development patch) - 2026-11-20
+
+- Fixed: Coco asked for a Snowflake sign-in after every window reload and every
+  few minutes while it was not signed in, even when unused. Each status check
+  starts a Cortex CLI process, and with Snowflake 1.44.0 each new process can
+  open a browser sign-in (a CLI token-cache bug). The last check result is now
+  saved across reloads, and an automatic check runs only for a CLI path or
+  connection with no saved result. Failed checks are not retried by
+  themselves; a Coco turn or **Connection Status** checks again.
+- Changed: a manual Coco check waits up to 180 seconds and shows "Waiting for
+  Snowflake sign-in". After a successful check the CLI gets 5 seconds to exit
+  on its own before it is stopped. Failed checks log their kind (timeout, sign-in,
+  CLI missing) with secrets redacted.
+- Fixed: the README development block named 1.21.30 in the 1.21.31 build.
+
 ## 1.21.31 (development patch) - 2026-11-20
 
 - Added: the bridge chat agent can list every tool the chat offers, including

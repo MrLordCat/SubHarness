@@ -188,12 +188,15 @@ discovered model count, an on/off source toggle, Snowflake connection selection,
 catalog refresh, and links to the native thinking picker, Coco settings, and the
 Snowflake Coco panel. Status checks open an ACP session without running inference.
 Each check starts its own Cortex CLI process, and with Snowflake 1.44.0 each
-process may open a browser sign-in (a CLI token-cache issue). Background
-checks therefore run at most every six hours while connected and five minutes
-after a failure; a ready native session counts as a check, and context-limit
-changes do not reset it. An exited CLI is replaced on the next turn and its
-native session reloads.
-Background discovery reuses fresh status results. Since 1.18.10, manual
+process may open a browser sign-in (a CLI token-cache issue). Since 1.21.32
+the last result (models, thinking levels, status) is saved per CLI path and
+connection and survives window reloads. An automatic check runs only for a CLI
+or connection with no saved result; after that, only a Coco turn or a manual
+check talks to the CLI. A failed check is not retried by itself. A manual check
+waits up to 180 seconds and shows "Waiting for Snowflake sign-in" after 10
+seconds; a successful check lets the CLI exit on its own (5 seconds) before
+stopping it. A live chat session keeps its CLI for 30 minutes after a turn.
+An exited CLI is replaced on the next turn and its native session reloads. Since 1.18.10, manual
 **Connection Status** and **Refresh Models** force one shared check, preserving
 the catalog and thinking levels while it runs. Selecting the existing
 **Snowflake Connection** also retries it without rewriting settings; cancelling

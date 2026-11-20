@@ -667,7 +667,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	};
 	context.subscriptions.push({ dispose: () => llamaProvider.disposeCursorTransport() });
 	const claudeProvider = new ClaudeChatModelProvider(extVersion, logService, context.workspaceState);
-	const cocoProvider = new CocoChatModelProvider({ state: context.workspaceState, storageRoot: path.join(context.storageUri?.fsPath ?? context.globalStorageUri.fsPath, "coco-history"), log: (event,data) => logService.log(event,data) });
+	const cocoProvider = new CocoChatModelProvider({ state: context.workspaceState, catalogState: context.globalState, storageRoot: path.join(context.storageUri?.fsPath ?? context.globalStorageUri.fsPath, "coco-history"), log: (event,data) => logService.log(event,data) });
 	context.subscriptions.push(claudeProvider);
 	context.subscriptions.push(cocoProvider);
 	for (const provider of codexProviders.values()) {
