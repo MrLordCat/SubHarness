@@ -54,7 +54,16 @@ export function contextIndicator(latestUsage: ChatUsage | undefined, models: Cha
 	if (!model || model.maxInputTokens <= 0) {
 		return undefined;
 	}
-	return `${formatTokens(promptTokens)} / ${formatTokens(model.maxInputTokens)}`;
+	return `${formatTokens(promptTokens)} / ${formatTokens(model.maxInputTokens + (model.maxOutputTokens ?? 0))}`;
+}
+
+/** Explains the context indicator and any tokens reserved for the answer. */
+export function contextIndicatorTitle(models: ChatModelGroup[], selectedModelId: string | undefined): string {
+	const model = models.flatMap(group => group.models).find(candidate => candidate.id === selectedModelId);
+	const reserved = model?.maxOutputTokens;
+	return reserved !== undefined && reserved > 0
+		? `Prompt tokens / context window (${formatTokens(reserved)} reserved for the answer)`
+		: "Prompt tokens / context window";
 }
 
 export interface ModelCacheStats {

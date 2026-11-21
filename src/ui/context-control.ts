@@ -35,7 +35,7 @@ export interface ContextControlState {
 	/** Codex model and Codex-reported window the shared context follows, once known. */
 	followedCodexModelId?: string;
 	followedCodexWindow?: number;
-	/** Why that model is followed: last used, Codex default, or largest known window. */
+	/** Selection rule for the followed Sol model. */
 	followedCodexReason?: CodexFollowReason;
 	claudeTarget: number;
 	claudeMinimum: number;
@@ -65,7 +65,7 @@ const PROVIDER_SWITCH_MAX = 1_048_576;
 
 export interface CodexContextSnapshot {
 	models: readonly CodexModelContextWindow[];
-	/** Last used model, else Codex's default, else the largest known window. */
+	/** Latest Sol model with a window known to Codex. */
 	followTarget?: CodexFollowTarget;
 }
 
@@ -222,7 +222,7 @@ export function registerContextControlCommand(
 				deepSeekMaxOutputTarget,
 			});
 			vscode.window.showInformationMessage(
-				`Shared context ${formatTokenCount(saved.sharedTarget)}${saved.followCodex ? " (follows Codex)" : ""} · switch ${formatTokenCount(providerSwitchTarget)} · Codex ${formatTokenCount(saved.codexTarget)} · Claude ${formatTokenCount(saved.claudeTarget)} · DeepSeek ctx ${formatTokenCount(deepSeekContextTarget)} · out ${formatTokenCount(deepSeekMaxOutputTarget)}`
+				`Shared context ${formatTokenCount(saved.sharedTarget)}${saved.followCodex ? " (follows Codex Sol)" : ""} · switch ${formatTokenCount(providerSwitchTarget)} · Codex ${formatTokenCount(saved.codexTarget)} · Claude ${formatTokenCount(saved.claudeTarget)} · DeepSeek ctx ${formatTokenCount(deepSeekContextTarget)} · out ${formatTokenCount(deepSeekMaxOutputTarget)}`
 			);
 		}, undefined);
 		panel.onDidDispose(() => {
@@ -242,14 +242,12 @@ const CODEX_WINDOW_SOURCE_LABELS: Record<CodexContextWindowSource, string> = {
 };
 
 const CODEX_FOLLOW_REASON_LABELS: Record<CodexFollowReason, string> = {
-	lastUsed: "last used",
-	default: "Codex default",
-	largest: "largest known",
+	latestSol: "latest Sol",
 };
 
 function formatFollowedLabel(state: ContextControlState): string {
 	if (!state.followedCodexModelId || !state.followedCodexWindow) {
-		return "no Codex window known yet";
+		return "no Codex Sol window known yet";
 	}
 	const reason = state.followedCodexReason ? `${CODEX_FOLLOW_REASON_LABELS[state.followedCodexReason]} model ` : "";
 	return `${reason}${state.followedCodexModelId}, ${formatTokenCount(state.followedCodexWindow)}`;
@@ -303,7 +301,7 @@ function renderContextControl(webview: vscode.Webview, state: ContextControlStat
 		tr.current td { color: var(--vscode-textLink-foreground); }
 		.tag, small { color: var(--vscode-descriptionForeground); font-size: 12px; font-weight: normal; }
 	</style>
-</head><span id="followedLabel">${followedLabel}</span>
+</head>
 <body>
 	<h1>Provider working context</h1>
 	<p class="lead">Changes apply to new provider sessions. Existing durable transcripts remain available.</p>
@@ -311,7 +309,7 @@ function renderContextControl(webview: vscode.Webview, state: ContextControlStat
 		<div class="row"><h2>Shared context: Codex, Claude, Coco, Cursor</h2><span class="value" id="sharedValue"></span></div>
 		<input id="shared" type="range" min="${state.sharedMinimum}" max="${state.sharedMaximum}" step="1" value="${state.sharedTarget}">
 		<div class="bounds"><span>${formatTokenCount(state.sharedMinimum)}</span><span>${formatTokenCount(state.sharedMaximum)}</span></div>
-		<label class="toggle"><input id="followCodex" type="checkbox"${state.followCodex ? " checked" : ""}> Follow the Codex window (${followedLabel})</label>
+		<label class="toggle"><input id="followCodex" type="checkbox"${state.followCodex ? " checked" : ""}> Follow the Codex Sol window (<span id="followedLabel">${followedLabel}</span>)</label>
 		<p id="followNote"></p>
 		<p>One working context for every native agent, so a switch after a rate limit keeps the same history budget. Each provider uses min(limit, its real model window) as its window and native auto-compaction threshold.</p>
 		<p id="effective"></p>
@@ -346,14 +344,14 @@ function renderContextControl(webview: vscode.Webview, state: ContextControlStat
 		let codexMaximum = ${state.codexMaximum};
 		const claudeMinimum = ${state.claudeMinimum}, claudeMaximum = ${state.claudeMaximum};
 		const followCodex = document.getElementById('followCodex');
-		const manualTarget = ${state.manualSharedTarget};
+		let manualTarget = ${state.manualSharedTarget};
 		let followedWindow = ${state.followedCodexWindow ?? 0};
 		const applyFollow = () => {
-			shared.disabled = followCodex.checked;
+			shared.disabled = followCodex.checked && followedWindow > 0;
 			shared.value = String(followCodex.checked && followedWindow > 0 ? followedWindow : manualTarget);
 			document.getElementById('followNote').textContent = !followCodex.checked ? ''
-				: followedWindow > 0 ? 'The shared context follows the last used Codex model (before the first use: the Codex default model, else the largest known window), including a smaller window after switching models. Press Apply to save. Changing it rewrites the Claude and Coco prompt caches once.'
-				: 'Until Codex catalogs or reports a model window, the slider value ' + compact(manualTarget) + ' applies.';
+				: followedWindow > 0 ? 'The shared context follows the newest Codex Sol model with a known window. Press Apply to save.'
+				: 'Until Codex catalogs or reports a Sol window, the slider value ' + compact(manualTarget) + ' applies.';
 		};
 		const update = () => {
 			const value = Number(shared.value);
@@ -367,12 +365,16 @@ function renderContextControl(webview: vscode.Webview, state: ContextControlStat
 			document.getElementById('deepSeekOutputValue').textContent = compact(Number(deepSeekOutput.value));
 			document.getElementById('status').textContent = '';
 		};
-		shared.addEventListener('input', update);
+		shared.addEventListener('input', () => {
+			manualTarget = Number(shared.value);
+			applyFollow();
+			update();
+		});
 		followCodex.addEventListener('change', () => { applyFollow(); update(); });
 		deepSeekContext.addEventListener('input', update);
 		deepSeekOutput.addEventListener('input', update);
 		providerSwitch.addEventListener('input', update);
-		document.getElementById('save').addEventListener('click', () => vscode.postMessage({ type: 'save', followCodex: followCodex.checked, sharedTarget: Number(followCodex.checked ? manualTarget : shared.value), providerSwitchTarget: Number(providerSwitch.value), deepSeekContextTarget: Number(deepSeekContext.value), deepSeekMaxOutputTarget: Number(deepSeekOutput.value) }));
+		document.getElementById('save').addEventListener('click', () => vscode.postMessage({ type: 'save', followCodex: followCodex.checked, sharedTarget: manualTarget, providerSwitchTarget: Number(providerSwitch.value), deepSeekContextTarget: Number(deepSeekContext.value), deepSeekMaxOutputTarget: Number(deepSeekOutput.value) }));
 		window.addEventListener('message', event => {
 			if (event.data?.type === 'saved') document.getElementById('status').textContent = 'Saved';
 			if (event.data?.type === 'followed') {

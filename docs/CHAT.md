@@ -50,10 +50,11 @@ centered column.
   balance. Hover it for every window; click it for all providers and reset
   times.
 - The counter on the right is the last request's prompt size against the
-  model's context window. Click it for two sliders. **Shared context** is the
+  model's full context window; its tooltip names the part reserved for the
+  answer (32,768 tokens for Codex). Click it for two sliders. **Shared context** is the
   working context of Codex, Claude, Coco and Cursor, each capped by its model
-  window; **Follow the Codex window** uses the window Codex reports for its
-  last used model instead and disables the slider once that window is known.
+  window. **Follow the Codex Sol window** uses the window of the newest Sol
+  that Codex has catalogued or reported and disables the slider once known.
   **Model switch** is the most a model receives when it takes over
   a chat; a longer chat is compacted first (see Long chats). A value is saved
   when you release the slider and applies to new requests. The popup changes
@@ -96,9 +97,16 @@ The chat's own tools read, search, create, edit (`replace_string_in_file`,
 pages (`fetch_webpage`), work with symbols through the language servers
 (`list_code_usages`, `rename_symbol`, `workspace_symbols`), report problems and
 start subagents. Images returned by MCP and extension tools also reach the
-model; the chat shows their name and size. `send_to_terminal` with
+model; the chat shows their name and size, and a click on that line opens the
+image in VS Code's image viewer. `send_to_terminal` with
 `interrupt: true` stops the running command with Ctrl+C. Relative paths in tool
 calls start from the first workspace folder.
+
+Each chat and each subagent has its own terminals, and reuses an idle one. A
+terminal whose sync command timed out and printed nothing for a minute is
+closed before a new one opens; each chat or subagent can have at most four.
+A subagent's idle terminals close when it finishes, or for an open subagent
+when it is closed.
 
 A turn has no limit on tool rounds: it runs until the model answers without a
 tool call or you press **Stop**. A subagent stops after 100 tool rounds.
@@ -213,12 +221,29 @@ an approval (!) or finished while you were elsewhere (✓). When a background
 chat needs an approval, a notification offers to open it. **Stop** stops only
 the chat you are looking at; deleting a running chat stops it first.
 
+While the VS Code window is not focused or is minimized, the operating system
+announces a finished turn, an approval request and a question (a toast on
+Windows, Notification Center on macOS, `notify-send` on Linux). Set
+`llamacpp.chat.systemNotifications` to `false` to turn this off.
+
 ## Subagents
 
 The `subagent` tool lets the model hand a self-contained task to a cheaper
 model from the bridge's subagent list. The task runs with the same tools, but
 without its own subagents. Its card shows the model, the task and the current
 step; expand it for the prompt, every step and the report.
+
+With `keepOpen` the subagent stays open after its report, with its own
+conversation. The model checks the work and either closes it with
+`close_subagent` or sends the same subagent a follow-up task with its id
+(`subagentId`), as often as needed; the subagent keeps its model, context and
+terminals. Each new request tells the model which subagents are open, so a
+long chat does not lose them. **Open subagents** above the input lists them
+with their model, what they are doing or their last task and report; **×**
+closes one that is not working. Open subagents are saved with the chat and
+survive a reload. A chat keeps at most six; when a subagent's context fills
+up, its older tool output is shortened, and near the limit the model is told
+to close it and start a new one.
 
 From Codex the list offers only the newest 6.x Luna and the newest 6.x Terra
 of the ChatGPT subscription (now GPT-6-Luna and GPT-6.1 Terra): Luna for small,
@@ -232,6 +257,10 @@ listed last and marked as paid per use; local llama.cpp servers stay in the
 local group.
 
 ## Long chats
+
+A chat keeps its newest 1,000 requests and their answers. Older requests are
+deleted from the chat and its log when the chat is opened or VS Code starts.
+Nothing is deleted by age; what the model sees is still limited by compaction.
 
 When another model takes over a chat that is larger than
 `llamacpp.providerSwitchContextTokens` (default 250,000 tokens), older turns
@@ -269,6 +298,17 @@ bridge sends the model a continuation message with the error that stopped it.
 The chat shows that message as a one-line marker; it cannot be edited. Coco
 continues its saved native session; the model gets the failed answer's tool
 rounds in the history. To start the request over instead, edit your message.
+
+When the 5-hour Codex or Claude window stops an answer, the chat continues it
+by itself a minute after the reset, the same way Retry does, with the chat's
+model. This also works for a chat in the background and after VS Code reloads;
+a continuation that came due while VS Code was closed runs shortly after start
+unless it is more than a day old. The limit card shows **Continue
+automatically after the reset** with the time; clear it to wait for you
+instead. Sending a message or pressing Retry yourself replaces the pending
+continuation. After three continuations in a row that hit the limit again,
+auto-continue stops until you tick the box again. Weekly limits and empty
+balances are not continued.
 
 If VS Code closes or reloads while an answer runs, the chat reopens with a
 note that the answer was interrupted, and **Retry**, which continues it the

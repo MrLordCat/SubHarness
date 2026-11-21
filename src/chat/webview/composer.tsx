@@ -28,6 +28,7 @@ interface ComposerProps {
 	selectedThinking: string | undefined;
 	quota: ChatProviderQuota[];
 	context: string | undefined;
+	contextTitle?: string;
 	/** The sliders the context indicator opens; without them it is plain text. */
 	contextSettings?: ChatContextSettings;
 	cache?: CacheHitLabel;
@@ -131,6 +132,7 @@ export function Composer({
 	quota,
 	cache,
 	context,
+	contextTitle,
 	contextSettings,
 	attachments,
 	initialText,
@@ -440,7 +442,7 @@ export function Composer({
 					</div>
 					<div class="composer-actions">
 						{cache ? <span class={`cache-indicator cache-${cache.level}`} title={cache.title}>{cache.text}</span> : null}
-						<ContextIndicator context={context} settings={contextSettings} />
+						<ContextIndicator context={context} title={contextTitle} settings={contextSettings} />
 						{run.running && !onCancel ? (
 							<>
 								<button type="button" class="send-button send-button-stop" aria-label="Stop" title="Stop" onClick={onStop}>

@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.0.2 (development build) - 2026-11-21
+
+- Fixed: existing Codex and Claude bridge chats refresh tool schemas on the
+  next turn so the model can start and continue an open subagent.
+- Changed: Follow the Codex Sol window uses the newest Sol model with a known
+  window. Luna and Terra usage leaves the shared context unchanged.
+
+## 2.0.1 (development build) - 2026-11-21
+
+The rest of the 2.0 work list in `docs/WORK_PLAN_2_0.md`.
+
+- Added: a chat keeps its newest 1,000 requests with their answers. Older ones
+  are deleted from the chat and its log file when the chat is opened or VS Code
+  starts; nothing is deleted by age.
+- Added: open subagents. A subagent started with `keepOpen` stays open after
+  its report with its own context; the model sends it follow-up tasks with
+  `subagentId` and closes it with the new `close_subagent` tool. **Open
+  subagents** above the input lists them with their status and lets you close
+  one; they are saved with the chat and survive a reload.
+
+- Fixed: terminal spam. A run reuses an idle terminal of its own chat or
+  subagent; a terminal whose sync command timed out and printed nothing for a
+  minute is closed before a new one opens; a chat or subagent has at most four
+  terminals, and the model gets the list of busy ones instead of a fifth.
+- Changed: each chat and each subagent has its own terminals, named after it
+  ("Chat 3", "Subagent: Fix tests 4"). A subagent's idle terminals close when
+  it finishes.
+- Added: an operating-system notification (Windows toast, macOS Notification
+  Center, Linux `notify-send`) when a chat finishes, waits for an approval or
+  asks a question while VS Code is not focused or is minimized.
+  `llamacpp.chat.systemNotifications` turns it off.
+- Added: after the 5-hour Codex or Claude limit the chat continues by itself a
+  minute after the reset, also in a background chat and after a reload. The
+  limit card has a checkbox to turn it off; it stops after three continuations
+  that hit the limit again.
+
+## 2.0.0 (development build) - 2026-11-21
+
+The 2.x line starts here; the release gets a new name. The plan is in
+`docs/WORK_PLAN_2_0.md`.
+
+- Changed: the chat's context indicator shows the model's full window (475k
+  for a 475k Codex model instead of 443k). Its tooltip names the tokens
+  reserved for the answer; compaction limits are unchanged.
+- Fixed: images the agent looked at could not be opened from the chat. A click
+  on the image line of a tool result opens it in VS Code's image viewer.
+
 ## 1.21.51 (development patch) - 2026-11-21
 
 - Fixed: in a light theme, error and warning text in the chat was hard to

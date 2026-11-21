@@ -620,9 +620,25 @@ body.vscode-light {
 }
 
 .tool-result-image {
+	display: block;
 	margin-top: 2px;
-	color: var(--vscode-descriptionForeground);
+	padding: 0;
+	background: none;
+	border: 0;
+	font: inherit;
 	font-size: 11px;
+	color: var(--vscode-textLink-foreground);
+	text-align: left;
+	cursor: pointer;
+}
+
+.tool-result-image:hover {
+	text-decoration: underline;
+}
+
+.tool-result-image:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
 }
 
 .part-loading {
@@ -717,6 +733,25 @@ body.vscode-light {
 .limit-text,
 .limit-reset {
 	margin-top: 2px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.limit-auto {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-top: 6px;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.limit-auto input {
+	margin: 0;
+}
+
+.limit-auto-time {
+	margin-top: 2px;
+	font-size: 11px;
 	color: var(--vscode-descriptionForeground);
 }
 
@@ -2216,6 +2251,108 @@ body.vscode-light {
 }
 
 .question-input:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.open-subagents {
+	flex: 0 0 auto;
+	max-height: 35vh;
+	min-height: 0;
+	min-width: 0;
+	margin: 6px var(--aab-gutter, 10px) 0;
+	padding: 4px 8px;
+	border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	border-radius: 6px;
+	background: var(--vscode-editorWidget-background, var(--vscode-input-background));
+	font-size: 12px;
+	overflow-y: auto;
+}
+
+.open-subagents-toggle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	padding: 2px 0;
+	border: 0;
+	background: transparent;
+	color: var(--vscode-foreground);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.open-subagents-muted,
+.open-subagent-meta,
+.open-subagent-detail,
+.open-subagent-mark {
+	color: var(--vscode-descriptionForeground);
+}
+
+.open-subagent-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+	min-width: 0;
+	padding: 4px 0;
+}
+
+.open-subagent-mark {
+	flex: 0 0 12px;
+	text-align: center;
+}
+
+.open-subagent-content {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.open-subagent-heading {
+	display: flex;
+	gap: 6px;
+	min-width: 0;
+}
+
+.open-subagent-description,
+.open-subagent-meta,
+.open-subagent-detail {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.open-subagent-description {
+	flex: 1 1 auto;
+}
+
+.open-subagent-meta {
+	flex: 0 1 auto;
+	font-size: 11px;
+}
+
+.open-subagent-detail {
+	font-size: 11px;
+}
+
+.open-subagent-close {
+	flex: 0 0 auto;
+	padding: 0 3px;
+	border: 0;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font: inherit;
+	cursor: pointer;
+}
+
+.open-subagent-close:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+.open-subagents-toggle:focus-visible,
+.open-subagent-close:focus-visible {
 	outline: 1px solid var(--vscode-focusBorder);
 	outline-offset: -1px;
 }

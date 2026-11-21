@@ -1,11 +1,11 @@
 import * as assert from "node:assert";
 import * as vscode from "vscode";
 import type { ChatToolExecutor } from "../chat/agent-loop";
-import type { ChatSubagentRun, ChatSubagentStep } from "../chat/shared/protocol";
-import { runChatSubagent, SUBAGENT_INSTRUCTIONS } from "../chat/subagent-runner";
+import type { ChatMessage, ChatSubagentRun, ChatSubagentStep } from "../chat/shared/protocol";
+import { fitSubagentHistory, runChatSubagent, SUBAGENT_INSTRUCTIONS } from "../chat/subagent-runner";
 import { createChatToolSource } from "../chat/tool-executor";
 import { ChatToolCatalog, type ToolRegistry } from "../chat/tools/catalog";
-import { createSubagentTool, parseSubagentInput, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
+import { createCloseSubagentTool, createSubagentTool, parseSubagentInput, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
 import type { ChatTool, SubagentModelOption, SubagentRequest } from "../chat/tools/types";
 import { limitSignalPart } from "../providers/limit-signal";
 import { enhanceSubagentToolDescription, withRequiredSubagentModel } from "../subagent-guidance";
@@ -95,6 +95,8 @@ function subagentRun(backend: FakeBackend, options: {
 	callId?: string;
 	tools?: ChatToolExecutor;
 	request?: SubagentRequest;
+	history?: ChatMessage[];
+	onHistory?: (history: ChatMessage[]) => void;
 	onFinish: (run: ChatSubagentRun) => void;
 }): Promise<string> {
 	return runChatSubagent({
@@ -107,21 +109,54 @@ function subagentRun(backend: FakeBackend, options: {
 		token: NONE,
 		onUpdate: () => undefined,
 		onFinish: options.onFinish,
-	});
+		history: options.history,
+		onHistory: options.onHistory,
+	}).then(result => result.report);
 }
 
 suite("chat subagent", () => {
+	test("continues and closes open subagents", async () => {
+		assert.deepStrictEqual(parseSubagentInput({ subagentId: " id ", prompt: "fix", model: "bad", keepOpen: true }, MODELS), { subagentId: "id", prompt: "fix", description: "" });
+		assert.throws(() => parseSubagentInput({ subagentId: "id" }, MODELS), /prompt is required/);
+		assert.strictEqual(parseSubagentInput({ prompt: "x", model: MODELS[0].id, keepOpen: true }, MODELS).keepOpen, true);
+		const tool = createCloseSubagentTool({ models: () => MODELS });
+		await assert.rejects(tool.invoke({ subagentId: "id" }, NONE), /Only the main agent/);
+		await assert.rejects(tool.invoke({}, NONE, { closeSubagent: async () => "ok" }), /subagentId is required/);
+		assert.strictEqual(await tool.invoke({ subagentId: "id" }, NONE, { closeSubagent: async id => `closed ${id}` }), "closed id");
+	});
+
+	test("preserves history across tasks and failures", async () => {
+		const backend = new FakeBackend([p => p.report(new vscode.LanguageModelTextPart("answer"))]);
+		let history: ChatMessage[] = [];
+		await subagentRun(backend, { onFinish: () => undefined, onHistory: value => { history = value; } });
+		assert.deepStrictEqual(history.map(m => m.role), ["user", "assistant"]);
+		assert.deepStrictEqual(history[1].parts, [{ kind: "text", text: "answer" }]);
+		const next = new FakeBackend([p => p.report(new vscode.LanguageModelTextPart("next"))]);
+		await subagentRun(next, { history, onFinish: () => undefined, onHistory: value => { history = value; } });
+		assert.strictEqual(history[2].turn, 2);
+		assert.ok(next.requests[0].messages.length >= 4);
+		await assert.rejects(subagentRun(new FakeBackend([() => { throw new Error("failed"); }]), { history, onFinish: () => undefined, onHistory: value => { history = value; } }), /failed/);
+		assert.strictEqual(history.length, 6);
+	});
+
+	test("bounds open subagent context", () => {
+		const old: ChatMessage = { id: "a", role: "assistant", turn: 1, createdAt: 1, parts: [{ kind: "toolResult", callId: "c", text: "x".repeat(30000) }] };
+		const recent: ChatMessage = { id: "b", role: "user", turn: 2, createdAt: 1, parts: [{ kind: "text", text: "hi" }] };
+		const fitted = fitSubagentHistory([old, recent, recent, recent], 10000);
+		assert.ok(JSON.stringify(fitted[0]).length < JSON.stringify(old).length);
+		assert.throws(() => fitSubagentHistory([recent, { ...recent, parts: [{ kind: "text", text: "x".repeat(30000) }] }], 1000), /context is nearly full/);
+	});
 	test("parseSubagentInput matches the model by label, id or label case and derives a description", () => {
 		const byLabel = parseSubagentInput({ description: "  Check files  ", prompt: "Inspect a.txt", model: "Smart (Claude)" }, MODELS);
-		assert.strictEqual(byLabel.model.id, "claude::smart");
+		assert.strictEqual(byLabel.model!.id, "claude::smart");
 		assert.strictEqual(byLabel.description, "Check files");
 		assert.strictEqual(byLabel.prompt, "Inspect a.txt");
 
 		const byId = parseSubagentInput({ prompt: "x", model: "deepseek::flash" }, MODELS);
-		assert.strictEqual(byId.model.label, "Flash (DeepSeek)");
+		assert.strictEqual(byId.model!.label, "Flash (DeepSeek)");
 
 		const byCase = parseSubagentInput({ prompt: "x", model: "smart (claude)" }, MODELS);
-		assert.strictEqual(byCase.model.id, "claude::smart");
+		assert.strictEqual(byCase.model!.id, "claude::smart");
 
 		const fallback = parseSubagentInput({ prompt: "First line\nsecond line", model: "Smart (Claude)" }, MODELS);
 		assert.strictEqual(fallback.description, "First line");
@@ -133,7 +168,7 @@ suite("chat subagent", () => {
 			{ id: "deepseek::deepseek-pro", label: "deepseek-pro (DeepSeek)", useWhen: "reasoning" },
 		];
 		for (const wanted of ["deepseek-flash", "DeepSeek Flash", "deepseek_flash (DeepSeek) (llamacpp)"]) {
-			assert.strictEqual(parseSubagentInput({ prompt: "x", model: wanted }, models).model.id, "deepseek::deepseek-flash", wanted);
+			assert.strictEqual(parseSubagentInput({ prompt: "x", model: wanted }, models).model!.id, "deepseek::deepseek-flash", wanted);
 		}
 		const twins: SubagentModelOption[] = [
 			{ id: "codex::gpt-5.6-terra", label: "GPT-5.6 Terra (Codex)", useWhen: "a" },
@@ -176,7 +211,7 @@ suite("chat subagent", () => {
 		assert.strictEqual(enhanceSubagentToolDescription(tool.name, "own"), "own");
 		const definition = { name: tool.name, inputSchema: tool.inputSchema };
 		assert.strictEqual(withRequiredSubagentModel(definition), definition);
-		assert.deepStrictEqual(schema.required, ["description", "prompt", "model"]);
+		assert.deepStrictEqual(schema.required, ["prompt"]);
 		assert.ok(tool.description.includes("hard tests"));
 		assert.ok(tool.description.includes("quick searches"));
 		assert.ok(tool.description.includes("duplicate label"));
@@ -195,7 +230,7 @@ suite("chat subagent", () => {
 			},
 		});
 		assert.strictEqual(text, "REPORT");
-		assert.deepStrictEqual(requests.map(request => ({ description: request.description, prompt: request.prompt, id: request.model.id })), [
+		assert.deepStrictEqual(requests.map(request => ({ description: request.description, prompt: request.prompt, id: request.model!.id })), [
 			{ description: "Check", prompt: "Inspect a.txt", id: "claude::smart" },
 		]);
 	});
@@ -246,7 +281,9 @@ suite("chat subagent", () => {
 		]);
 		const toolCalls: string[] = [];
 		const finishes: ChatSubagentRun[] = [];
+		let history: ChatMessage[] = [];
 		const text = await subagentRun(backend, {
+			onHistory: value => { history = value; },
 			tools: {
 				tools: [READ_TOOL],
 				invoke: async name => {
@@ -258,6 +295,7 @@ suite("chat subagent", () => {
 		});
 
 		assert.strictEqual(text, "REPORT");
+		assert.deepStrictEqual(history[1].parts.map(part => part.kind), ["text", "toolCall", "toolResult", "text"]);
 		assert.deepStrictEqual(toolCalls, ["read"]);
 		assert.strictEqual(backend.requests.length, 2);
 		const first = backend.requests[0];

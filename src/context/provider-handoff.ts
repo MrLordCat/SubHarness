@@ -33,27 +33,27 @@ export interface FollowedCodexContext {
 
 let followedCodexContext: FollowedCodexContext | undefined;
 const followedCodexContextChanges = new vscode.EventEmitter<void>();
-/** Fires when the followed Codex window changes, regardless of sharedContextFollowCodex. */
+/** Fires when the followed Sol model or window changes. */
 export const onDidChangeFollowedCodexContext = followedCodexContextChanges.event;
 
 export function getFollowedCodexContext(): FollowedCodexContext | undefined {
 	return followedCodexContext;
 }
 
-/** Window of the last used Codex model, from Codex itself (turn usage or its catalog), never the fallback setting. */
+/** Publishes the selected Sol model and its window from Codex usage or the catalog. */
 export function setFollowedCodexContext(value: FollowedCodexContext | undefined): void {
 	const next = value && Number.isFinite(value.window) && value.window > 0
 		? { modelId: value.modelId, window: Math.floor(Math.min(SHARED_CONTEXT_MAX, Math.max(SHARED_CONTEXT_MIN, value.window))) }
 		: undefined;
-	const windowChanged = next?.window !== followedCodexContext?.window;
+	const changed = next?.window !== followedCodexContext?.window || next?.modelId !== followedCodexContext?.modelId;
 	followedCodexContext = next;
-	if (windowChanged) { followedCodexContextChanges.fire(); }
+	if (changed) { followedCodexContextChanges.fire(); }
 }
 
 /**
  * One working-context limit, in tokens, for Codex, Claude, Coco and Cursor.
- * With sharedContextFollowCodex it is the last used Codex model window, once
- * known; the manual value stays stored. Zero keeps the historical
+ * With sharedContextFollowCodex it uses the newest known Codex Sol window.
+ * The manual value stays stored. Zero keeps the historical
  * codexWorkingContextTarget value. Each provider then applies only its real
  * model window (and native threshold bounds) on top.
  */

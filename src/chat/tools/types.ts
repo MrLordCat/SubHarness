@@ -28,7 +28,12 @@ export interface SubagentModelOption {
 export interface SubagentRequest {
 	description: string;
 	prompt: string;
-	model: SubagentModelOption;
+	/** Absent when subagentId continues an open subagent, which keeps its model. */
+	model?: SubagentModelOption;
+	/** The subagent stays open after its report for follow-up tasks. */
+	keepOpen?: boolean;
+	/** Continues this open subagent with prompt as its next task. */
+	subagentId?: string;
 }
 
 /** What the user did with a request_tools call. */
@@ -44,9 +49,13 @@ export interface ChatToolRequestResult {
 
 /** Host services for one call; only the chat controller can provide them. */
 export interface ChatToolInvokeContext {
+	/** Whose terminals the terminal tools use: the chat or one subagent run. */
+	terminalOwner?: { id: string; label: string };
 	callId?: string;
 	/** Runs a nested agent turn and resolves with its final report; absent inside a subagent. */
 	runSubagent?(request: SubagentRequest, token: vscode.CancellationToken): Promise<string>;
+	/** Closes an open subagent of this chat and resolves with a short result; absent inside a subagent. */
+	closeSubagent?(subagentId: string): Promise<string>;
 	/** Asks the user in the chat and resolves with the answers; undefined when skipped; absent inside a subagent. */
 	askQuestions?(questions: ChatQuestion[], token: vscode.CancellationToken): Promise<ChatQuestionAnswer[] | undefined>;
 	/** Every tool the chat can offer, with its on/off state; absent inside a subagent. */

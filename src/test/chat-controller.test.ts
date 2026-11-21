@@ -34,10 +34,11 @@ import {
 } from "../chat/shared/protocol";
 import { createChatToolSource, DENIED_TOOL_RESULT, type ChatToolSource } from "../chat/tool-executor";
 import { ASK_QUESTIONS_TOOL_NAME, createAskQuestionsTool, createTodoTool, TODO_TOOL_NAME } from "../chat/tools/interaction-tools";
-import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
+import { createCloseSubagentTool, createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
 import { createToolAccessTools, LIST_TOOLS_TOOL_NAME, REQUEST_TOOLS_TOOL_NAME } from "../chat/tools/tool-access-tools";
 import type { ChatTool } from "../chat/tools/types";
 import { promptCacheSignalPart } from "../providers/prompt-cache-signal";
+import { limitSignalPart } from "../providers/limit-signal";
 
 function withThinking(
 	model: vscode.LanguageModelChatInformation,
@@ -556,7 +557,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState" | "saveExport">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "osNotify" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState" | "saveExport" | "openImage" | "terminals" | "now" | "setTimer" | "maxRequests">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -633,6 +634,148 @@ suite("chat controller", () => {
 		harness = undefined;
 		// A cancelled turn may still write its end marker after the flush.
 		await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	});
+
+	function autoClock(): { timers: Array<{ callback: () => void; ms: number; disposed: boolean }>; now: () => number; setTimer: NonNullable<ChatControllerDeps["setTimer"]>; advance: (value: number) => void } {
+		let clock = 1_800_000_000_000;
+		const timers: Array<{ callback: () => void; ms: number; disposed: boolean }> = [];
+		return {
+			timers,
+			now: () => clock,
+			advance: value => { clock = value; },
+			setTimer: (callback, ms) => {
+				const entry = { callback, ms, disposed: false };
+				timers.push(entry);
+				return { dispose: () => { entry.disposed = true; } };
+			},
+		};
+	}
+
+	function limitRound(resetAt: number): Round {
+		return progress => progress.report(limitSignalPart({ kind: "limit", provider: "Codex", text: "Codex limit reached.", window: "5-hour", resetAt }));
+	}
+
+	async function startLimited(current: Harness): Promise<string> {
+		current.webview.receive({ type: "send", text: "Question" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "limited turn");
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		return sessionId;
+	}
+
+	test("auto-continue stores a limit and schedules its reset", async () => {
+		const clock = autoClock();
+		const resetAt = clock.now() + 5 * 3_600_000;
+		const current = createHarness(root, new FakeBackend([limitRound(resetAt)]), undefined, undefined, clock);
+		harness = current;
+		const id = await startLimited(current);
+		await waitFor(() => clock.timers.length === 1, "timer");
+		const answer = (await current.store.load(id)).at(-1);
+		assert.deepStrictEqual((await current.store.get(id))?.autoContinue, { messageId: answer?.id, at: resetAt + 60_000, enabled: true, attempts: 0 });
+		assert.strictEqual(clock.timers[0].ms, resetAt + 60_000 - clock.now());
+	});
+
+	test("auto-continue continues a background chat", async () => {
+		const clock = autoClock();
+		const resetAt = clock.now() + 3_600_000;
+		const backend = new FakeBackend([limitRound(resetAt), progress => progress.report(new vscode.LanguageModelTextPart("Done"))]);
+		const current = createHarness(root, backend, undefined, undefined, clock);
+		harness = current;
+		const id = await startLimited(current);
+		await waitFor(() => clock.timers.length === 1, "timer");
+		await current.controller.newChat();
+		clock.advance(resetAt + 60_000);
+		clock.timers[0].callback();
+		await waitFor(() => backend.requests.length === 2, "background request");
+		await waitForAsync(async () => (await current.store.load(id)).length === 4 && !(await current.store.get(id))?.autoContinue, "background continuation");
+		assert.ok((await current.store.load(id)).some(message => message.role === "user" && message.continuation));
+	});
+
+	test("auto-continue can be disabled and enabled", async () => {
+		const clock = autoClock();
+		const backend = new FakeBackend([limitRound(clock.now() + 3_600_000)]);
+		const events: string[] = [];
+		const current = createHarness(root, backend, undefined, undefined, { ...clock, log: event => events.push(event) });
+		harness = current;
+		const id = await startLimited(current);
+		await waitFor(() => clock.timers.length === 1, "timer");
+		const entry = (await current.store.get(id))!.autoContinue!;
+		current.webview.receive({ type: "setAutoContinue", sessionId: id, messageId: entry.messageId, enabled: false });
+		await waitForAsync(async () => (await current.store.get(id))?.autoContinue?.enabled === false, "disabled");
+		assert.strictEqual(clock.timers[0].disposed, true);
+		clock.timers[0].callback();
+		await waitFor(() => events.includes("chat.auto_continue.skipped"), "old callback");
+		assert.strictEqual(backend.requests.length, 1);
+		clock.advance(entry.at + 1);
+		current.webview.receive({ type: "setAutoContinue", sessionId: id, messageId: entry.messageId, enabled: true });
+		await waitFor(() => clock.timers.length === 2, "new timer");
+		assert.deepStrictEqual((await current.store.get(id))?.autoContinue, { ...entry, enabled: true, attempts: 0, at: clock.now() + 10_000 });
+		assert.strictEqual(clock.timers[1].ms, 10_000);
+	});
+
+	test("auto-continue is cleared by a normal new turn", async () => {
+		const clock = autoClock();
+		const current = createHarness(root, new FakeBackend([limitRound(clock.now() + 3_600_000), progress => progress.report(new vscode.LanguageModelTextPart("Done"))]), undefined, undefined, clock);
+		harness = current;
+		const id = await startLimited(current);
+		await waitFor(() => clock.timers.length === 1, "timer");
+		current.webview.receive({ type: "send", text: "Another question" });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "normal turn");
+		await waitForAsync(async () => !(await current.store.get(id))?.autoContinue, "cleared schedule");
+		assert.strictEqual(clock.timers[0].disposed, true);
+	});
+
+	test("auto-continue ignores distant limits and balance signals", async () => {
+		const clock = autoClock();
+		const current = createHarness(root, new FakeBackend([
+			limitRound(clock.now() + 3 * 24 * 3_600_000),
+			progress => progress.report(limitSignalPart({ kind: "balance", provider: "Codex", text: "Balance exhausted." })),
+		]), undefined, undefined, clock);
+		harness = current;
+		const id = await startLimited(current);
+		assert.strictEqual((await current.store.get(id))?.autoContinue, undefined);
+		current.webview.receive({ type: "send", text: "Again" });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "balance turn");
+		assert.strictEqual((await current.store.get(id))?.autoContinue, undefined);
+		assert.strictEqual(clock.timers.length, 0);
+	});
+
+	test("auto-continue stops after three limited continuations", async () => {
+		const clock = autoClock();
+		const resetAt = clock.now() + 3_600_000;
+		const current = createHarness(root, new FakeBackend(Array.from({ length: 4 }, () => limitRound(resetAt))), undefined, undefined, clock);
+		harness = current;
+		const id = await startLimited(current);
+		for (let i = 0; i < 3; i++) {
+			await waitFor(() => clock.timers.length === i + 1, "continuation timer");
+			clock.advance(resetAt + (i + 1) * 60_000);
+			clock.timers[i].callback();
+			await waitForAsync(async () => (await current.store.get(id))?.autoContinue?.attempts === i + 1, "continuation attempt");
+		}
+		const entry = (await current.store.get(id))?.autoContinue;
+		assert.strictEqual(entry?.enabled, false);
+		assert.strictEqual(entry?.attempts, 3);
+		assert.strictEqual(clock.timers.length, 3);
+	});
+
+	test("auto-continue restores recent schedules and clears stale ones", async () => {
+		const clock = autoClock();
+		const store = new ChatSessionStore(root);
+		const recent = await store.create("codex::fast");
+		const stale = await store.create("codex::fast");
+		for (const meta of [recent, stale]) {
+			await store.appendMessage(meta.id, { id: "u1", role: "user", turn: 1, createdAt: 1, parts: [{ kind: "text", text: "Question" }] });
+			await store.appendMessage(meta.id, { id: "a1", role: "assistant", turn: 1, createdAt: 1, parts: [{ kind: "text", text: "Answer" }] });
+			await store.endMessage(meta.id, "a1");
+			await store.updateMeta(meta.id, { autoContinue: { messageId: "a1", at: clock.now() - (meta.id === recent.id ? 3_600_000 : 25 * 3_600_000), enabled: true, attempts: 0 } });
+		}
+		await store.flush();
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, clock);
+		harness = current;
+		await waitFor(() => clock.timers.length === 1, "restored timer");
+		await waitForAsync(async () => !(await current.store.get(stale.id))?.autoContinue, "stale schedule cleared");
+		assert.strictEqual(clock.timers[0].ms, 10_000);
+		assert.ok((await current.store.get(recent.id))?.autoContinue);
 	});
 
 	test("sends init with grouped models and a selected model when the webview is ready", async () => {
@@ -764,6 +907,16 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(persisted?.promptCache, promptCache);
 	});
 
+	test("osNotify reports a finished turn", async () => {
+		const notifications: Array<[string, string]> = [];
+		const current = createHarness(root, new FakeBackend([() => undefined]), undefined, undefined, { osNotify: (title, body) => notifications.push([title, body]) });
+		harness = current;
+		current.webview.receive({ type: "send", text: "Finish" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		const id = current.state.get<string>(ACTIVE_SESSION_KEY)!;
+		assert.deepStrictEqual(notifications, [[(await current.store.get(id))?.title, "The agent finished."]]);
+	});
+
 	test("stops a running turn with an info notice", async () => {
 		const backend = new FakeBackend([
 			async (progress, token) => {
@@ -772,7 +925,8 @@ suite("chat controller", () => {
 				throw new vscode.CancellationError();
 			},
 		]);
-		const current = createHarness(root, backend);
+		const notifications: string[] = [];
+		const current = createHarness(root, backend, undefined, undefined, { osNotify: (_title, body) => notifications.push(body) });
 		harness = current;
 		current.webview.receive({ type: "send", text: "Long job" });
 		await waitFor(() => backend.requests.length === 1, "run start");
@@ -787,6 +941,7 @@ suite("chat controller", () => {
 		}
 		assert.strictEqual(notice.level, "info");
 		assert.strictEqual(notice.text, "Stopped.");
+		assert.deepStrictEqual(notifications, []);
 		assert.strictEqual(current.webview.ofType("run").at(-1)?.run.running, false);
 	});
 
@@ -1089,6 +1244,62 @@ suite("chat controller", () => {
 		const image = sent.content[1];
 		assert.ok(image instanceof vscode.LanguageModelDataPart);
 		assert.strictEqual(image.mimeType, "image/png");
+	});
+
+	test("openToolImage opens only a matching image and survives failures", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-img", "llamacpp_view", {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Seen.")),
+		]);
+		const data = Buffer.from([1, 2, 3]).toString("base64");
+		const calls: Array<{ image: { mimeType: string; data: string; name?: string }; key: string }> = [];
+		const logs: string[] = [];
+		let fail = false;
+		const current = createHarness(root, backend, fakeTools(() => ({ text: "Image", isError: false, images: [{ mimeType: "image/png", data, byteLength: 3, name: "a.png" }] })).executor, undefined, {
+			openImage: async (image, key) => {
+				calls.push({ image, key });
+				if (fail) {
+					throw new Error("viewer failed");
+				}
+			},
+			log: event => { logs.push(event); },
+		});
+		harness = current;
+		current.webview.receive({ type: "send", text: "Look" });
+		await waitFor(() => current.webview.ofType("partAdded").some(item => item.part.kind === "toolResult"), "tool result");
+		const result = current.webview.ofType("partAdded").find(item => item.part.kind === "toolResult");
+		if (!result) {
+			throw new Error("expected tool result");
+		}
+		const messageId = result.messageId;
+		current.webview.receive({ type: "openToolImage", messageId: "unknown", callId: "call-img", index: 0 });
+		current.webview.receive({ type: "openToolImage", messageId, callId: "unknown", index: 0 });
+		current.webview.receive({ type: "openToolImage", messageId, callId: "call-img", index: 1 });
+		current.webview.receive({ type: "openToolImage", messageId, callId: "call-img", index: 0 });
+		await waitFor(() => calls.length === 1, "image opened");
+		assert.deepStrictEqual(calls, [{ image: { mimeType: "image/png", data, name: "a.png" }, key: `${messageId}-call-img-0` }]);
+		fail = true;
+		current.webview.receive({ type: "openToolImage", messageId, callId: "call-img", index: 0 });
+		await waitFor(() => logs.includes("chat.image.open_failed"), "open failure logged");
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "controller still responds");
+		assert.strictEqual(calls.length, 2);
+	});
+
+	test("init loads only the newest requests", async () => {
+		const store = new ChatSessionStore(root);
+		const meta = await store.create();
+		for (let i = 1; i <= 4; i++) {
+			await store.appendMessage(meta.id, { id: `u${i}`, role: "user", turn: i, createdAt: i, parts: [] });
+			await store.appendMessage(meta.id, { id: `a${i}`, role: "assistant", turn: i, createdAt: i, parts: [] });
+			await store.endMessage(meta.id, `a${i}`);
+		}
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, { maxRequests: 2 });
+		harness = current;
+		await current.state.update(ACTIVE_SESSION_KEY, meta.id);
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		assert.deepStrictEqual(current.webview.ofType("init")[0].messages.map(message => message.id), ["u3", "a3", "u4", "a4"]);
 	});
 
 	test("init trims long thinking to its tail and loads the full text on request", async () => {
@@ -1622,6 +1833,7 @@ suite("chat controller", () => {
 	});
 
 	test("deleteSession removes another chat, forgets its changes and abandons it", async () => {
+		const closed: string[] = [];
 		const abandoned: string[] = [];
 		const tracker = new FakeForgettingTracker([]);
 		const backend = new FakeBackend([
@@ -1630,6 +1842,7 @@ suite("chat controller", () => {
 		]);
 		const current = createHarness(root, backend, undefined, tracker, {
 			abandonConversation: async conversationId => { abandoned.push(conversationId); },
+			terminals: { closeOwner: owner => { closed.push(owner); return 0; } },
 			confirm: async () => true,
 		});
 		harness = current;
@@ -1648,6 +1861,7 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "deleteSession", sessionId: first });
 		await waitFor(() => current.webview.ofType("sessions").length === 1, "sessions message");
 		assert.strictEqual(await current.store.get(first), undefined);
+		assert.deepStrictEqual(closed, [`chat:${first}`]);
 		assert.deepStrictEqual(tracker.forgotten, [first]);
 		assert.strictEqual(abandoned.at(-1), first);
 		const listed = current.webview.ofType("sessions")[0];
@@ -1793,6 +2007,7 @@ suite("chat controller", () => {
 		const catalog = guardedCatalog();
 		const gate = deferred();
 		const notifications: Array<{ message: string; action: string }> = [];
+		const osNotifications: Array<[string, string]> = [];
 		const backend = new FakeBackend([
 			async progress => {
 				progress.report(new vscode.LanguageModelTextPart("Checking."));
@@ -1802,6 +2017,7 @@ suite("chat controller", () => {
 			progress => progress.report(new vscode.LanguageModelTextPart("pushed")),
 		]);
 		const current = createHarness(root, backend, catalog.source, undefined, {
+			osNotify: (title, body) => osNotifications.push([title, body]),
 			notify: async (message, action) => {
 				notifications.push({ message, action });
 				return false;
@@ -1828,6 +2044,7 @@ suite("chat controller", () => {
 		await waitFor(() => current.webview.ofType("init").length === 3, "third init");
 		const opened = current.webview.ofType("init")[2];
 		assert.strictEqual(opened.approvals.length, 1);
+		assert.deepStrictEqual(osNotifications, [[title, `Waiting for your approval: ${opened.approvals[0].title}`]]);
 		current.webview.receive({ type: "approve", id: opened.approvals[0].id, allow: true });
 		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 1, "turn end");
 		assert.deepStrictEqual(catalog.runs, [{ force: true }]);
@@ -2286,11 +2503,14 @@ suite("chat controller", () => {
 			progress => progress.report(new vscode.LanguageModelToolCallPart("call-q", ASK_QUESTIONS_TOOL_NAME, askInput)),
 			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
 		]);
-		const current = createHarness(root, backend, planningCatalog().source);
+		const notifications: Array<[string, string]> = [];
+		const current = createHarness(root, backend, planningCatalog().source, undefined, { osNotify: (title, body) => notifications.push([title, body]) });
 		harness = current;
 		current.webview.receive({ type: "send", text: "Plan it" });
 		await waitFor(() => current.webview.ofType("questions").length === 1, "question request");
 		const request = current.webview.ofType("questions")[0].request;
+		const id = current.state.get<string>(ACTIVE_SESSION_KEY)!;
+		assert.deepStrictEqual(notifications, [[(await current.store.get(id))?.title, "The agent has a question for you.\nWhich one?"]]);
 		assert.strictEqual(request.callId, "call-q");
 		assert.deepStrictEqual(request.questions.map(question => question.header), ["Approach", "Name"]);
 
@@ -3026,14 +3246,144 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(backend.requests[1].messages.map(messageText), ["First question", longReply, "Second question"]);
 	});
 
+	test("open subagent persists its report and can be continued", async () => {
+		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
+		const source = createChatToolSource({ enabledTools: () => [subagent], groups: () => [], setEnabled: async () => undefined });
+		let id = "";
+		const gate = deferred();
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("open", SUBAGENT_TOOL_NAME, { description: "Check", prompt: "First task", model: "Smart (Claude)", keepOpen: true })),
+			progress => progress.report(new vscode.LanguageModelTextPart("First answer")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("follow", SUBAGENT_TOOL_NAME, { subagentId: id, prompt: "Second task" })),
+			async progress => { await gate.promise; progress.report(new vscode.LanguageModelTextPart("Second answer")); },
+			progress => progress.report(new vscode.LanguageModelTextPart("Done again")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 1, "first turn");
+		const idle = current.webview.ofType("subagents").find(message => message.subagents.some(agent => agent.status === "idle"));
+		assert.ok(idle);
+		assert.strictEqual(idle.subagents[0].description, "Check");
+		assert.strictEqual(idle.subagents[0].modelName, "Smart (Claude)");
+		id = idle.subagents[0].id;
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		assert.strictEqual((await current.store.loadSubagents(sessionId))[0].history.length, 2);
+		assert.ok(current.webview.ofType("partAdded").some(message => message.part.kind === "toolResult" && message.part.text.includes("is still open")));
+		current.webview.receive({ type: "send", text: "Continue" });
+		await waitFor(() => backend.requests.length >= 5, "continued subagent");
+		try {
+			assert.ok(current.webview.ofType("subagents").some(message => message.subagents.some(agent => agent.id === id && agent.status === "running")));
+			assert.ok(backend.requests[3].messages.some(message => messageText(message).includes("<open_subagents>") && messageText(message).includes(id)));
+			assert.ok(backend.requests[4].messages.some(message => messageText(message).includes("First task")));
+			assert.ok(backend.requests[4].messages.some(message => messageText(message).includes("First answer")));
+		} finally {
+			gate.resolve();
+		}
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "second turn");
+		assert.strictEqual((await current.store.loadSubagents(sessionId))[0].history.length, 4);
+		await current.store.flush();
+		current.controller.dispose();
+		current.webview.dispose();
+		const reloaded = createHarness(root, new FakeBackend(), source);
+		harness = reloaded;
+		await reloaded.state.update(ACTIVE_SESSION_KEY, sessionId);
+		reloaded.webview.receive({ type: "ready" });
+		await waitFor(() => reloaded.webview.ofType("init").length > 0, "reloaded init");
+		assert.ok(reloaded.webview.ofType("init").some(message => message.subagents?.some(agent => agent.id === id)));
+	});
+
+	for (const method of ["tool", "webview"] as const) {
+		test(`open subagent closes through ${method}`, async () => {
+			const options = { models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] };
+			const source = createChatToolSource({ enabledTools: () => [createSubagentTool(options), createCloseSubagentTool(options)], groups: () => [], setEnabled: async () => undefined });
+			const closed: string[] = [];
+			let id = "";
+			const backend = new FakeBackend([
+				progress => progress.report(new vscode.LanguageModelToolCallPart("open", SUBAGENT_TOOL_NAME, { prompt: "Task", model: "Smart (Claude)", keepOpen: true })),
+				progress => progress.report(new vscode.LanguageModelTextPart("Report")),
+				progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+				progress => progress.report(new vscode.LanguageModelToolCallPart("close", "close_subagent", { subagentId: id })),
+				progress => progress.report(new vscode.LanguageModelTextPart("Closed")),
+			]);
+			const current = createHarness(root, backend, source, undefined, { terminals: { closeOwner: owner => { closed.push(owner); return 0; } } });
+			harness = current;
+			current.webview.receive({ type: "send", text: "Delegate" });
+			await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "open turn");
+			id = current.webview.ofType("subagents").find(message => message.subagents.some(agent => agent.status === "idle"))!.subagents[0].id;
+			const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+			assert.ok(sessionId);
+			if (method === "tool") {
+				current.webview.receive({ type: "send", text: "Close it" });
+				await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "close turn");
+				assert.ok(current.webview.ofType("partAdded").some(message => message.part.kind === "toolResult" && message.part.text.includes(`Closed subagent ${id}`)));
+			} else {
+				current.webview.receive({ type: "closeSubagent", sessionId, subagentId: id });
+				await waitFor(() => closed.length > 0, "webview close");
+			}
+			await waitFor(() => current.webview.ofType("subagents").some(message => message.subagents.length === 0), "empty subagents");
+			assert.deepStrictEqual(await current.store.loadSubagents(sessionId), []);
+			assert.deepStrictEqual(closed, [`subagent:${sessionId}/${id}`]);
+		});
+	}
+
+	test("open subagent rejects unknown ids and a seventh agent", async () => {
+		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
+		const source = createChatToolSource({ enabledTools: () => [subagent], groups: () => [], setEnabled: async () => undefined });
+		const rounds: Round[] = [
+			progress => progress.report(new vscode.LanguageModelToolCallPart("missing", SUBAGENT_TOOL_NAME, { subagentId: "sa-missing", prompt: "Task" })),
+		];
+		for (let index = 0; index < 6; index++) {
+			rounds.push(
+				progress => progress.report(new vscode.LanguageModelToolCallPart(`open-${index}`, SUBAGENT_TOOL_NAME, { prompt: "Task", model: "Smart (Claude)", keepOpen: true })),
+				progress => progress.report(new vscode.LanguageModelTextPart("Report")),
+			);
+		}
+		rounds.push(
+			progress => progress.report(new vscode.LanguageModelToolCallPart("seventh", SUBAGENT_TOOL_NAME, { prompt: "Task", model: "Smart (Claude)", keepOpen: true })),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		);
+		const current = createHarness(root, new FakeBackend(rounds), source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		const results = current.webview.ofType("partAdded").map(message => message.part).filter(part => part.kind === "toolResult");
+		assert.ok(results.some(part => part.callId === "missing" && part.isError && part.text.includes("No subagent is open")));
+		assert.ok(results.some(part => part.callId === "seventh" && part.isError && part.text.includes("close_subagent")));
+	});
+
+	test("open subagent one-off closes its terminal without being listed", async () => {
+		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
+		const source = createChatToolSource({ enabledTools: () => [subagent], groups: () => [], setEnabled: async () => undefined });
+		const closed: string[] = [];
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("one-off", SUBAGENT_TOOL_NAME, { prompt: "Task", model: "Smart (Claude)" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("Report")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, source, undefined, { terminals: { closeOwner: owner => { closed.push(owner); return 0; } } });
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(closed, ["subagent:one-off"]);
+		assert.ok(current.webview.ofType("subagents").every(message => message.subagents.length === 0));
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		assert.deepStrictEqual(await current.store.loadSubagents(sessionId), []);
+	});
+
 	test("runs a subagent and gives the parent only its report", async () => {
+		const owners: Array<{ id: string; label: string } | undefined> = [];
+		const closed: string[] = [];
 		const probe: ChatTool = {
 			name: "probe",
 			description: "Read a file.",
 			inputSchema: { type: "object", properties: {} },
 			group: "files",
 			readOnly: true,
-			invoke: async () => "probe body",
+			invoke: async (_input, _token, context) => { owners.push(context?.terminalOwner); return "probe body"; },
 		};
 		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
 		const source = createChatToolSource({
@@ -3049,18 +3399,21 @@ suite("chat controller", () => {
 			setEnabled: async () => undefined,
 		});
 		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-main", "probe", {})),
 			progress => progress.report(new vscode.LanguageModelToolCallPart("call-sub", SUBAGENT_TOOL_NAME, { description: "Check", prompt: "Inspect a.txt", model: "Smart (Claude)" })),
 			progress => progress.report(new vscode.LanguageModelToolCallPart("call-probe", "probe", { path: "a.txt" })),
 			progress => progress.report(new vscode.LanguageModelTextPart("REPORT")),
 			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
 		]);
-		const current = createHarness(root, backend, source);
+		const current = createHarness(root, backend, source, undefined, { terminals: { closeOwner: owner => { closed.push(owner); return 0; } } });
 		harness = current;
 		current.webview.receive({ type: "send", text: "Please inspect" });
 		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
 
-		assert.strictEqual(backend.requests.length, 4);
-		const subagentRequest = backend.requests[1];
+		assert.strictEqual(backend.requests.length, 5);
+		assert.deepStrictEqual(owners, [{ id: `chat:${current.state.get<string>(ACTIVE_SESSION_KEY)}`, label: "Chat" }, { id: "subagent:call-sub", label: "Subagent: Check" }]);
+		assert.deepStrictEqual(closed, ["subagent:call-sub"]);
+		const subagentRequest = backend.requests[2];
 		assert.ok(!(subagentRequest.options.tools ?? []).some(tool => tool.name === SUBAGENT_TOOL_NAME));
 		assert.ok(subagentRequest.messages.some(message => messageText(message).includes("Inspect a.txt")));
 		assert.ok(!subagentRequest.messages.some(message => messageText(message).includes("Please inspect")));

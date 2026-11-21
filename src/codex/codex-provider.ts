@@ -540,13 +540,17 @@ export function intersectCodexThreadTools(
 
 /**
  * Tool names of the current catalog that a thread started earlier lacks: dynamic tools are fixed at thread/start.
- * Schema-only changes (e.g. the subagent model enum) are not counted; the intersection already drops those.
+ * On a new Bridge chat turn, pass signatures to also detect tools whose registered schema is stale.
  */
 export function codexToolsMissingFromThread(
-	thread: { callableNames: ReadonlySet<string> },
-	currentCallableNames: ReadonlySet<string>
+	thread: { callableNames: ReadonlySet<string>; toolSignatures?: ReadonlyMap<string, string> },
+	currentCallableNames: ReadonlySet<string>,
+	currentToolSignatures?: ReadonlyMap<string, string>
 ): string[] {
-	return [...currentCallableNames].filter(name => !thread.callableNames.has(name)).sort();
+	return [...currentCallableNames].filter(name =>
+		!thread.callableNames.has(name)
+		|| (currentToolSignatures !== undefined && thread.toolSignatures?.get(name) !== currentToolSignatures.get(name))
+	).sort();
 }
 
 /** Copilot hides tools behind activate_* groups and reshuffles them each turn unless its threshold is 0 or lower. */
@@ -863,6 +867,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 	}
 
 	refreshLanguageModelChatInformation(): void {
+		this.publishFollowedContext();
 		this.models.clear();
 		this.modelCatalogGeneration = -1;
 		this.modelCatalogExpiresAt = 0;
@@ -884,9 +889,10 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		return [...this.models.values()].find(model => model.isDefault)?.id;
 	}
 
-	/** Model whose window the shared context follows: last used, else Codex's default, else the largest known window. */
+	/** Latest Sol model with a known window in the catalog. */
 	get followTarget(): CodexFollowTarget | undefined {
-		return resolveCodexFollowTarget(this.contextWindows, this.followedModelId, this.defaultModelId);
+		const windows = this.contextWindows;
+		return resolveCodexFollowTarget(this.models.size > 0 ? windows.filter(({ modelId }) => this.models.has(modelId)) : windows);
 	}
 
 	/** Window and its source for each listed Codex model (catalog models before the first listing). */
@@ -1134,7 +1140,6 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			this.modelCatalogExpiresAt = Date.now() + CODEX_MODEL_CATALOG_TTL_MS;
 			// model/list refreshes models_cache.json; pick up changed windows before advertising.
 			await this.reloadCatalogContextWindows(false);
-			// The listing names Codex's default model, the follow target before any request.
 			this.publishFollowedContext();
 			this.clearRepeatedFailure("codex.models");
 			this.logSink?.log("codex.models.success", {
@@ -1194,8 +1199,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		const cwd = normalizeCodexRuntimeCwd(
 			vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()
 		);
-		// Before any limit is computed: with sharedContextFollowCodex this model's window is the shared limit.
-		this.followModel(model.id);
+		this.rememberModel(model.id);
 		const autoCompactTokenLimit = this.autoCompactTokenLimit(model.id, config);
 		const { approvalPolicy, sandbox } = createCodexVsCodeOnlyPolicy(autoCompactTokenLimit);
 		const effort = resolveCodexReasoningEffort(
@@ -1294,7 +1298,9 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			? codexToolsMissingFromThread(storedActiveTurn, dynamicToolSet.callableNames)
 			: [];
 		const activeTurn = resumable && toolsMissingFromTurn.length === 0 ? storedActiveTurn : undefined;
-		const requireFullCatalog = toolsMissingFromTurn.length > 0 || !copilotToolGroupingEnabled();
+		const requireCurrentSchemas = options.modelOptions?._aabStrictTools === true;
+		const requiredToolSignatures = requireCurrentSchemas ? currentToolSignatures : undefined;
+		const requireFullCatalog = requireCurrentSchemas || toolsMissingFromTurn.length > 0 || !copilotToolGroupingEnabled();
 		if (toolsMissingFromTurn.length > 0) {
 			this.logSink?.log("codex.chat.tool_catalog_restart", {
 				threadId: storedActiveTurn?.bridge.threadId,
@@ -1371,7 +1377,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			);
 		}
 		if (interruptedContinuation && requireFullCatalog
-			&& codexToolsMissingFromThread(interruptedContinuation, dynamicToolSet.callableNames).length > 0) {
+			&& codexToolsMissingFromThread(interruptedContinuation, dynamicToolSet.callableNames, requiredToolSignatures).length > 0) {
 			this.logSink?.log("codex.chat.tool_catalog_restart", { threadId: interruptedContinuation.threadId, reason: "interrupted-thread" }, "warn");
 			interruptedContinuation = undefined;
 		}
@@ -1439,8 +1445,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 					countReuseMiss("runtime-changed");
 					continue;
 				}
-				if (requireFullCatalog && codexToolsMissingFromThread(candidate, dynamicToolSet.callableNames).length > 0) {
-					countReuseMiss("tool-catalog-grew");
+				if (requireFullCatalog && codexToolsMissingFromThread(candidate, dynamicToolSet.callableNames, requiredToolSignatures).length > 0) {
+					countReuseMiss("tool-catalog-changed");
 					continue;
 				}
 				if (candidate.ephemeral && candidate.processGeneration !== this.client.generation) {
@@ -2500,7 +2506,6 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		) {
 			this.observedContextWindows.set(modelId, observedContextWindow);
 			this.logSink?.log("codex.context_window.observed", { model: modelId, window: observedContextWindow });
-			// Any newly reported window can change the follow target (e.g. the largest before the first use).
 			this.publishFollowedContext();
 			this.modelChanges.fire();
 		}
@@ -2970,7 +2975,6 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 	private mapKnownModels(): vscode.LanguageModelChatInformation[] {
 		const config = this.getConfig();
 		const sharedLimit = Math.max(CODEX_WORKING_CONTEXT_MIN, resolveSharedContextLimit(config));
-		const followCodex = config.get<boolean>("sharedContextFollowCodex", false) === true;
 		const maxOutputTokens = this.clampNumber(
 			config.get("codexMaxOutputTokens", DEFAULT_CODEX_MAX_OUTPUT_TOKENS),
 			1_024,
@@ -2998,11 +3002,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		})), this.account.id);
 		return models.map(model => mapCodexModelInformation(
 			model,
-			// When the shared limit follows Codex, a request makes its own model's
-			// window the shared limit, so each model advertises that window.
-			followCodex
-				? this.resolveModelContextWindow(model.id, config)
-				: Math.min(this.resolveModelContextWindow(model.id, config), sharedLimit),
+			Math.min(this.resolveModelContextWindow(model.id, config), sharedLimit),
 			maxOutputTokens,
 			{ accountId: this.account.id, accountLabel: labelSuffix }
 		));
@@ -3048,30 +3048,22 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		};
 	}
 
-	/** Remember the model used for a request and publish its window as the followed Codex context. */
-	private followModel(modelId: string): void {
+	/** Remember the model used for a request. */
+	private rememberModel(modelId: string): void {
 		if (this.followedModelId !== modelId) {
 			this.followedModelId = modelId;
 			void Promise.resolve(this.globalState?.update(this.stateKey(CODEX_LAST_MODEL_STATE_KEY), modelId))
 				.catch(error => this.logSink?.logError("codex.last_model.persist_failed", error));
 		}
-		this.publishFollowedContext();
 	}
 
-	/**
-	 * Publishes the follow target's window. Windows Codex already catalogued or
-	 * reported apply immediately, before any request; the fallback setting never
-	 * drives the shared limit.
-	 */
+	/** Publishes the newest known Sol window from the active Codex account. */
 	private publishFollowedContext(): void {
-		const target = this.followTarget;
-		if (!target) {
+		if (this.account.id !== resolveActiveCodexAccountSetting(this.getConfig())) {
 			return;
 		}
-		const info = this.resolveModelContextWindowInfo(target.modelId);
-		if (info.source !== "fallback") {
-			setFollowedCodexContext({ modelId: target.modelId, window: info.window });
-		}
+		const target = this.followTarget;
+		setFollowedCodexContext(target && { modelId: target.modelId, window: this.resolveModelContextWindow(target.modelId) });
 	}
 
 	/** Returns true when any catalogued window changed. */

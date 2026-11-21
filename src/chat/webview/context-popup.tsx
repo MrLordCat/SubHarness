@@ -7,6 +7,7 @@ import { popupPlacement, useDismiss, useKeepInView } from "./popup";
 interface ContextIndicatorProps {
 	/** Prompt tokens of the last request over the model window, once both are known. */
 	context: string | undefined;
+	title?: string;
 	/** Absent when the host offers no settings; the indicator is then plain text. */
 	settings: ChatContextSettings | undefined;
 }
@@ -14,7 +15,7 @@ interface ContextIndicatorProps {
 const SLIDER_STEP = 1_024;
 
 /** The context indicator; a click opens the shared-context and model-switch sliders. */
-export function ContextIndicator({ context, settings }: ContextIndicatorProps) {
+export function ContextIndicator({ context, settings, title = "Prompt tokens / context window" }: ContextIndicatorProps) {
 	const [open, setOpen] = useState(false);
 	const [placement, setPlacement] = useState<"above" | "below">("above");
 	// Values while a slider is dragged; they are saved when it is released.
@@ -35,7 +36,7 @@ export function ContextIndicator({ context, settings }: ContextIndicatorProps) {
 	}, [settings?.shared, settings?.switchTokens]);
 
 	if (!settings) {
-		return context ? <span class="context-indicator" title="Prompt tokens / context window">{context}</span> : null;
+		return context ? <span class="context-indicator" title={title}>{context}</span> : null;
 	}
 
 	const save = (change: ChatContextSettingsChange) => postMessage({ type: "saveContextSettings", change });
@@ -43,7 +44,7 @@ export function ContextIndicator({ context, settings }: ContextIndicatorProps) {
 	const following = settings.followCodex && settings.codexWindow !== undefined;
 	const sharedShown = following ? settings.codexWindow ?? shared : shared;
 	const codexLabel = settings.codexWindow === undefined
-		? "no Codex window known yet"
+		? "no Codex Sol window known yet"
 		: `${formatTokens(settings.codexWindow)}${settings.codexModel ? `, ${settings.codexModel}` : ""}`;
 	const onKeyDown = (event: KeyboardEvent) => {
 		if (event.key !== "Escape" || !open) {
@@ -62,7 +63,7 @@ export function ContextIndicator({ context, settings }: ContextIndicatorProps) {
 				class="context-indicator context-trigger"
 				aria-haspopup="dialog"
 				aria-expanded={open}
-				title="Prompt tokens / context window. Click for the shared context and the model-switch limit."
+				title={`${title}. Click for the shared context and the model-switch limit.`}
 				onClick={() => {
 					if (open) {
 						setOpen(false);
@@ -96,7 +97,7 @@ export function ContextIndicator({ context, settings }: ContextIndicatorProps) {
 						/>
 						<label class="context-toggle">
 							<input type="checkbox" checked={settings.followCodex} onChange={event => save({ followCodex: event.currentTarget.checked })} />
-							{`Follow the Codex window (${codexLabel})`}
+							{`Follow the Codex Sol window (${codexLabel})`}
 						</label>
 						<div class="context-hint">Codex, Claude, Coco and Cursor, each capped by its model window. Applies to new requests.</div>
 					</div>

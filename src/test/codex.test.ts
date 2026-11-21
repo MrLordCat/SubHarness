@@ -1608,6 +1608,18 @@ suite("Codex subscription provider", () => {
 		["mcp__meshy-ai_mes_meshy_check_balance", "mcp__meshy-ai_mes_meshy_text_to_3d"]);
 	});
 
+	test("detects a changed subagent schema when reusing a Bridge chat thread", () => {
+		const thread = {
+			callableNames: new Set(["read_file", "subagent"]),
+			toolSignatures: new Map([["read_file", "same"], ["subagent", "before"]]),
+		};
+		const tools = new Set(["read_file", "subagent"]);
+		assert.deepStrictEqual(codexToolsMissingFromThread(thread, tools, thread.toolSignatures), []);
+		assert.deepStrictEqual(codexToolsMissingFromThread(
+			thread, tools, new Map([["read_file", "same"], ["subagent", "after"]])
+		), ["subagent"]);
+	});
+
 	test("treats Copilot tool grouping as disabled only for a threshold of zero or less", () => {
 		const config = (threshold: unknown) => ({ get: <T>() => threshold as T });
 		assert.strictEqual(copilotToolGroupingEnabled(config(undefined)), true);
@@ -1865,7 +1877,7 @@ suite("Codex subscription provider", () => {
 		);
 	});
 
-	test("keeps the last used Codex model globally and follows the default model before any use", () => {
+	test("keeps the last used Codex model globally while the newest known Sol drives shared context", () => {
 		const memento = (values: Map<string, unknown>) => ({
 			keys: () => [...values.keys()],
 			get: <T>(key: string, defaultValue?: T): T | undefined => (values.has(key) ? values.get(key) as T : defaultValue),
@@ -1880,10 +1892,12 @@ suite("Codex subscription provider", () => {
 		const fresh = new CodexChatModelProvider("test", undefined, memento(new Map()), memento(new Map()));
 		const internals = fresh as unknown as { models: Map<string, unknown>; catalogContextWindows: Map<string, number> };
 		internals.catalogContextWindows = new Map([["gpt-6-sol", 258_400], ["gpt-6.1-sol", 475_000]]);
-		assert.deepStrictEqual(fresh.followTarget, { modelId: "gpt-6.1-sol", reason: "largest" });
+		assert.deepStrictEqual(fresh.followTarget, { modelId: "gpt-6.1-sol", reason: "latestSol" });
 		internals.models.set("gpt-6-sol", { id: "gpt-6-sol", isDefault: true });
 		internals.models.set("gpt-6.1-sol", { id: "gpt-6.1-sol", isDefault: false });
-		assert.deepStrictEqual(fresh.followTarget, { modelId: "gpt-6-sol", reason: "default" });
+		(fresh as unknown as { rememberModel(modelId: string): void }).rememberModel("gpt-6-luna");
+		assert.strictEqual(fresh.lastUsedModelId, "gpt-6-luna");
+		assert.deepStrictEqual(fresh.followTarget, { modelId: "gpt-6.1-sol", reason: "latestSol" });
 		fresh.dispose();
 	});
 

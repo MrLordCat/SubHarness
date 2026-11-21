@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as vscode from "vscode";
 import { CocoTerminalManager } from "../coco/terminal-manager";
 import { CONFIG_SECTION } from "../constants";
+import { createOsNotifier, vscodeToastAppId } from "../os-notification";
 import { resolveProviderSwitchContextTokens } from "../context/provider-handoff";
 import { getCurrentWorkspaceScopeId, getCurrentWorkspaceScopeLabel } from "../memory/scope";
 import type { SharedMemoryService } from "../memory/shared-memory-service";
@@ -14,6 +15,7 @@ import { registerChatView } from "./chat-view";
 import { CHAT_COMPACTION_TARGET_TOKENS, createChatSummarizer } from "./compaction";
 import { createChatContextSettingsSource } from "./context-settings";
 import { createChatMemorySource } from "./memory-context";
+import { chatImageFileName } from "./image-file";
 import { createChatMemoryStore } from "./memory-store";
 import { ChatPromptSource } from "./prompt/instructions";
 import { ChatSessionStore } from "./session-store";
@@ -22,7 +24,7 @@ import { ChatToolCatalog } from "./tools/catalog";
 import { availableSubagentModelProfiles } from "../subagent-guidance";
 import { createCoreTools } from "./tools/core-tools";
 import { createAskQuestionsTool, createTodoTool } from "./tools/interaction-tools";
-import { createSubagentTool } from "./tools/subagent-tool";
+import { createCloseSubagentTool, createSubagentTool } from "./tools/subagent-tool";
 import { createSymbolTools } from "./tools/symbol-tools";
 import { configuredDangerousCommandRules } from "./tools/danger";
 import { createChatTerminalTools } from "./tools/terminal-tools";
@@ -127,12 +129,19 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 				// The bridge's subagent catalog: cheapest first, premium flagships and exhausted subscriptions left out.
 				models: () => availableSubagentModelProfiles().map(profile => ({ id: profile.id, label: profile.label, useWhen: profile.useWhen })),
 			}),
+			createCloseSubagentTool({ models: () => availableSubagentModelProfiles().map(profile => ({ id: profile.id, label: profile.label, useWhen: profile.useWhen })) }),
 		],
 		state: context.globalState,
 	});
 	const attachments = new ChatAttachmentSource({ log: deps.log, pasteDir: vscode.Uri.file(path.join(storage, "chat-attachments")) });
 	const contextSettings = createChatContextSettingsSource();
+	const osNotifier = createOsNotifier({ appId: process.platform === "win32" ? vscodeToastAppId(vscode.env.appRoot) : undefined, log: deps.log });
 	const controller = new ChatController({
+		osNotify: (title, body) => {
+			if (!vscode.window.state.focused && vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>("chat.systemNotifications", true) !== false) {
+				osNotifier(title, body);
+			}
+		},
 		backend: deps.composite,
 		onDidChangeModels: deps.composite.onDidChangeLanguageModelChatInformation ?? NEVER_FIRES,
 		store: new ChatSessionStore(root),
@@ -141,7 +150,31 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		globalState: context.globalState,
 		log: deps.log,
 		changes,
+		terminals,
 		openChange: registerChangeDiff(context, changes),
+		openImage: async (image, key) => {
+			const folder = vscode.Uri.joinPath(context.globalStorageUri, "chat-images");
+			await vscode.workspace.fs.createDirectory(folder);
+			try {
+				for (const [name, type] of await vscode.workspace.fs.readDirectory(folder)) {
+					if (type === vscode.FileType.File) {
+						const file = vscode.Uri.joinPath(folder, name);
+						try {
+							if ((await vscode.workspace.fs.stat(file)).mtime < Date.now() - 24 * 60 * 60 * 1000) {
+								await vscode.workspace.fs.delete(file);
+							}
+						} catch {
+							// Cleanup is best effort.
+						}
+					}
+				}
+			} catch {
+				// Cleanup is best effort.
+			}
+			const uri = vscode.Uri.joinPath(folder, chatImageFileName(key, image.mimeType));
+			await vscode.workspace.fs.writeFile(uri, Buffer.from(image.data, "base64"));
+			await vscode.commands.executeCommand("vscode.open", uri);
+		},
 		saveExport: async (suggestedName, content) => {
 			const folder = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(os.homedir());
 			const target = await vscode.window.showSaveDialog({

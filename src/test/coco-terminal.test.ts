@@ -88,6 +88,55 @@ suite("Coco interactive terminals", () => {
 		for (const directory of temporaryDirectories.splice(0)) { fs.rmSync(directory, { recursive: true, force: true }); }
 	});
 
+	test("terminal owners reuse only their own idle shells and use owner labels", async () => {
+		const first = manager.run({ command: "first", owner: "a", ownerLabel: "Chat" }, source.token);
+		await host.next(1); host.complete(0);
+		const a = await first;
+		const second = manager.run({ command: "second", owner: "b", ownerLabel: "Subagent: test" }, source.token);
+		await host.next(2); host.complete(1);
+		const b = await second;
+		assert.notStrictEqual(a.terminalId, b.terminalId);
+		assert.strictEqual(host.terminals[1].options.name, "Subagent: test 2");
+		const third = manager.run({ command: "third", owner: "a" }, source.token);
+		await host.next(3); host.complete(2);
+		assert.strictEqual((await third).terminalId, a.terminalId);
+	});
+
+	test("terminal owners replace quiet expired sync commands and close only eligible terminals", async () => {
+		manager.dispose();
+		const logs: string[] = [];
+		manager = new CocoTerminalManager(host, 20, event => logs.push(event), "Chat", { hungQuietMs: 0 });
+		const hung = await manager.run({ command: "hung", owner: "a", timeoutMs: 0 }, source.token);
+		const replacement = manager.run({ command: "replacement", owner: "a", timeoutMs: 0 }, source.token);
+		await host.next(2);
+		assert.strictEqual((await manager.read(hung.terminalId)).state, "closed");
+		assert.ok(logs.includes("coco.terminal.replace_hung"));
+		await replacement;
+		const other = manager.run({ command: "other", owner: "b" }, source.token);
+		await host.next(3); host.complete(2); await other;
+		assert.strictEqual(manager.closeOwner("a"), 1);
+		assert.strictEqual(manager.closeOwner("b"), 1);
+	});
+
+	test("terminal owner limit keeps recent sync and async commands", async () => {
+		manager.dispose();
+		let now = 0;
+		manager = new CocoTerminalManager(host, 20, undefined, "Chat", { maxPerOwner: 2, hungQuietMs: 100, now: () => now });
+		await manager.run({ command: "sync", owner: "a", timeoutMs: 0 }, source.token);
+		now = 50;
+		host.commands[0].push("recent");
+		await new Promise<void>(resolve => setImmediate(resolve));
+		const asyncRun = manager.run({ command: "server", owner: "a", mode: "async" }, source.token);
+		await host.next(2);
+		await asyncRun;
+		await assert.rejects(manager.run({ command: "third", owner: "a" }, source.token), /read_terminal.*send_to_terminal.*kill_terminal/s);
+		assert.strictEqual(host.terminals.length, 2);
+		assert.strictEqual(manager.closeOwner("a"), 0);
+		now = 200;
+		assert.strictEqual(manager.closeOwner("a"), 1);
+		assert.strictEqual(manager.closeOwner("a"), 0);
+	});
+
 	test("automatically reuses an idle shell after a failed command without a terminalId", async () => {
 		const pending = manager.run({ command: "first" }, source.token);
 		await new Promise<void>(resolve => setImmediate(resolve));

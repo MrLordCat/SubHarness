@@ -8,6 +8,7 @@ import {
 	type ChatMemoryEntry,
 	type ChatMessage,
 	type ChatModelGroup,
+	type ChatOpenSubagent,
 	type ChatProviderQuota,
 	type ChatQueuedMessage,
 	type ChatQuestionRequest,
@@ -145,6 +146,8 @@ export class ChatStore {
 	contextSettings: ChatContextSettings | undefined;
 	/** Starred model ids; the model picker opens on them. */
 	favoriteModels: string[] = [];
+	/** Subagents kept open in the shown chat; the panel above the input lists them. */
+	openSubagents: ChatOpenSubagent[] = [];
 	run: ChatRunState = { running: false };
 	latestUsage: ChatUsage | undefined;
 
@@ -377,6 +380,7 @@ export class ChatStore {
 				this.signIn = update.signIn ?? [];
 				this.contextSettings = update.contextSettings;
 				this.favoriteModels = update.favoriteModels ?? [];
+				this.openSubagents = update.subagents ?? [];
 				this.run = update.run;
 				this.queued = update.queued ?? [];
 				this.editing = undefined;
@@ -507,6 +511,11 @@ export class ChatStore {
 			case "subagent":
 				this.liveSubagentRuns.set(update.run.callId, update.run);
 				this.bump(update.messageId);
+				return;
+			case "subagents":
+				if (update.sessionId === this.session?.id) {
+					this.openSubagents = update.subagents;
+				}
 				return;
 			case "attachmentsAdded":
 				this.addPendingAttachments(update.attachments);

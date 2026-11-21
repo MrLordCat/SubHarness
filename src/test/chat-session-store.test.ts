@@ -28,6 +28,77 @@ suite("Chat session store", () => {
 		await fs.rm(root, { recursive: true, force: true });
 	});
 
+	test("stores open subagents without image bytes and removes their sidecar", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		const file = path.join(root, `${session.id}.subagents.json`);
+		const agent = { id: "a", description: "check", modelId: "m", modelName: "Model", createdAt: 1, updatedAt: 2, task: "task", report: "report", history: [chatMessage("answer", "assistant", [{ kind: "toolResult", callId: "c", text: "image", images: [{ mimeType: "image/png", byteLength: 8, data: "abc", name: "a.png" }] }])] };
+		await store.saveSubagents(session.id, [agent]);
+		const loaded = await store.loadSubagents(session.id);
+		const part = loaded[0].history[0].parts[0];
+		assert.strictEqual(part.kind === "toolResult" ? part.images?.[0].data : "wrong", undefined);
+		const content = JSON.parse(await fs.readFile(file, "utf8"));
+		content.subagents.push({ id: 7 });
+		await fs.writeFile(file, JSON.stringify(content), "utf8");
+		assert.strictEqual((await store.loadSubagents(session.id)).length, 1);
+		await fs.writeFile(file, "{", "utf8");
+		assert.deepStrictEqual(await store.loadSubagents(session.id), []);
+		await store.saveSubagents(session.id, []);
+		assert.strictEqual(await exists(file), false);
+		await store.saveSubagents(session.id, [agent]);
+		await store.delete(session.id);
+		assert.strictEqual(await exists(file), false);
+	});
+
+	test("trims old requests on load and preserves streamed data and interruption", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		for (let i = 1; i <= 7; i++) {
+			await store.appendMessage(session.id, textMessage(`u${i}`, "user", `request ${i}`));
+			if (i === 3) {
+				await store.appendMessage(session.id, chatMessage("continuation", "user", [], { continuation: {} }));
+			}
+			await store.appendMessage(session.id, textMessage(`a${i}`, "assistant", `answer ${i}`));
+			if (i < 7) {
+				await store.endMessage(session.id, `a${i}`);
+			}
+		}
+		await store.appendPart(session.id, "a7", { kind: "text", text: " extra" });
+		await store.setUsage(session.id, "a7", { totalTokens: 7 });
+		await store.updateMeta(session.id, { title: "Custom", customTitle: true });
+		const before = await store.get(session.id);
+		const loaded = await store.loadSession(session.id, { maxRequests: 5 });
+		assert.strictEqual(loaded.messages[0].id, "u3");
+		assert.strictEqual(loaded.messages[1].id, "continuation");
+		assert.strictEqual(loaded.interruptedMessageId, "a7");
+		assert.deepStrictEqual(loaded.messages.at(-1)?.usage, { totalTokens: 7 });
+		assert.strictEqual(loaded.messages.at(-1)?.parts.length, 2);
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual(await reopened.loadSession(session.id), loaded);
+		const meta = await reopened.get(session.id);
+		assert.strictEqual(meta?.messageCount, loaded.messages.length);
+		assert.strictEqual(meta?.title, before?.title);
+		assert.strictEqual(meta?.customTitle, before?.customTitle);
+		const content = await fs.readFile(store.logPath(session.id), "utf8");
+		await reopened.loadSession(session.id, { maxRequests: 5 });
+		assert.strictEqual(await fs.readFile(store.logPath(session.id), "utf8"), content);
+	});
+
+	test("a trimmed log without kept end markers still reports the interrupted answer", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		await store.appendMessage(session.id, textMessage("u1", "user", "request 1"));
+		await store.appendMessage(session.id, textMessage("a1", "assistant", "answer 1"));
+		await store.endMessage(session.id, "a1");
+		await store.appendMessage(session.id, textMessage("u2", "user", "request 2"));
+		await store.appendMessage(session.id, textMessage("a2", "assistant", "half an answer"));
+		const trimmed = await store.loadSession(session.id, { maxRequests: 1 });
+		assert.deepStrictEqual(trimmed.messages.map(message => message.id), ["u2", "a2"]);
+		assert.strictEqual(trimmed.interruptedMessageId, "a2");
+		const reopened = await new ChatSessionStore(root).loadSession(session.id);
+		assert.strictEqual(reopened.interruptedMessageId, "a2");
+	});
+
 	test("creates sessions and lists them newest first", async () => {
 		const store = new ChatSessionStore(root);
 		const first = await store.create("model-a");
@@ -52,6 +123,25 @@ suite("Chat session store", () => {
 		assert.strictEqual(updated?.modelId, "model-b");
 		assert.deepStrictEqual(await store.get(session.id), updated);
 		assert.strictEqual(await store.updateMeta("missing", { title: "x" }), undefined);
+	});
+
+	test("persists and clears autoContinue, dropping invalid values on load", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		const autoContinue = { messageId: "answer", at: 12345, enabled: true, attempts: 2 };
+		await store.updateMeta(session.id, { autoContinue });
+		assert.strictEqual((await store.get(session.id))?.updatedAt, session.updatedAt);
+		const reopened = new ChatSessionStore(root);
+		assert.deepStrictEqual((await reopened.get(session.id))?.autoContinue, autoContinue);
+		assert.deepStrictEqual((await reopened.list())[0].autoContinue, autoContinue);
+		await reopened.updateMeta(session.id, { autoContinue: null });
+		assert.strictEqual((await new ChatSessionStore(root).get(session.id))?.autoContinue, undefined);
+
+		const indexPath = path.join(root, "index.json");
+		const index = JSON.parse(await fs.readFile(indexPath, "utf8"));
+		index.sessions[0].autoContinue = { ...autoContinue, attempts: -1 };
+		await fs.writeFile(indexPath, JSON.stringify(index), "utf8");
+		assert.strictEqual((await new ChatSessionStore(root).get(session.id))?.autoContinue, undefined);
 	});
 
 	test("persists messages, streamed parts and usage across store instances", async () => {

@@ -3,10 +3,15 @@ import { CHAT_TOOL_GROUPS, type ChatTool, type SubagentModelOption, type Subagen
 /** Not "run_subagent": the bridge would treat that as Copilot's runSubagent and rewrite its description and schema. */
 export const SUBAGENT_TOOL_NAME = "subagent";
 
+/** Tool for releasing an open subagent. */
+export const CLOSE_SUBAGENT_TOOL_NAME = "close_subagent";
+
+// Coco CLI caps tool descriptions at COCO_TOOL_DESCRIPTION_LIMIT characters; the model list comes on top.
 const DESCRIPTION_HEAD = [
-	"Delegate one bounded, independently verifiable subtask to the cheapest model that can do it reliably; it gets the same workspace tools.",
-	"It starts without this conversation, so the prompt must hold everything: goal, files, constraints, whether to change or only report, the expected output.",
-	"It returns only its final report, and its file changes join the same Keep/Undo set; check the report before relying on it.",
+	"Delegate one bounded, verifiable subtask to the cheapest model that can do it; it gets the same workspace tools.",
+	"It starts without this conversation, so the prompt must hold everything: goal, files, constraints, change or only report, expected output.",
+	"It returns only its report; its file changes join the same Keep/Undo set, so check the report.",
+	"With keepOpen it stays open: send fixes with subagentId, close it with close_subagent.",
 ].join(" ");
 
 export interface SubagentToolOptions {
@@ -42,13 +47,38 @@ export function parseSubagentInput(input: unknown, models: readonly SubagentMode
 	if (!prompt) {
 		throw new Error("prompt is required: describe the subtask completely.");
 	}
+	const subagentId = stringField(record, "subagentId");
+	if (subagentId) {
+		return { subagentId, prompt, description: stringField(record, "description") };
+	}
 	const wanted = stringField(record, "model");
 	const model = findModel(models, wanted);
 	if (!model) {
 		const names = models.map(option => `"${option.label}"`).join(", ");
 		throw new Error(`Unknown subagent model ${JSON.stringify(wanted)}. Use one of: ${names}.`);
 	}
-	return { description: stringField(record, "description") || prompt.split("\n")[0].slice(0, 60), prompt, model };
+	return { description: stringField(record, "description") || prompt.split("\n")[0].slice(0, 60), prompt, model, ...(record.keepOpen === true ? { keepOpen: true } : {}) };
+}
+
+/** Creates the tool that closes an open subagent. */
+export function createCloseSubagentTool(options: SubagentToolOptions): ChatTool {
+	return {
+		name: CLOSE_SUBAGENT_TOOL_NAME,
+		group: CHAT_TOOL_GROUPS.agents,
+		description: "Close an open subagent of this chat once its work is accepted; it frees its context and its idle terminals. Open subagents are listed in the host context.",
+		inputSchema: { type: "object", properties: { subagentId: { type: "string" } }, required: ["subagentId"] },
+		available: () => options.models().length > 0,
+		invoke: async (input, _token, context) => {
+			if (!context?.closeSubagent) {
+				throw new Error("Only the main agent can close subagents.");
+			}
+			const id = stringField(typeof input === "object" && input !== null ? input as Record<string, unknown> : {}, "subagentId");
+			if (!id) {
+				throw new Error("subagentId is required.");
+			}
+			return context.closeSubagent(id);
+		},
+	};
 }
 
 /** The subagent tool; the chat controller supplies runSubagent, so the tool cannot run anywhere else. */
@@ -67,8 +97,10 @@ export function createSubagentTool(options: SubagentToolOptions): ChatTool {
 				description: { type: "string", description: "A short (3-6 words) label for the subtask, shown to the user." },
 				prompt: { type: "string", description: "The complete task for the subagent." },
 				model: { type: "string", description: "One of the model names listed in this tool's description." },
+				keepOpen: { type: "boolean", description: "Keep the subagent open after its report, with its context, so you can send it follow-up tasks with subagentId. Close it with close_subagent once its work is accepted." },
+				subagentId: { type: "string", description: "Id of an open subagent to continue with prompt as its next task; it keeps its model and context." },
 			},
-			required: ["description", "prompt", "model"],
+			required: ["prompt"],
 		},
 		available: () => options.models().length > 0,
 		invoke: async (input, token, context) => {

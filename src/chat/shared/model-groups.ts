@@ -1,6 +1,6 @@
 import type { ChatModelEntry, ChatModelGroup, ChatThinkingOptions } from "./protocol";
 
-export interface ModelInfoLike { id: string; name: string; maxInputTokens: number; detail?: string; configurationSchema?: unknown }
+export interface ModelInfoLike { id: string; name: string; maxInputTokens: number; maxOutputTokens?: number; detail?: string; configurationSchema?: unknown }
 
 function record(value: unknown): Record<string, unknown> | undefined {
 	return typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined;
@@ -90,10 +90,12 @@ export function groupModels(models: readonly ModelInfoLike[]): ChatModelGroup[] 
 			counts.set(item.entryName, (counts.get(item.entryName) ?? 0) + 1);
 		}
 		const entries = items.map(item => {
+			const output = item.model.maxOutputTokens;
 			const entry: ChatModelEntry = {
 				id: item.model.id,
 				name: counts.get(item.entryName) === 1 ? item.entryName : item.model.name,
 				maxInputTokens: item.model.maxInputTokens,
+				...(output !== undefined && Number.isFinite(output) && output > 0 ? { maxOutputTokens: output } : {}),
 			};
 			if (item.model.detail !== undefined) {
 				entry.detail = item.model.detail;

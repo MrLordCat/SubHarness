@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 import { runAgentTurn, type AgentTurnSink, type ChatToolExecutor } from "./agent-loop";
-import type { ChatMessage, ChatSubagentRun, ChatSubagentStep } from "./shared/protocol";
+import { appendChatText, type ChatMessage, type ChatSubagentRun, type ChatSubagentStep } from "./shared/protocol";
+import { estimateChatMessageTokens } from "./compaction";
+import { shortenToolResults } from "./lm-messages";
 import type { SubagentRequest } from "./tools/types";
 
 export const SUBAGENT_INSTRUCTIONS = `<subagent>
@@ -22,6 +24,12 @@ export interface SubagentRunOptions {
 	backend: Pick<vscode.LanguageModelChatProvider, "provideLanguageModelChatResponse">;
 	model: vscode.LanguageModelChatInformation;
 	request: SubagentRequest;
+	/** The open subagent's conversation so far; absent for a new subagent. */
+	history?: ChatMessage[];
+	/** Stable id for the provider; an open subagent keeps one across its tasks. Default chat-subagent-<callId>. */
+	invocationId?: string;
+	/** Receives the history even when the run fails or stops. */
+	onHistory?(history: ChatMessage[]): void;
 	/** The subagent tool call this run answers. */
 	callId: string;
 	conversationId: string;
@@ -61,8 +69,30 @@ function snapshot(run: ChatSubagentRun): ChatSubagentRun {
 	return { ...run, steps: run.steps.map(step => ({ ...step })), ...(run.usage ? { usage: { ...run.usage } } : {}) };
 }
 
-/** Runs one subagent as a nested agent turn without the parent's history and resolves with its final report. */
-export async function runChatSubagent(options: SubagentRunOptions): Promise<string> {
+/** A subagent report and the conversation that produced it. */
+export interface SubagentRunResult {
+	/** The final report. */
+	report: string;
+	/** The conversation including the new task and answer. */
+	history: ChatMessage[];
+}
+
+/** Shortens old tool results and rejects a nearly full context. */
+export function fitSubagentHistory(history: ChatMessage[], maxInputTokens: number): ChatMessage[] {
+	let result = history;
+	let total = result.reduce((sum, message) => sum + estimateChatMessageTokens(message), 0);
+	if (total > maxInputTokens / 2) {
+		result = history.map((message, index) => index < history.length - 3 ? { ...message, parts: shortenToolResults(message.parts) } : message);
+		total = result.reduce((sum, message) => sum + estimateChatMessageTokens(message), 0);
+	}
+	if (total > maxInputTokens * 0.8) {
+		throw new Error(`This subagent's context is nearly full (${total} of ${maxInputTokens} tokens). Close it with close_subagent and start a new subagent with a short summary of its work.`);
+	}
+	return result;
+}
+
+/** Runs a nested agent turn and resolves with its report and conversation. */
+export async function runChatSubagent(options: SubagentRunOptions): Promise<SubagentRunResult> {
 	const { request, model, token } = options;
 	const run: ChatSubagentRun = {
 		callId: options.callId,
@@ -90,8 +120,21 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<stri
 		}
 		run.steps.push(step);
 	};
+	const turn = Math.max(0, ...(options.history ?? []).map(message => message.turn)) + 1;
+	const task: ChatMessage = {
+		id: `subagent-${options.callId}`,
+		role: "user",
+		turn,
+		createdAt: run.startedAt,
+		parts: [{ kind: "text", text: request.prompt }],
+		...(options.hostContext ? { hostContext: options.hostContext } : {}),
+	};
+	const answer: ChatMessage = { id: `subagent-answer-${options.callId}`, role: "assistant", turn, createdAt: Date.now(), modelId: model.id, parts: [] };
+	// Until the task reaches the model, a failure leaves the subagent's conversation as it was.
+	let history = options.history ?? [];
 	const sink: AgentTurnSink = {
 		text: (kind, text) => {
+			appendChatText(answer.parts, kind, text);
 			if (kind !== "text" || !text) {
 				return;
 			}
@@ -105,6 +148,7 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<stri
 			publish();
 		},
 		part: part => {
+			answer.parts.push(part);
 			if (part.kind === "toolCall") {
 				report = "";
 				const step: Extract<ChatSubagentStep, { kind: "tool" }> = {
@@ -134,23 +178,18 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<stri
 		},
 		usage: (usage, _totals) => {
 			run.usage = usage;
+			answer.usage = usage;
 		},
 	};
-	const task: ChatMessage = {
-		id: `subagent-${options.callId}`,
-		role: "user",
-		turn: 1,
-		createdAt: run.startedAt,
-		parts: [{ kind: "text", text: request.prompt }],
-		...(options.hostContext ? { hostContext: options.hostContext } : {}),
-	};
 	try {
+		const inputHistory = options.history?.length ? fitSubagentHistory([...(options.history ?? []), task], model.maxInputTokens) : [task];
+		history = [...inputHistory, answer];
 		const result = await runAgentTurn({
 			backend: options.backend,
 			model,
-			history: [task],
+			history: inputHistory,
 			conversationId: options.conversationId,
-			turn: 1,
+			turn,
 			tools: options.tools,
 			sink,
 			token,
@@ -158,7 +197,7 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<stri
 			// A delegated task nobody watches step by step keeps a bound; the chat turn itself has none.
 			maxRounds: SUBAGENT_MAX_ROUNDS,
 			// The composite then keeps the run off the parent's conversation, journal and native session.
-			modelOptions: { _copilotSubagentInvocationId: `chat-subagent-${options.callId}`, _aabStrictTools: true },
+			modelOptions: { _copilotSubagentInvocationId: options.invocationId ?? `chat-subagent-${options.callId}`, _aabStrictTools: true },
 		});
 		const text = report.trim();
 		if (!text && notices.length > 0) {
@@ -166,9 +205,9 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<stri
 		}
 		run.status = "done";
 		if (!text) {
-			return "The subagent finished without a report.";
+			return { report: "The subagent finished without a report.", history };
 		}
-		return result.stopReason === "maxRounds" ? `${text}\n\n[The subagent hit the tool round limit before it finished.]` : text;
+		return { report: result.stopReason === "maxRounds" ? `${text}\n\n[The subagent hit the tool round limit before it finished.]` : text, history };
 	} catch (error) {
 		const stopped = error instanceof vscode.CancellationError || token.isCancellationRequested;
 		run.status = stopped ? "stopped" : "failed";
@@ -182,6 +221,7 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<stri
 			timer = undefined;
 		}
 		run.durationMs = Date.now() - run.startedAt;
+		options.onHistory?.(history);
 		options.onFinish(snapshot(run));
 	}
 }

@@ -718,9 +718,9 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 			children: [
 				new QuickAccessItem("apiProviders.sharedContext", "Shared Context", {
 					description: config.get<boolean>("sharedContextFollowCodex", false) === true
-						? `${formatCompactTokenCount(sharedContext)} · follows Codex`
+						? `${formatCompactTokenCount(sharedContext)} · follows Codex Sol`
 						: formatCompactTokenCount(sharedContext),
-					tooltip: "One working context for Codex, Claude, Coco and Cursor. Each provider caps it to its real model window and uses it as the native auto-compaction threshold. It can follow the window of the last used Codex model.",
+					tooltip: "One working context for Codex, Claude, Coco and Cursor. Each provider caps it to its real model window and uses it as the native auto-compaction threshold. It can follow the window of the newest Codex Sol model with a known window.",
 					icon: new vscode.ThemeIcon("symbol-numeric"),
 					command: command("llamacpp.openContextControl", "Open Provider Context Control"),
 				}),

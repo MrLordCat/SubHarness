@@ -13,6 +13,12 @@ export interface CocoTerminalHost {
 }
 
 interface Command {
+	text: string;
+	mode: "sync" | "async";
+	startedAt: number;
+	lastOutputAt?: number;
+	/** The sync wait ended while the command still ran; with no output for a while the terminal counts as hung. */
+	waitExpired?: boolean;
 	execution: vscode.TerminalShellExecution;
 	output: string;
 	truncated: boolean;
@@ -25,6 +31,8 @@ interface Command {
 }
 
 interface Session {
+	/** The chat or subagent run whose runs reuse this terminal. */
+	owner?: string;
 	id: string;
 	terminal: vscode.Terminal;
 	closed: boolean;
@@ -38,6 +46,10 @@ interface Session {
 }
 
 export interface CocoTerminalRunInput {
+	/** Owner whose idle terminals may be reused. */
+	owner?: string;
+	/** Label used for newly created terminals. */
+	ownerLabel?: string;
 	command: string;
 	terminalId?: string;
 	newTerminal?: boolean;
@@ -91,6 +103,8 @@ export class CocoTerminalManager implements vscode.Disposable {
 		private readonly integrationTimeoutMs = 20_000,
 		private readonly onLog?: (event: string, data: Record<string, unknown>) => void,
 		private readonly terminalName = "Coco",
+		/** hungQuietMs: silence after a sync timeout that makes a terminal hung (60 s); maxPerOwner: open terminals per owner (4). */
+		private readonly options: { hungQuietMs?: number; maxPerOwner?: number; now?: () => number } = {},
 	) {
 		this.subscriptions = [
 			host.onDidStartTerminalShellExecution(event => {
@@ -127,6 +141,7 @@ export class CocoTerminalManager implements vscode.Disposable {
 		const session = selection.session;
 		this.onLog?.("coco.terminal.run", {
 			command: input.command.slice(0, 160),
+			owner: input.owner,
 			cwd: input.cwd,
 			requestedId: input.terminalId,
 			newTerminal: input.newTerminal === true,
@@ -160,9 +175,9 @@ export class CocoTerminalManager implements vscode.Disposable {
 				const entered = await this.enterDirectory(session, integration, input.cwd, token).catch(() => false);
 				if (!entered) {
 					// The shell refused the change; a terminal created there is the honest option.
-					const replacement = this.create(input.cwd);
+					const replacement = this.createForRun(input);
 					this.onLog?.("coco.terminal.run", {
-						command: input.command.slice(0, 160), cwd: input.cwd,
+						command: input.command.slice(0, 160), cwd: input.cwd, owner: input.owner,
 						action: "create", reason: "directory-change-failed",
 						terminalId: replacement.id, idleCount: [...this.sessions.values()].filter(candidate => this.isIdle(candidate)).length,
 					});
@@ -209,7 +224,7 @@ export class CocoTerminalManager implements vscode.Disposable {
 		const execution = integration.executeCommand(input.command);
 		let finish!: () => void;
 		const command: Command = {
-			execution, output: "", truncated: false, state: "running",
+			execution, text: input.command, mode: input.mode ?? "sync", startedAt: this.now(), output: "", truncated: false, state: "running",
 			done: new Promise<void>(resolve => { finish = resolve; }), finish: () => finish(), drain: Promise.resolve(),
 		};
 		session.command = command;
@@ -217,6 +232,9 @@ export class CocoTerminalManager implements vscode.Disposable {
 		command.drain = this.capture(execution.read(), command);
 		const waitMs = input.mode === "async" ? 1_000 : bounded(input.timeoutMs, 120_000, 3_600_000);
 		await this.waitFor(command.done, waitMs);
+		if (command.state === "running" && command.mode === "sync") {
+			command.waitExpired = true;
+		}
 		if (token.isCancellationRequested) { throw new vscode.CancellationError(); }
 		return this.snapshot(session, bounded(input.maxChars, 12_000, OUTPUT_LIMIT));
 	}
@@ -235,7 +253,7 @@ export class CocoTerminalManager implements vscode.Disposable {
 		const command = `cd "${directory}"`;
 		let finish!: () => void;
 		const directoryChange: Command = {
-			execution: integration.executeCommand(command), output: "", truncated: false, state: "running",
+			execution: integration.executeCommand(command), text: command, mode: "sync", startedAt: this.now(), output: "", truncated: false, state: "running",
 			done: new Promise<void>(resolve => { finish = resolve; }), finish: () => finish(), drain: Promise.resolve(),
 		};
 		session.command = directoryChange;
@@ -281,7 +299,55 @@ export class CocoTerminalManager implements vscode.Disposable {
 		this.sessions.clear();
 	}
 
-	private create(cwd?: string): Session {
+	private now(): number {
+		return (this.options.now ?? Date.now)();
+	}
+
+	private quietMs(session: Session): number | undefined {
+		const command = session.command;
+		if (session.closed || !command || command.state !== "running" || command.mode !== "sync" || !command.waitExpired) {
+			return undefined;
+		}
+		return this.now() - (command.lastOutputAt ?? command.startedAt);
+	}
+
+	private isHung(session: Session): boolean {
+		const quiet = this.quietMs(session);
+		return quiet !== undefined && quiet >= (this.options.hungQuietMs ?? 60_000);
+	}
+
+	/** Closes idle or hung terminals belonging to an owner. */
+	closeOwner(owner: string): number {
+		let count = 0;
+		for (const session of this.sessions.values()) {
+			if (session.owner === owner && (this.isIdle(session) || this.isHung(session))) {
+				this.close(session);
+				count++;
+			}
+		}
+		this.onLog?.("coco.terminal.close_owner", { owner, count });
+		return count;
+	}
+
+	private createForRun(input: CocoTerminalRunInput): Session {
+		const owned = [...this.sessions.values()].filter(session => !session.closed && !session.terminal.exitStatus && session.owner === input.owner);
+		const hung = owned.filter(session => this.isHung(session)).sort((a, b) => this.quietMs(b)! - this.quietMs(a)!)[0];
+		if (hung) {
+			this.onLog?.("coco.terminal.replace_hung", { terminalId: hung.id, owner: input.owner, command: hung.command?.text.slice(0, 160), quietMs: this.quietMs(hung) });
+			this.close(hung);
+		} else if (owned.length >= (this.options.maxPerOwner ?? 4)) {
+			this.onLog?.("coco.terminal.owner_limit", { owner: input.owner, count: owned.length });
+			const listing = owned.map(session => {
+				const state = session.starting || session.busy || session.command?.state === "running" ? "running" : "idle";
+				return `- ${session.id}: ${(session.command?.text ?? "").slice(0, 80)} (${state})`;
+			}).join("\n");
+			throw new Error(`All ${owned.length} ${input.ownerLabel ?? this.terminalName} terminals are busy:\n${listing}\n`
+				+ "Read one with read_terminal, stop it with send_to_terminal interrupt, or close it with kill_terminal before starting another.");
+		}
+		return this.create(input.cwd, input.owner, input.ownerLabel);
+	}
+
+	private create(cwd?: string, owner?: string, ownerLabel?: string): Session {
 		if (this.sessions.size >= 64) {
 			for (const [id, session] of this.sessions) {
 				if (session.closed) { this.sessions.delete(id); }
@@ -292,10 +358,10 @@ export class CocoTerminalManager implements vscode.Disposable {
 			throw new Error(`Close an unused ${this.terminalName} terminal before creating another.`);
 		}
 		const session: Session = {
-			id: randomUUID(), closed: false, starting: false,
+			id: randomUUID(), owner, closed: false, starting: false,
 			createdCwd: cwd,
 			terminal: this.host.createTerminal({
-				name: `${this.terminalName} ${++this.sequence}`, cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri,
+				name: `${ownerLabel ?? this.terminalName} ${++this.sequence}`, cwd: cwd || vscode.workspace.workspaceFolders?.[0]?.uri,
 				location: vscode.TerminalLocation.Panel,
 				// Git otherwise opens a pager in the panel and waits for "q".
 				env: { GIT_PAGER: "cat", PAGER: "cat" },
@@ -314,15 +380,15 @@ export class CocoTerminalManager implements vscode.Disposable {
 		if (input.terminalId) {
 			return { session: this.get(input.terminalId), created: false, reason: "explicit-terminal-id" };
 		}
-		const idle = [...this.sessions.values()].reverse().filter(candidate => this.isIdle(candidate));
+		const idle = [...this.sessions.values()].reverse().filter(candidate => candidate.owner === input.owner && this.isIdle(candidate));
 		if (input.newTerminal) {
-			return { session: this.create(input.cwd), created: true, reason: "new-terminal-requested" };
+			return { session: this.createForRun(input), created: true, reason: "new-terminal-requested" };
 		}
 		if (!input.cwd) {
 			const session = idle[0];
 			return session
 				? { session, created: false, reason: "idle-terminal" }
-				: { session: this.create(undefined), created: true, reason: "no-idle-terminal" };
+				: { session: this.createForRun(input), created: true, reason: "no-idle-terminal" };
 		}
 		const matching = idle.find(candidate => this.matchesCwd(candidate, input.cwd!));
 		if (matching) {
@@ -332,7 +398,7 @@ export class CocoTerminalManager implements vscode.Disposable {
 		if (reusable) {
 			return { session: reusable, created: false, reason: "idle-terminal-other-cwd" };
 		}
-		return { session: this.create(input.cwd), created: true, reason: "no-idle-terminal" };
+		return { session: this.createForRun(input), created: true, reason: "no-idle-terminal" };
 	}
 
 	/** Shell-reported directory, then the last execution's, then the creation directory. */
@@ -391,6 +457,7 @@ export class CocoTerminalManager implements vscode.Disposable {
 	private async capture(stream: AsyncIterable<string>, command: Command): Promise<void> {
 		try {
 			for await (const chunk of stream) {
+				command.lastOutputAt = this.now();
 				command.output += stripVTControlCharacters(chunk);
 				if (command.output.length > OUTPUT_LIMIT) {
 					command.output = command.output.slice(-OUTPUT_LIMIT);

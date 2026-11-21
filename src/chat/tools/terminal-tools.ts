@@ -76,7 +76,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 		{
 			name: "run_in_terminal",
 			group: CHAT_TOOL_GROUPS.terminal,
-			description: "Run a shell command in a VS Code terminal the user can see. Reuses the last idle chat terminal and its shell state; cwd changes its directory first. mode sync waits up to timeoutMs (default 120000); async returns after about a second, for servers and watchers. If the result's state is running, read that terminal instead of rerunning.",
+			description: "Run a shell command in a VS Code terminal the user can see. Reuses an idle terminal of this chat or subagent, each subagent having its own; cwd changes its directory first. A terminal whose sync command timed out and printed nothing for a minute is closed and replaced. mode sync waits up to timeoutMs (default 120000); async returns after about a second, for servers and watchers. If the result's state is running, read that terminal instead of rerunning.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -92,13 +92,15 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 				additionalProperties: false,
 			},
 			needsConfirmation: input => dangerous(record(input).command, record(input).cwd, rules(), "Run a dangerous command"),
-			invoke: async (input, token) => {
+			invoke: async (input, token, context) => {
 				if (!isTrusted()) {
 					throw new Error("Trust this workspace before running terminal commands.");
 				}
 				const value = record(input);
 				const maxChars = terminalMaxChars(optionalNumber(value.maxChars), RUN_DEFAULT_MAX_CHARS);
 				const run: CocoTerminalRunInput = {
+					owner: context?.terminalOwner?.id,
+					ownerLabel: context?.terminalOwner?.label,
 					command: requireString(value, "command"),
 					cwd: optionalString(value.cwd),
 					mode: value.mode === "async" ? "async" : "sync",

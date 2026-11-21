@@ -541,11 +541,11 @@ test("opens centralized API provider management from Quick Access", async () => 
 		assert.strictEqual(capped.codexTarget, 258_400);
 	});
 
-	test("shows Codex model windows and follows the last used model when enabled", () => {
+	test("shows Codex model windows and follows Sol when enabled", () => {
 		const values = new Map<string, unknown>([["sharedContextLength", 440_921]]);
 		const configuration = { get: <T>(key: string, fallback?: T) => values.has(key) ? values.get(key) as T : fallback };
 		const codex = {
-			followTarget: { modelId: "gpt-6.1-sol", reason: "lastUsed" as const },
+			followTarget: { modelId: "gpt-6.1-sol", reason: "latestSol" as const },
 			models: [
 				{ modelId: "gpt-6-sol", window: 258_400, source: "server" as const },
 				{ modelId: "gpt-6.1-sol", window: 475_000, source: "catalog" as const },
@@ -567,7 +567,7 @@ test("opens centralized API provider management from Quick Access", async () => 
 			assert.strictEqual(followed.sharedTarget, 475_000);
 			assert.strictEqual(followed.manualSharedTarget, 440_921);
 			assert.strictEqual(followed.followedCodexModelId, "gpt-6.1-sol");
-			assert.strictEqual(followed.followedCodexReason, "lastUsed");
+			assert.strictEqual(followed.followedCodexReason, "latestSol");
 			assert.strictEqual(followed.codexTarget, 475_000);
 			assert.strictEqual(followed.claudeTarget, 475_000);
 		} finally {
@@ -575,11 +575,11 @@ test("opens centralized API provider management from Quick Access", async () => 
 		}
 	});
 
-	test("uses the Codex default model's catalog window before any Codex request", () => {
+	test("uses the Sol catalog window before any Codex request", () => {
 		const values = new Map<string, unknown>([["sharedContextLength", 440_921], ["sharedContextFollowCodex", true]]);
 		const configuration = { get: <T>(key: string, fallback?: T) => values.has(key) ? values.get(key) as T : fallback };
 		const codex = {
-			followTarget: { modelId: "gpt-6.1-sol", reason: "default" as const },
+			followTarget: { modelId: "gpt-6.1-sol", reason: "latestSol" as const },
 			models: [{ modelId: "gpt-6.1-sol", window: 475_000, source: "catalog" as const }],
 		};
 		try {
@@ -588,7 +588,7 @@ test("opens centralized API provider management from Quick Access", async () => 
 			assert.strictEqual(state.codexMaximum, 475_000, "not the 258.4k fallback setting");
 			assert.strictEqual(state.codexMaximumSource, "catalog");
 			assert.strictEqual(state.sharedTarget, 475_000);
-			assert.strictEqual(state.followedCodexReason, "default");
+			assert.strictEqual(state.followedCodexReason, "latestSol");
 		} finally {
 			setFollowedCodexContext(undefined);
 		}

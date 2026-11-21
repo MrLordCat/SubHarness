@@ -97,6 +97,18 @@ suite("Chat quota", () => {
 		assert.strictEqual(thinkingOptions({ id: "m", name: "M", maxInputTokens: 1, configurationSchema: { properties: { reasoningEffort: { enum: [7, null] } } } }), undefined);
 	});
 
+	test("groupModels copies only a positive finite answer reserve", () => {
+		const models = groupModels([
+			{ id: "codex::reserved", name: "Reserved (Codex)", maxInputTokens: 10, maxOutputTokens: 5 },
+			{ id: "codex::zero", name: "Zero (Codex)", maxInputTokens: 10, maxOutputTokens: 0 },
+			{ id: "codex::missing", name: "Missing (Codex)", maxInputTokens: 10 },
+		]);
+		const codex = models.find(group => group.provider === "Codex");
+		assert.strictEqual(codex?.models.find(model => model.id === "codex::reserved")?.maxOutputTokens, 5);
+		assert.strictEqual(codex?.models.find(model => model.id === "codex::zero")?.maxOutputTokens, undefined);
+		assert.strictEqual(codex?.models.find(model => model.id === "codex::missing")?.maxOutputTokens, undefined);
+	});
+
 	test("groupModels puts the thinking options on the model entry", () => {
 		const groups = groupModels([MODEL, { id: "claude::smart", name: "Smart (Claude)", maxInputTokens: 200_000 }]);
 		const codex = groups.find(group => group.provider === "Codex");

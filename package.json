@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/ai-agent-bridge.git"
 	},
-	"version": "1.21.51",
+	"version": "2.0.2",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -65,6 +65,11 @@
 		"configuration": {
 			"title": "AI Agent Bridge",
 			"properties": {
+				"llamacpp.chat.systemNotifications": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show an operating-system notification when a chat finishes, waits for an approval or asks a question while the VS Code window is not focused or is minimized."
+				},
 				"llamacpp.chat.dangerousCommands": {
 					"type": "array",
 					"items": {
@@ -279,7 +284,7 @@
 				"llamacpp.sharedContextFollowCodex": {
 					"type": "boolean",
 					"default": false,
-					"description": "Use the context window of the last used Codex model as the shared working context instead of llamacpp.sharedContextLength. The window comes from Codex itself (its model catalog, then the value reported during a turn), so a larger Codex window enlarges the shared context for every provider and a smaller one shrinks it. Before the first Codex request the Codex default model's window applies, or the largest catalogued window while the model list is not loaded. llamacpp.sharedContextLength applies only while Codex has reported no window; it is kept unchanged."
+					"description": "Use the newest Codex Sol model with a known window as the shared working context. The window comes from Codex's catalog or turn usage. Luna, Terra and other Codex models do not affect this setting. The slider value applies until a Sol window is known."
 				},
 				"llamacpp.codexContextLength": {
 					"type": "number",

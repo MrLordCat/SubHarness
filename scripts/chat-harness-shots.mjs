@@ -24,10 +24,15 @@ const harnessPage = path.resolve("artifacts/chat-harness/index.html");
  * A shot without an action list is taken right after the page settles.
  */
 const SCENARIOS = [
+	{ name: "subagents-panel-dark", width: 420, height: 900, params: { count: "8", subagents: "1" } },
+	{ name: "subagents-panel-320", width: 320, height: 800, params: { count: "8", subagents: "1" } },
+	{ name: "subagents-panel-light", width: 420, height: 900, params: { theme: "light", count: "8", subagents: "1" } },
 	{ name: "light-errors", width: 420, height: 800, params: { theme: "light", count: "8" } },
 	// The limit card is in the second message, so the top of the list shows it.
 	{ name: "light-cards", width: 420, height: 900, params: { theme: "light", count: "40" }, actions: [{ scrollTop: 0 }] },
 	{ name: "dark-cards-limit", width: 420, height: 900, params: { count: "40" }, actions: [{ scrollTop: 0 }] },
+	{ name: "limit-auto-dark", width: 420, height: 900, params: { count: "40", limitLast: "1" }, actions: [{ scrollTop: 100000 }] },
+	{ name: "limit-auto-off", width: 420, height: 900, params: { count: "40", limitLast: "1" }, actions: [{ scrollTop: 100000 }, { click: ".limit-auto input" }, { wait: 300 }] },
 	{ name: "dark-cards-compaction", width: 420, height: 900, params: { count: "40" }, actions: [{ scrollTo: ".compaction-card" }] },
 	{ name: "dark-cards-subagent", width: 420, height: 900, params: { count: "40" }, actions: [{ scrollTo: ".subagent-card" }] },
 	{ name: "editor-wide-dark", width: 1500, height: 900, params: { host: "editor", count: "8" } },

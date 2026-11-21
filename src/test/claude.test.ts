@@ -1480,7 +1480,23 @@ suite("Claude tool catalog growth", () => {
 			assert.strictEqual(second.options.resumeSessionAt, first.stableAssistantMessageId);
 			assert.deepStrictEqual(second.options.tools.map(tool => tool.name), ["read_file", "search_repo"]);
 			assert.strictEqual(first.disposed, true, "the replaced live session is disposed");
-			assert.ok(fixture.events.includes("claude.chat.tool_catalog_grew"));
+			assert.ok(fixture.events.includes("claude.chat.tool_catalog_changed"));
+		} finally {
+			fixture.provider.dispose();
+		}
+	});
+
+	test("a strict new turn refreshes an existing subagent schema", async () => {
+		const fixture = claudeChatFixture();
+		try {
+			const before = { ...claudeTool("subagent"), inputSchema: { type: "object", required: ["model", "prompt"] } };
+			const after = { ...before, inputSchema: { type: "object", required: ["prompt"], properties: { subagentId: { type: "string" } } } };
+			await fixture.send([claudeUser("FIRST")], [before]);
+			await fixture.send([claudeUser("FIRST"), claudeAssistantText("ok"), claudeUser("SECOND")], [after], true);
+
+			assert.strictEqual(fixture.clients.length, 2);
+			assert.strictEqual(fixture.clients[1].options.resumeSessionId, fixture.clients[0].sdkSessionId);
+			assert.deepStrictEqual(fixture.clients[1].options.tools[0].inputSchema, after.inputSchema);
 		} finally {
 			fixture.provider.dispose();
 		}

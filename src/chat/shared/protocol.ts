@@ -75,6 +75,8 @@ export type ChatSubagentStep =
 export interface ChatSubagentRun {
 	/** The subagent tool call this run answers. */
 	callId: string;
+	/** The open subagent that ran this task; absent for a one-off subagent. */
+	subagentId?: string;
 	description: string;
 	modelId: string;
 	modelName: string;
@@ -86,6 +88,21 @@ export interface ChatSubagentRun {
 }
 
 export type ChatStructuredPart = Exclude<ChatPart, { kind: ChatTextKind }>;
+
+/** A subagent kept open in a chat for follow-up tasks; the panel above the input lists them. */
+export interface ChatOpenSubagent {
+	id: string;
+	description: string;
+	modelName: string;
+	status: "running" | "idle";
+	/** First line of its current or last task. */
+	task: string;
+	/** What it does right now, while it runs. */
+	activity?: string;
+	/** Start of its last report. */
+	report?: string;
+	updatedAt: number;
+}
 
 /** A provider refused the request because of a subscription limit or an empty balance. */
 export interface ChatLimitInfo {
@@ -131,7 +148,7 @@ export interface ChatContextSettings {
 	shared: number;
 	sharedMin: number;
 	sharedMax: number;
-	/** The shared context follows the window of the Codex model instead of the slider. */
+	/** The shared context follows the newest known Codex Sol window. */
 	followCodex: boolean;
 	/** The followed Codex model and its window, once Codex reported or catalogued one. */
 	codexModel?: string;
@@ -210,6 +227,17 @@ export interface ChatSessionMeta {
 	modelId?: string;
 	messageCount: number;
 	customTitle?: boolean;
+	/** Pending automatic continuation after a subscription limit. */
+	autoContinue?: {
+		/** Assistant message to continue. */
+		messageId: string;
+		/** Scheduled time in epoch milliseconds. */
+		at: number;
+		/** Whether automatic continuation is enabled. */
+		enabled: boolean;
+		/** Consecutive automatic continuations that hit the limit. */
+		attempts: number;
+	};
 }
 
 export type ChatSessionActivityState = "running" | "approval" | "finished";
@@ -225,6 +253,8 @@ export interface ChatModelEntry {
 	/** Name without the provider suffix, unique inside its group. */
 	name: string;
 	maxInputTokens: number;
+	/** Tokens reserved for the answer; maxInputTokens + maxOutputTokens is the model's context window. */
+	maxOutputTokens?: number;
 	detail?: string;
 	/** Reasoning levels the model accepts, from its configurationSchema. */
 	thinking?: ChatThinkingOptions;
@@ -412,6 +442,8 @@ export type HostMessage =
 		contextSettings?: ChatContextSettings;
 		/** Model ids starred in the model picker, oldest first; the picker opens on them. */
 		favoriteModels?: string[];
+		/** Subagents kept open in the shown chat. */
+		subagents?: ChatOpenSubagent[];
 	}
 	| { type: "changes"; changes: ChatChangeSet }
 	| { type: "contextSettings"; settings: ChatContextSettings }
@@ -441,6 +473,8 @@ export type HostMessage =
 	| { type: "partTextFull"; messageId: string; index: number; text: string }
 	/** Live state of a running subagent; the finished run arrives as a "subagent" part. */
 	| { type: "subagent"; messageId: string; run: ChatSubagentRun }
+	/** The shown chat's open subagents changed. */
+	| { type: "subagents"; sessionId: string; subagents: ChatOpenSubagent[] }
 	/** Chats other than the shown one that run, wait for an approval or finished unseen. */
 	| { type: "activity"; activity: ChatSessionActivity[] }
 	/** Attachments to show in the composer; they are sent with the next message. */
@@ -469,6 +503,8 @@ export type WebviewMessage =
 	/** Starts the sign-in of a subscription from the model picker's offers. */
 	| { type: "signIn"; provider: string }
 	| { type: "openAttachment"; attachment: ChatAttachment }
+	/** Opens an image of a tool result in VS Code's image viewer. */
+	| { type: "openToolImage"; messageId: string; callId: string; index: number }
 	/**
 	 * Replaces an earlier user message: it and everything after it are dropped, then the text is sent as a new turn.
 	 * undoChanges also restores the files the agent changed since that message.
@@ -477,6 +513,10 @@ export type WebviewMessage =
 	| { type: "editMessage"; messageId: string; text: string; undoChanges?: boolean; attachments?: ChatAttachment[] }
 	/** Continues the failed answer (messageId): its work stays and a continuation message asks the model to finish. */
 	| { type: "retryTurn"; messageId: string }
+	/** Closes an open subagent from the panel above the input. */
+	| { type: "closeSubagent"; sessionId: string; subagentId: string }
+	/** The limit card's checkbox: continue the answer (messageId) by itself once the limit resets. */
+	| { type: "setAutoContinue"; sessionId: string; messageId: string; enabled: boolean }
 	/** Without ids the whole change set is kept or undone. */
 	| { type: "keepChanges"; ids?: string[] }
 	| { type: "undoChanges"; ids?: string[] }

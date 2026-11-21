@@ -7,6 +7,7 @@ import {
 	type ChatContextSettings,
 	type ChatMessage,
 	type ChatModelGroup,
+	type ChatOpenSubagent,
 	type ChatPart,
 	type ChatProviderQuota,
 	type ChatSessionActivity,
@@ -64,7 +65,7 @@ const MODEL_GROUPS: ChatModelGroup[] = [
 	{
 		provider: "Codex",
 		models: [
-			{ id: "gpt-5.5-codex", name: "GPT-5.5", maxInputTokens: 400_000, thinking: CODEX_THINKING },
+			{ id: "gpt-5.5-codex", name: "GPT-5.5", maxInputTokens: 442_232, maxOutputTokens: 32_768, thinking: CODEX_THINKING },
 			{ id: "gpt-5.5-mini-codex", name: "GPT-5.5 mini", maxInputTokens: 200_000, thinking: CODEX_THINKING },
 			{ id: "gpt-5-codex", name: "GPT-5", maxInputTokens: 400_000, thinking: CODEX_THINKING },
 			{ id: "gpt-5.1-codex-max", name: "GPT-5.1 Codex Max", maxInputTokens: 1_000_000, thinking: CODEX_THINKING },
@@ -190,6 +191,16 @@ let liveSubagentStarted = false;
 let liveSubagentTimer: number | undefined;
 
 let messages = createMessages(initialCount);
+const limitLast = harnessParams.get("limitLast") === "1";
+const limitLastMessageId = "harness-limit-last";
+if (limitLast) {
+	const limitPart = createLimitPart();
+	messages.push({ id: limitLastMessageId, role: "assistant", turn: Math.ceil(messages.length / 2) + 1, createdAt: Date.now(), modelId: "gpt-5.5-codex", parts: [limitPart] });
+}
+let openSubagents: ChatOpenSubagent[] = harnessParams.get("subagents") === "1" ? [
+	{ id: "sa-1a2b", description: "Fix chat tests", modelName: "GPT-6.1 Terra", status: "running", task: "Fix the failing chat tests", activity: "run_in_terminal npm test", updatedAt: Date.now() },
+	{ id: "sa-3c4d", description: "Review terminal manager", modelName: "GPT-6-Luna", status: "idle", task: "Review the terminal manager", report: "All four cases pass; two edge cases left open for review.", updatedAt: Date.now() },
+] : [];
 const SESSION_ID = "harness-session";
 const SESSION_CREATED_AT = Date.now() - messages.length * 1000;
 let activeSessionId = SESSION_ID;
@@ -201,7 +212,7 @@ let quota = createQuota();
 let favoriteModels = (harnessParams.get("favorites") ?? "").split(",").filter(id => id.length > 0);
 let contextSettings: ChatContextSettings = {
 	shared: 258_400, sharedMin: 131_072, sharedMax: 1_048_576,
-	followCodex: harnessParams.get("followCodex") !== "0", codexModel: "gpt-5.5", codexWindow: 475_000,
+	followCodex: harnessParams.get("followCodex") !== "0", codexModel: "gpt-6.2-sol", codexWindow: 475_000,
 	switchTokens: 250_000, switchMin: 32_768, switchMax: 1_048_576,
 };
 let nextId = 0;
@@ -221,6 +232,7 @@ let pendingApproval: { id: string; assistantId: string; callId: string } | undef
 interface HarnessSession {
 	id: string;
 	title: string;
+	autoContinue?: { messageId: string; at: number; enabled: boolean; attempts: number };
 	createdAt: number;
 	updatedAt: number;
 	messages: ChatMessage[];
@@ -243,6 +255,7 @@ const fakeSessions: HarnessSession[] = [
 		createdAt: SESSION_CREATED_AT,
 		updatedAt: Date.now(),
 		messages,
+		...(limitLast ? { autoContinue: { messageId: limitLastMessageId, at: Date.now() + 2 * 3_600_000 + 6 * 60_000, enabled: true, attempts: 0 } } : {}),
 	},
 	{ id: "harness-terminal", title: "Fix flaky terminal test", createdAt: minutesAgo(60), updatedAt: minutesAgo(10), messages: createMessages(8) },
 	{ id: "harness-empty", title: "Empty chat", createdAt: minutesAgo(20), updatedAt: minutesAgo(15), messages: [] },
@@ -304,6 +317,12 @@ function handleWebviewMessage(message: WebviewMessage): void {
 		case "ready":
 			emitInit();
 			break;
+		case "closeSubagent":
+			if (message.sessionId === activeSessionId) {
+				openSubagents = openSubagents.filter(agent => agent.id !== message.subagentId);
+				emit({ type: "subagents", sessionId: message.sessionId, subagents: openSubagents });
+			}
+			break;
 		case "send":
 			handleSend(message.text, message.attachments);
 			break;
@@ -312,6 +331,9 @@ function handleWebviewMessage(message: WebviewMessage): void {
 			break;
 		case "addAttachments":
 			emitDroppedAttachments(message.uris);
+			break;
+		case "openToolImage":
+			console.info(`harness: open image ${message.messageId} ${message.callId} ${message.index}`);
 			break;
 		case "openAttachment":
 			console.info(`harness: open attachment ${message.attachment.path}`);
@@ -357,6 +379,17 @@ function handleWebviewMessage(message: WebviewMessage): void {
 		case "retryTurn":
 			handleRetryTurn(message.messageId);
 			break;
+		case "setAutoContinue": {
+			const session = fakeSessions.find(candidate => candidate.id === message.sessionId);
+			if (session?.autoContinue?.messageId === message.messageId) {
+				session.autoContinue.enabled = message.enabled;
+				if (message.enabled) {
+					session.autoContinue.attempts = 0;
+				}
+				emit({ type: "session", session: sessionMeta() });
+			}
+			break;
+		}
 		case "keepChanges":
 			handleKeepChanges(message.ids);
 			break;
@@ -489,6 +522,7 @@ function emitInit(): void {
 		run: { running: false },
 		tools: TOOL_GROUPS,
 		approvals: [],
+		subagents: openSubagents,
 		changes: currentChanges,
 		quota,
 		activity: activity.map(entry => ({ ...entry })),
@@ -642,6 +676,7 @@ function sessionMeta(): ChatSessionMeta {
 		updatedAt: Date.now(),
 		modelId: selectedModelId,
 		messageCount: messages.length,
+		autoContinue: active.autoContinue,
 	};
 }
 
@@ -1215,7 +1250,7 @@ function assistantParts(index: number, random: () => number): ChatPart[] {
 		parts.push({ kind: "notice", level: index % 16 === 4 ? "warning" : "info", text: "The harness generated this message for performance testing." });
 	}
 	if (variant === 7) {
-		parts.push({ kind: "toolResult", callId: `orphan-${index}`, text: "Compiled with 0 errors.", isError: false });
+		parts.push({ kind: "toolResult", callId: `orphan-${index}`, text: "Compiled with 0 errors.", isError: false, images: [{ mimeType: "image/png", byteLength: 48_213, name: "screenshot.png" }] });
 	}
 	return parts;
 }

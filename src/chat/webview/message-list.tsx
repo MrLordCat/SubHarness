@@ -276,6 +276,7 @@ export function MessageList({ store, running, context }: MessageListProps) {
 					editing={message.id === editingId}
 					compactionBoundary={message.id === boundaryId}
 					isLast={index === store.messages.length - 1}
+					autoContinue={index === store.messages.length - 1 ? store.session?.autoContinue : undefined}
 					changedFilesSinceTurn={message.id === editingId ? store.filesChangedSince(message.turn) : 0}
 					context={context}
 					store={store}

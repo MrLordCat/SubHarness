@@ -8,11 +8,11 @@ import { compactChatHistory, estimateTextTokens, planChatCompaction, previousMod
 import { activeCompaction, systemMessage } from "./lm-messages";
 import { MEMORY_INDEX_ID, type ChatMemoryContext, type ChatMemorySource } from "./memory-context";
 import type { ChatMemoryStore } from "./memory-store";
-import { DEFAULT_CHAT_TITLE, titleFromParts, type ChatSessionStore } from "./session-store";
+import { CHAT_MAX_REQUESTS, DEFAULT_CHAT_TITLE, titleFromParts, type ChatSessionStore, type StoredSubagent } from "./session-store";
 import { chatExportFileName, renderChatMarkdown } from "./chat-export";
 import { runChatSubagent } from "./subagent-runner";
 import { ASK_QUESTIONS_TOOL_NAME, TODO_TOOL_NAME } from "./tools/interaction-tools";
-import { SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
+import { CLOSE_SUBAGENT_TOOL_NAME, SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
 import { LIST_TOOLS_TOOL_NAME, MAX_REQUESTED_TOOLS, REQUEST_TOOLS_TOOL_NAME, shortToolDescription, toolsArriveMidTurn } from "./tools/tool-access-tools";
 import { groupModels, modelProvider, thinkingOptions } from "./shared/model-groups";
 import {
@@ -35,6 +35,7 @@ import type {
 	ChatMemoryEntry,
 	ChatMemorySaveInput,
 	ChatMessage,
+	ChatOpenSubagent,
 	ChatPart,
 	ChatPastedFile,
 	ChatPromptCache,
@@ -49,6 +50,7 @@ import type {
 	ChatSessionMeta,
 	ChatSignInOffer,
 	ChatStructuredPart,
+	ChatSubagentRun,
 	ChatTextKind,
 	ChatToolGroup,
 	ChatToolImage,
@@ -65,7 +67,11 @@ export interface ChatControllerDeps {
 	backend: Pick<vscode.LanguageModelChatProvider, "provideLanguageModelChatResponse" | "provideLanguageModelChatInformation">;
 	onDidChangeModels: vscode.Event<void>;
 	store: ChatSessionStore;
+	/** Requests a chat keeps; older ones are deleted when it is loaded (default CHAT_MAX_REQUESTS). */
+	maxRequests?: number;
 	tools: ChatToolSource;
+	/** Closes the idle terminals of a chat or subagent run that ended. */
+	terminals?: { closeOwner(owner: string): number };
 	state: vscode.Memento;
 	/** Settings shared by every workspace, such as the starred models; without it they stay in `state`. */
 	globalState?: vscode.Memento;
@@ -75,6 +81,8 @@ export interface ChatControllerDeps {
 	openChange?: (sessionId: string, id: string) => Promise<void>;
 	/** Asks where to save an exported chat and writes it; resolves to the saved path or undefined when cancelled. */
 	saveExport?: (suggestedName: string, content: string) => Promise<string | undefined>;
+	/** Opens an image of a tool result in VS Code; key names the message, call and image uniquely. */
+	openImage?: (image: { mimeType: string; data: string; name?: string }, key: string) => Promise<void>;
 	/** System prompt and per-turn host context; without it requests carry only the history. */
 	prompt?: ChatPromptProvider;
 	/** Summarizes older turns before another model takes over a long chat. */
@@ -85,6 +93,12 @@ export interface ChatControllerDeps {
 	confirm?: (message: string, action: string) => Promise<boolean>;
 	/** Non-modal notice with one action; resolves true when the user picks it. */
 	notify?: (message: string, action: string) => Promise<boolean>;
+	/** Shows an operating-system notification; the host decides whether the window needs one. */
+	osNotify?: (title: string, body: string) => void;
+	/** Clock of auto-continue after a limit; tests replace it. */
+	now?: () => number;
+	/** Timer of auto-continue after a limit; tests replace it. */
+	setTimer?: (callback: () => void, ms: number) => { dispose(): void };
 	/** Subscription limits and balances shown next to the model picker. */
 	quota?: ChatQuotaSource;
 	/** Sign-in offers in the model picker. */
@@ -171,6 +185,23 @@ const MAX_QUESTION_ANSWERS = 5;
  */
 const MAX_QUESTION_SELECTED = MAX_REQUESTED_TOOLS;
 const MAX_ANSWER_CHARS = 2_000;
+/** Auto-continue waits this long after a limit resets, so the provider's window has surely moved on. */
+const AUTO_CONTINUE_DELAY_MS = 60_000;
+/** Only the 5-hour window is continued; a weekly limit resets days later. */
+const AUTO_CONTINUE_HORIZON_MS = 6 * 3_600_000;
+/** Continuations in a row that hit the limit again before auto-continue gives up. */
+const AUTO_CONTINUE_MAX_ATTEMPTS = 3;
+/** A continuation that came due while VS Code was closed, or was switched on late, runs this soon. */
+const AUTO_CONTINUE_CATCH_UP_MS = 10_000;
+/** A continuation due longer ago than this is dropped: the user has long been back. */
+const AUTO_CONTINUE_STALE_MS = 24 * 3_600_000;
+const MAX_TIMER_MS = 2_147_483_647;
+/** Open subagents one chat may keep; each holds its own context and terminals. */
+const MAX_OPEN_SUBAGENTS = 6;
+const SUBAGENT_LABEL_MAX_CHARS = 30;
+const SUBAGENT_TASK_MAX_CHARS = 200;
+const SUBAGENT_REPORT_MAX_CHARS = 300;
+const SUBAGENT_ACTIVITY_MAX_CHARS = 120;
 
 interface DeltaBuffer {
 	kind: ChatTextKind;
@@ -206,6 +237,52 @@ interface SessionRuntime {
 	finished: boolean;
 	/** Messages sent while the chat worked; each goes out after the current tool round. */
 	queued: ChatQueuedMessage[];
+	/** Attempts before the auto-continuation now running; undefined while a turn the user started runs. */
+	autoAttempt?: number;
+	/** Subagents kept open for follow-up tasks, by id; saved beside the chat log. */
+	subagents: Map<string, OpenSubagent>;
+}
+
+interface OpenSubagent extends StoredSubagent {
+	/** It works on a task now; it cannot take another or be closed meanwhile. */
+	running?: boolean;
+	/** Its current step while it runs. */
+	activity?: string;
+}
+
+/** One line of at most max characters. */
+function oneLine(text: string, max: number): string {
+	const line = text.replace(/\s+/g, " ").trim();
+	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/** The step a running subagent is on, for the open-subagents panel. */
+function subagentActivity(run: ChatSubagentRun): string | undefined {
+	const step = run.steps.at(-1);
+	if (!step) {
+		return undefined;
+	}
+	if (step.kind === "tool") {
+		return oneLine(`${step.name} ${step.summary}`, SUBAGENT_ACTIVITY_MAX_CHARS);
+	}
+	return step.kind === "text" ? "Writing…" : oneLine(step.text, SUBAGENT_ACTIVITY_MAX_CHARS);
+}
+
+/** Lists the open subagents for the model with each new request, so it does not lose them after compaction. */
+function openSubagentsContext(subagents: Iterable<OpenSubagent>): string | undefined {
+	const lines = [...subagents].map(entry => {
+		const report = entry.report ? `; last report: ${oneLine(entry.report, 160)}` : "";
+		return `- ${entry.id} (${entry.modelName}): ${entry.description}; last task: ${entry.task}${report}`;
+	});
+	if (lines.length === 0) {
+		return undefined;
+	}
+	return [
+		"<open_subagents>",
+		"Subagents you kept open in this chat. Send one a follow-up with subagent { subagentId, prompt }; close it with close_subagent once its work is accepted.",
+		...lines,
+		"</open_subagents>",
+	].join("\n");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -427,6 +504,11 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			}
 			return { type: "pasteFiles", files };
 		}
+		case "openToolImage":
+			return typeof value.messageId === "string" && typeof value.callId === "string"
+				&& typeof value.index === "number" && Number.isInteger(value.index) && value.index >= 0
+				? { type: "openToolImage", messageId: value.messageId, callId: value.callId, index: value.index }
+				: undefined;
 		case "openAttachment": {
 			const attachment = asAttachment(value.attachment, true);
 			return attachment ? { type: "openAttachment", attachment } : undefined;
@@ -448,6 +530,15 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			};
 		}
 		case "retryTurn": return typeof value.messageId === "string" ? { type: "retryTurn", messageId: value.messageId } : undefined;
+		case "closeSubagent":
+			return typeof value.sessionId === "string" && typeof value.subagentId === "string"
+				? { type: "closeSubagent", sessionId: value.sessionId, subagentId: value.subagentId }
+				: undefined;
+		case "setAutoContinue":
+			return typeof value.sessionId === "string" && SESSION_ID.test(value.sessionId)
+				&& typeof value.messageId === "string" && typeof value.enabled === "boolean"
+				? { type: "setAutoContinue", sessionId: value.sessionId, messageId: value.messageId, enabled: value.enabled }
+				: undefined;
 		case "keepChanges":
 		case "undoChanges": {
 			if (value.ids === undefined) {
@@ -542,6 +633,21 @@ function turnErrorText(error: unknown): string {
 	return errorMessage(error);
 }
 
+const NOTIFICATION_LINE_MAX_CHARS = 120;
+
+/** The system notification text for a finished turn: how it ended, then the first line of its last text. */
+export function turnEndNotification(parts: readonly ChatPart[]): string {
+	const last = parts.at(-1);
+	const summary = last?.kind === "notice" && last.limit
+		? "The agent hit a usage limit."
+		: last?.kind === "notice" && last.level === "error"
+			? "The agent stopped with an error."
+			: "The agent finished.";
+	const text = parts.findLast(part => part.kind === "text");
+	const line = text?.kind === "text" ? text.text.split(/\r?\n/).find(candidate => candidate.trim() !== "")?.trim() : undefined;
+	return line ? `${summary}\n${line.slice(0, NOTIFICATION_LINE_MAX_CHARS)}` : summary;
+}
+
 /** Longest error a continuation repeats to the model and keeps for its marker. */
 const CONTINUATION_ERROR_MAX_CHARS = 1_000;
 
@@ -620,6 +726,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	private _lastActivity: string | undefined;
 	/** Read once; changed synchronously so a chat switch right after a save sees the draft. */
 	private _draftCache: Map<string, StoredDraft> | undefined;
+	/** Auto-continue timers per chat id. */
+	private readonly _autoTimers = new Map<string, { dispose(): void }>();
 
 	constructor(deps: ChatControllerDeps) {
 		this._deps = deps;
@@ -632,6 +740,10 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			}
 		});
 		this._contextSettingsSubscription = deps.contextSettings?.onDidChange?.(() => this._broadcastContextSettings());
+		// Continuations that were pending when VS Code closed come back without the chat view being opened.
+		void this._restoreAutoContinue().catch(error => {
+			this._log("chat.auto_continue.restore_failed", { message: errorMessage(error) });
+		});
 	}
 
 	attach(webview: vscode.Webview): vscode.Disposable {
@@ -788,6 +900,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			this._runtimes.delete(sessionId);
 		}
 		await this._deps.store.delete(sessionId);
+		this._clearAutoTimer(sessionId);
+		this._closeTerminals(`chat:${sessionId}`);
+		for (const subagentId of runtime?.subagents.keys() ?? []) {
+			this._closeTerminals(this._subagentOwner(sessionId, subagentId));
+		}
 		await this._clearDraft(sessionId);
 		try {
 			await this._deps.changes?.forgetSession?.(sessionId);
@@ -928,6 +1045,10 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			return;
 		}
 		this._disposed = true;
+		for (const timer of this._autoTimers.values()) {
+			timer.dispose();
+		}
+		this._autoTimers.clear();
 		for (const runtime of this._runtimes.values()) {
 			runtime.preparing?.cancel();
 			runtime.preparing = undefined;
@@ -1008,6 +1129,20 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				}
 				return;
 			}
+			case "openToolImage": {
+				const chatMessage = this._active()?.messages.find(item => item.id === message.messageId);
+				const part = chatMessage?.parts.find(item => item.kind === "toolResult" && item.callId === message.callId);
+				const image = part?.kind === "toolResult" ? part.images?.[message.index] : undefined;
+				if (image?.data) {
+					const key = `${message.messageId}-${message.callId}-${message.index}`;
+					try {
+						await this._deps.openImage?.({ mimeType: image.mimeType, data: image.data, ...(image.name === undefined ? {} : { name: image.name }) }, key);
+					} catch (error) {
+						this._log("chat.image.open_failed", { message: errorMessage(error) });
+					}
+				}
+				return;
+			}
 			case "openAttachment":
 				await this._deps.attachments?.open(message.attachment);
 				return;
@@ -1017,6 +1152,18 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "retryTurn":
 				await this._retryTurn(message.messageId);
 				return;
+			case "setAutoContinue":
+				await this._setAutoContinueEnabled(message.sessionId, message.messageId, message.enabled);
+				return;
+			case "closeSubagent": {
+				const runtime = this._runtimes.get(message.sessionId);
+				if (runtime) {
+					await this._closeSubagent(runtime, message.subagentId).catch(error => {
+						this._log("chat.subagent.close_failed", { message: errorMessage(error) });
+					});
+				}
+				return;
+			}
 			case "keepChanges":
 			case "undoChanges":
 				await this._resolveChanges(message.type === "keepChanges" ? "keep" : "undo", message.ids);
@@ -1307,15 +1454,20 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			await this._appendErrorNotice(runtime);
 			return;
 		}
+		await this._continueAnswer(runtime, messageId);
+	}
+
+	/** Sends the continuation of the chat's last answer; the chat may be in the background. */
+	private async _continueAnswer(runtime: SessionRuntime, messageId: string, modelId?: string): Promise<void> {
 		const failed = runtime.messages.at(-1);
-		if (!failed || failed.id !== messageId || failed.role !== "assistant") {
+		if (runtime.busy || runtime.running || !failed || failed.id !== messageId || failed.role !== "assistant") {
 			return;
 		}
 		const notice = failed.parts.findLast(part => part.kind === "notice" && part.retryable);
 		const error = notice?.kind === "notice" ? notice.text.slice(0, CONTINUATION_ERROR_MAX_CHARS) : undefined;
 		runtime.busy = true;
 		try {
-			await this._sendTurn(runtime, continuationRequest(error), undefined, undefined, error ? { error } : {});
+			await this._sendTurn(runtime, continuationRequest(error), undefined, undefined, error ? { error } : {}, modelId);
 		} finally {
 			runtime.busy = false;
 			this._deliverQueued(runtime);
@@ -1344,10 +1496,12 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		attachments?: ChatAttachment[],
 		preserved?: { attachments?: ChatAttachment[]; attachmentContext?: string; images?: ChatToolImage[] },
 		continuation?: ChatContinuation,
+		/** A model other than the selected one; auto-continue keeps the model that hit the limit. */
+		modelOverride?: string,
 	): Promise<void> {
 		await this._ensureModels();
 		const messages = runtime.messages;
-		const modelId = this._selectedModelId;
+		const modelId = modelOverride ?? this._selectedModelId;
 		const model = modelId === undefined ? undefined : this._models.find(candidate => candidate.id === modelId);
 		if (!model) {
 			await this._appendErrorNotice(runtime);
@@ -1360,7 +1514,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		let started = false;
 		try {
 			const turn = maxTurn(messages) + 1;
-			const hostContext = this._turnContext();
+			const hostContext = [this._turnContext(), openSubagentsContext(runtime.subagents.values())].filter(Boolean).join("\n\n") || undefined;
 			let display: ChatAttachment[] | undefined;
 			let attachmentContext = "";
 			let images: ChatToolImage[] = [];
@@ -1517,7 +1671,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				}
 			}).catch(() => undefined);
 		};
-		const invoke = async (name: string, input: unknown, token: vscode.CancellationToken, callId: string | undefined, nested: boolean) => {
+		const invoke = async (name: string, input: unknown, token: vscode.CancellationToken, callId: string | undefined, nested: boolean, terminalOwner: { id: string; label: string }) => {
 			const readOnly = source.isReadOnly?.(name) ?? false;
 			// The snapshot must exist before the first tool that may write; read-only rounds cost nothing.
 			if (tracker && !begin && !readOnly) {
@@ -1543,10 +1697,12 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			try {
 				return await source.invoke(name, input, token, {
 					callId,
+					terminalOwner,
 					approve: confirmation => this._requestApproval(running, name, callId, confirmation, token),
 					...(nested ? {} : {
 						runSubagent: (request: SubagentRequest, subagentToken: vscode.CancellationToken) =>
 							this._runSubagent(running, callId ?? randomUUID(), request, subagentTools, subagentToken),
+						closeSubagent: (subagentId: string) => this._closeSubagent(running.runtime, subagentId),
 						askQuestions: (questions: ChatQuestion[], questionToken: vscode.CancellationToken) =>
 							this._askQuestions(running, callId, questions, questionToken),
 						listTools: () => this._toolGroups(),
@@ -1560,20 +1716,22 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				}
 			}
 		};
-		const subagentTools: ChatToolExecutor = {
+		const subagentTools = (owner: { id: string; label: string }): ChatToolExecutor => ({
 			get tools() {
 				return source.tools.filter(tool => tool.name !== SUBAGENT_TOOL_NAME
+					&& tool.name !== CLOSE_SUBAGENT_TOOL_NAME
 					&& tool.name !== TODO_TOOL_NAME
 					&& tool.name !== ASK_QUESTIONS_TOOL_NAME
 					&& tool.name !== LIST_TOOLS_TOOL_NAME
 					&& tool.name !== REQUEST_TOOLS_TOOL_NAME);
 			},
-			invoke: (name, input, token, callId) => invoke(name, input, token, callId, true),
-		};
+			invoke: (name, input, token, callId) => invoke(name, input, token, callId, true, owner),
+		});
 		const tools: ChatToolExecutor = {
 			get tools() { return source.tools; },
-			invoke: (name, input, token, callId) => invoke(name, input, token, callId, false),
+			invoke: (name, input, token, callId) => invoke(name, input, token, callId, false, { id: `chat:${running.sessionId}`, label: "Chat" }),
 		};
+		let stopped = false;
 		try {
 			const system = await this._systemPrompt();
 			const thinking = this._thinkingFor(model.id);
@@ -1594,6 +1752,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				shouldYield: () => runtime.queued.length > 0,
 			});
 		} catch (error) {
+			stopped = error instanceof vscode.CancellationError;
 			this._flushDelta(running);
 			const notice: ChatStructuredPart = error instanceof vscode.CancellationError
 				? { kind: "notice", level: "info", text: "Stopped." }
@@ -1620,8 +1779,16 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			if (runtime.running === running) {
 				runtime.running = undefined;
 			}
+			stopped ||= running.cts.token.isCancellationRequested;
 			running.cts.dispose();
 			this._emit(runtime, { type: "run", run: { running: false } });
+			// A queued message starts the next turn at once, so only the last turn of a run notifies.
+			if (!stopped && runtime.queued.length === 0) {
+				this._osNotify(runtime.meta.title, turnEndNotification(running.message.parts));
+			}
+			void this._updateAutoContinue(runtime, running.message).catch(error => {
+				this._log("chat.auto_continue.failed", { message: errorMessage(error) });
+			});
 			if (runtime.meta.id !== this._activeId) {
 				runtime.finished = true;
 			}
@@ -1631,33 +1798,348 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
+	/**
+	 * Runs a subagent task. A one-off subagent ends with its report; one started with keepOpen, or continued with
+	 * subagentId, keeps its conversation and terminals until close_subagent or the panel closes it.
+	 */
 	private async _runSubagent(
 		running: RunningTurn,
 		callId: string,
 		request: SubagentRequest,
-		tools: ChatToolExecutor,
+		toolsFor: (owner: { id: string; label: string }) => ChatToolExecutor,
 		token: vscode.CancellationToken,
 	): Promise<string> {
-		const model = this._models.find(candidate => candidate.id === request.model.id);
-		if (!model) {
-			throw new Error(`${request.model.label} is not available right now; choose another subagent model.`);
+		const runtime = running.runtime;
+		const { entry, model } = this._subagentFor(runtime, request);
+		const description = entry?.description ?? request.description;
+		const owner = {
+			id: entry ? this._subagentOwner(runtime.meta.id, entry.id) : `subagent:${callId}`,
+			label: `Subagent: ${oneLine(description, SUBAGENT_LABEL_MAX_CHARS)}`,
+		};
+		let history: ChatMessage[] | undefined;
+		if (entry) {
+			entry.running = true;
+			entry.task = oneLine(request.prompt, SUBAGENT_TASK_MAX_CHARS);
+			entry.activity = undefined;
+			entry.updatedAt = Date.now();
+			this._emitSubagents(runtime);
 		}
-		return runChatSubagent({
-			backend: this._deps.backend,
-			model,
-			request,
-			callId,
-			conversationId: running.sessionId,
-			tools,
-			token,
-			system: await this._systemPrompt(),
-			hostContext: this._turnContext(),
-			onUpdate: run => this._emit(running.runtime, { type: "subagent", messageId: running.message.id, run }),
-			onFinish: run => {
-				this._log("chat.subagent.finished", { model: model.id, status: run.status, steps: run.steps.length, durationMs: run.durationMs });
-				this._addPart(running, { kind: "subagent", ...run });
-			},
+		const withId = (run: ChatSubagentRun): ChatSubagentRun => entry ? { ...run, subagentId: entry.id } : run;
+		try {
+			const result = await runChatSubagent({
+				backend: this._deps.backend,
+				model,
+				request: { ...request, description },
+				callId,
+				conversationId: running.sessionId,
+				tools: toolsFor(owner),
+				token,
+				system: await this._systemPrompt(),
+				hostContext: this._turnContext(),
+				...(entry ? { history: entry.history, invocationId: `chat-subagent-${runtime.meta.id}-${entry.id}` } : {}),
+				onHistory: value => {
+					history = value;
+				},
+				onUpdate: run => {
+					this._emit(runtime, { type: "subagent", messageId: running.message.id, run: withId(run) });
+					if (entry) {
+						entry.activity = subagentActivity(run);
+						this._emitSubagents(runtime);
+					}
+				},
+				onFinish: run => {
+					this._log("chat.subagent.finished", { model: model.id, status: run.status, steps: run.steps.length, durationMs: run.durationMs, open: entry !== undefined });
+					this._addPart(running, { kind: "subagent", ...withId(run) });
+				},
+			});
+			if (!entry) {
+				return result.report;
+			}
+			entry.report = result.report.slice(0, SUBAGENT_REPORT_MAX_CHARS);
+			return `${result.report}\n\n[Subagent ${entry.id} is still open with its context. Send it a follow-up with subagent { subagentId: "${entry.id}", prompt }, or close it with close_subagent once its work is accepted.]`;
+		} catch (error) {
+			if (!entry || error instanceof vscode.CancellationError || token.isCancellationRequested) {
+				throw error;
+			}
+			throw new Error(`${errorMessage(error)} Subagent ${entry.id} is still open; send it a follow-up or close it with close_subagent.`, { cause: error });
+		} finally {
+			if (entry) {
+				entry.running = false;
+				entry.activity = undefined;
+				entry.updatedAt = Date.now();
+				if (history) {
+					entry.history = history;
+				}
+				await this._persistSubagents(runtime);
+				this._emitSubagents(runtime);
+			} else {
+				// Its running commands (servers, builds) stay; idle and hung terminals go with the run.
+				this._closeTerminals(owner.id);
+			}
+		}
+	}
+
+	/** The open subagent a request continues or opens, and the model it runs on; throws what the model should fix. */
+	private _subagentFor(runtime: SessionRuntime, request: SubagentRequest): { entry?: OpenSubagent; model: vscode.LanguageModelChatInformation } {
+		if (request.subagentId) {
+			const entry = runtime.subagents.get(request.subagentId);
+			if (!entry) {
+				const open = [...runtime.subagents.keys()].join(", ");
+				throw new Error(`No open subagent "${request.subagentId}". ${open ? `Open subagents: ${open}.` : "No subagent is open in this chat."}`);
+			}
+			if (entry.running) {
+				throw new Error(`Subagent ${entry.id} is still working on a task; wait for its report.`);
+			}
+			const model = this._models.find(candidate => candidate.id === entry.modelId);
+			if (!model) {
+				throw new Error(`${entry.modelName} is not available right now; close ${entry.id} and start a new subagent.`);
+			}
+			return { entry, model };
+		}
+		const wanted = request.model;
+		const model = wanted ? this._models.find(candidate => candidate.id === wanted.id) : undefined;
+		if (!model) {
+			throw new Error(`${wanted?.label ?? "The subagent model"} is not available right now; choose another subagent model.`);
+		}
+		if (!request.keepOpen) {
+			return { model };
+		}
+		if (runtime.subagents.size >= MAX_OPEN_SUBAGENTS) {
+			const open = [...runtime.subagents.values()].map(entry => `${entry.id} (${entry.description})`).join(", ");
+			throw new Error(`This chat already keeps ${MAX_OPEN_SUBAGENTS} subagents open: ${open}. Close one with close_subagent first.`);
+		}
+		let id: string;
+		do {
+			id = `sa-${randomUUID().slice(0, 4)}`;
+		} while (runtime.subagents.has(id));
+		const now = Date.now();
+		const entry: OpenSubagent = { id, description: request.description, modelId: model.id, modelName: model.name, createdAt: now, updatedAt: now, task: "", history: [] };
+		runtime.subagents.set(id, entry);
+		this._log("chat.subagent.opened", { model: model.id });
+		return { entry, model };
+	}
+
+	/** Terminal owner of an open subagent; chat ids keep the short subagent ids of different chats apart. */
+	private _subagentOwner(sessionId: string, subagentId: string): string {
+		return `subagent:${sessionId}/${subagentId}`;
+	}
+
+	/** Closes an open subagent of a chat: its context and idle terminals go. Throws when it cannot be closed. */
+	private async _closeSubagent(runtime: SessionRuntime, subagentId: string): Promise<string> {
+		const entry = runtime.subagents.get(subagentId);
+		if (!entry) {
+			throw new Error(`No open subagent "${subagentId}".`);
+		}
+		if (entry.running) {
+			throw new Error(`Subagent ${subagentId} is still working; close it after its report.`);
+		}
+		runtime.subagents.delete(subagentId);
+		this._closeTerminals(this._subagentOwner(runtime.meta.id, subagentId));
+		await this._persistSubagents(runtime);
+		this._emitSubagents(runtime);
+		this._log("chat.subagent.closed", { tasks: entry.history.filter(message => message.role === "user").length });
+		return `Closed subagent ${subagentId}.`;
+	}
+
+	private async _loadSubagents(sessionId: string): Promise<OpenSubagent[]> {
+		try {
+			return await this._deps.store.loadSubagents(sessionId);
+		} catch (error) {
+			this._log("chat.subagent.load_failed", { message: errorMessage(error) });
+			return [];
+		}
+	}
+
+	private async _persistSubagents(runtime: SessionRuntime): Promise<void> {
+		const stored: StoredSubagent[] = [...runtime.subagents.values()].map(({ running: _running, activity: _activity, ...entry }) => entry);
+		try {
+			await this._deps.store.saveSubagents(runtime.meta.id, stored);
+		} catch (error) {
+			this._log("chat.subagent.persist_failed", { message: errorMessage(error) });
+		}
+	}
+
+	private _subagentViews(runtime: SessionRuntime): ChatOpenSubagent[] {
+		return [...runtime.subagents.values()].map(entry => ({
+			id: entry.id,
+			description: entry.description,
+			modelName: entry.modelName,
+			status: entry.running ? "running" : "idle",
+			task: entry.task,
+			...(entry.activity ? { activity: entry.activity } : {}),
+			...(entry.report ? { report: oneLine(entry.report, SUBAGENT_ACTIVITY_MAX_CHARS) } : {}),
+			updatedAt: entry.updatedAt,
+		}));
+	}
+
+	private _emitSubagents(runtime: SessionRuntime): void {
+		this._emit(runtime, { type: "subagents", sessionId: runtime.meta.id, subagents: this._subagentViews(runtime) });
+	}
+
+	private _now(): number {
+		return this._deps.now?.() ?? Date.now();
+	}
+
+	private _setTimer(callback: () => void, ms: number): { dispose(): void } {
+		if (this._deps.setTimer) {
+			return this._deps.setTimer(callback, ms);
+		}
+		const handle = setTimeout(callback, ms);
+		return { dispose: () => clearTimeout(handle) };
+	}
+
+	/** After a turn: a 5-hour limit schedules the continuation of its answer, any other ending clears it. */
+	private async _updateAutoContinue(runtime: SessionRuntime, answer: ChatMessage): Promise<void> {
+		const previous = runtime.autoAttempt;
+		runtime.autoAttempt = undefined;
+		const sessionId = runtime.meta.id;
+		const last = answer.parts.at(-1);
+		const resetAt = last?.kind === "notice" && last.limit?.kind === "limit" ? last.limit.resetAt : undefined;
+		const now = this._now();
+		if (resetAt === undefined || resetAt - now > AUTO_CONTINUE_HORIZON_MS) {
+			this._clearAutoTimer(sessionId);
+			if (runtime.meta.autoContinue) {
+				await this._storeAutoContinue(sessionId, null);
+			}
+			return;
+		}
+		const attempts = previous === undefined ? 0 : Math.min(previous + 1, AUTO_CONTINUE_MAX_ATTEMPTS);
+		const enabled = attempts < AUTO_CONTINUE_MAX_ATTEMPTS;
+		const entry = { messageId: answer.id, at: Math.max(resetAt, now) + AUTO_CONTINUE_DELAY_MS, enabled, attempts };
+		await this._storeAutoContinue(sessionId, entry);
+		if (enabled) {
+			this._scheduleAutoContinue(sessionId, entry.at);
+			this._log("chat.auto_continue.scheduled", { at: entry.at, attempts });
+		} else {
+			this._clearAutoTimer(sessionId);
+			this._log("chat.auto_continue.cancelled", { reason: "attempts", attempts });
+		}
+	}
+
+	private async _storeAutoContinue(sessionId: string, value: ChatSessionMeta["autoContinue"] | null): Promise<void> {
+		const meta = await this._deps.store.updateMeta(sessionId, { autoContinue: value }).catch(error => {
+			this._log("chat.auto_continue.persist_failed", { message: errorMessage(error) });
+			return undefined;
 		});
+		const runtime = this._runtimes.get(sessionId);
+		if (meta && runtime) {
+			runtime.meta = meta;
+			this._emit(runtime, { type: "session", session: meta });
+		}
+	}
+
+	private _scheduleAutoContinue(sessionId: string, at: number): void {
+		this._clearAutoTimer(sessionId);
+		if (this._disposed) {
+			return;
+		}
+		const delay = Math.min(MAX_TIMER_MS, Math.max(0, at - this._now()));
+		this._autoTimers.set(sessionId, this._setTimer(() => {
+			this._autoTimers.delete(sessionId);
+			void this._fireAutoContinue(sessionId).catch(error => {
+				this._log("chat.auto_continue.failed", { message: errorMessage(error) });
+			});
+		}, delay));
+	}
+
+	private _clearAutoTimer(sessionId: string): void {
+		this._autoTimers.get(sessionId)?.dispose();
+		this._autoTimers.delete(sessionId);
+	}
+
+	/** Continues the limited answer once its window reset, like Retry, also in a chat that is not shown. */
+	private async _fireAutoContinue(sessionId: string): Promise<void> {
+		if (this._disposed) {
+			return;
+		}
+		const meta = await this._deps.store.get(sessionId);
+		const entry = meta?.autoContinue;
+		if (!meta || !entry?.enabled) {
+			this._log("chat.auto_continue.skipped", { reason: "off" });
+			return;
+		}
+		if (entry.at - this._now() > AUTO_CONTINUE_CATCH_UP_MS) {
+			// The timer was clamped or fired early; wait for the rest.
+			this._scheduleAutoContinue(sessionId, entry.at);
+			return;
+		}
+		let runtime: SessionRuntime | undefined;
+		// Serialized with chat switches, so opening this chat meanwhile cannot load it twice.
+		await this._switchSession(async () => {
+			runtime = await this._runtime(meta);
+		});
+		if (!runtime || this._disposed) {
+			return;
+		}
+		const answer = runtime.messages.at(-1);
+		if (runtime.busy || runtime.running || runtime.preparing || answer?.id !== entry.messageId) {
+			this._log("chat.auto_continue.skipped", { reason: "chat-changed" });
+			await this._storeAutoContinue(sessionId, null);
+			return;
+		}
+		await this._ensureModels();
+		// The chat's model, so a model the user picked for this chat meanwhile goes on with the task.
+		const modelId = [runtime.meta.modelId, answer.modelId, this._selectedModelId]
+			.find((id): id is string => id !== undefined && this._models.some(model => model.id === id));
+		if (!modelId) {
+			this._log("chat.auto_continue.skipped", { reason: "no-model" });
+			return;
+		}
+		await this._storeAutoContinue(sessionId, null);
+		this._log("chat.auto_continue.started", { model: modelId, attempts: entry.attempts, active: sessionId === this._activeId });
+		runtime.autoAttempt = entry.attempts;
+		try {
+			await this._continueAnswer(runtime, entry.messageId, modelId);
+		} finally {
+			runtime.autoAttempt = undefined;
+		}
+	}
+
+	/** The limit card's checkbox; switching it back on also resets the attempts. */
+	private async _setAutoContinueEnabled(sessionId: string, messageId: string, enabled: boolean): Promise<void> {
+		const entry = (await this._deps.store.get(sessionId))?.autoContinue;
+		if (!entry || entry.messageId !== messageId || entry.enabled === enabled) {
+			return;
+		}
+		if (!enabled) {
+			this._clearAutoTimer(sessionId);
+			await this._storeAutoContinue(sessionId, { ...entry, enabled: false });
+			this._log("chat.auto_continue.cancelled", { reason: "unchecked" });
+			return;
+		}
+		const next = { ...entry, enabled: true, attempts: 0, at: Math.max(entry.at, this._now() + AUTO_CONTINUE_CATCH_UP_MS) };
+		await this._storeAutoContinue(sessionId, next);
+		this._scheduleAutoContinue(sessionId, next.at);
+		this._log("chat.auto_continue.scheduled", { at: next.at, attempts: 0 });
+	}
+
+	/** Schedules the continuations stored before a reload; ones due over a day ago are dropped. */
+	private async _restoreAutoContinue(): Promise<void> {
+		for (const meta of await this._deps.store.list()) {
+			const entry = meta.autoContinue;
+			if (this._disposed) {
+				return;
+			}
+			if (!entry?.enabled || this._autoTimers.has(meta.id)) {
+				continue;
+			}
+			const now = this._now();
+			if (entry.at < now - AUTO_CONTINUE_STALE_MS) {
+				await this._storeAutoContinue(meta.id, null);
+				this._log("chat.auto_continue.cancelled", { reason: "stale" });
+				continue;
+			}
+			this._scheduleAutoContinue(meta.id, Math.max(entry.at, now + AUTO_CONTINUE_CATCH_UP_MS));
+			this._log("chat.auto_continue.scheduled", { at: entry.at, attempts: entry.attempts, restored: true });
+		}
+	}
+
+	private _closeTerminals(owner: string): void {
+		try {
+			this._deps.terminals?.closeOwner(owner);
+		} catch (error) {
+			this._log("chat.terminals.close_failed", { owner, message: errorMessage(error) });
+		}
 	}
 
 	/** The first user message names the chat; an edit may rename it. */
@@ -1899,6 +2381,14 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	}
 
 	/** Shows an approval card in the chat's webviews; Stop or a closed controller counts as a denial. */
+	private _osNotify(title: string, body: string): void {
+		try {
+			this._deps.osNotify?.(title, body);
+		} catch (error) {
+			this._log("chat.os_notification.failed", { message: errorMessage(error) });
+		}
+	}
+
 	private _requestApproval(
 		running: RunningTurn,
 		toolName: string,
@@ -1935,6 +2425,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			runtime.approvals.set(request.id, { request, settle });
 			subscriptions.push(token.onCancellationRequested(() => settle(false)));
 			this._emit(runtime, { type: "approval", request });
+			this._osNotify(runtime.meta.title, `Waiting for your approval: ${confirmation.title}`);
 			this._broadcastActivity();
 			if (runtime.meta.id !== this._activeId) {
 				const notice = this._deps.notify?.(`"${runtime.meta.title}" is waiting for your approval.`, "Open Chat");
@@ -1986,6 +2477,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			runtime.questions.set(request.id, { request, settle });
 			subscriptions.push(token.onCancellationRequested(() => settle(undefined)));
 			this._emit(runtime, { type: "questions", request });
+			const question = questions[0]?.question.slice(0, 120);
+			this._osNotify(runtime.meta.title, "The agent has a question for you." + (question ? `\n${question}` : ""));
 			this._broadcastActivity();
 			if (runtime.meta.id !== this._activeId) {
 				const notice = this._deps.notify?.(`"${runtime.meta.title}" has a question for you.`, "Open Chat");
@@ -2339,7 +2832,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			existing.meta = meta;
 			return existing;
 		}
-		const loaded = await this._deps.store.loadSession(meta.id);
+		const loaded = await this._deps.store.loadSession(meta.id, { maxRequests: this._deps.maxRequests ?? CHAT_MAX_REQUESTS });
+		if (loaded.messages.length < meta.messageCount) {
+			this._log("chat.session.trimmed", { removed: meta.messageCount - loaded.messages.length });
+			meta = await this._deps.store.get(meta.id) ?? meta;
+		}
 		await this._markInterrupted(meta.id, loaded.messages, loaded.interruptedMessageId);
 		try {
 			await this._deps.changes?.recoverInterrupted?.(meta.id);
@@ -2358,6 +2855,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			questions: new Map(),
 			finished: false,
 			queued: [],
+			subagents: new Map((await this._loadSubagents(meta.id)).map(entry => [entry.id, entry])),
 		};
 		this._runtimes.set(meta.id, runtime);
 		return runtime;
@@ -2414,6 +2912,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			signIn: this._signInOffers(),
 			...(contextSettings ? { contextSettings } : {}),
 			favoriteModels: this._favoriteModels(),
+			subagents: this._subagentViews(runtime),
 		};
 	}
 

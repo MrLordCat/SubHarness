@@ -1,6 +1,6 @@
 import * as assert from "node:assert";
 import type { ChatMessage, ChatPart, ChatProviderQuota, ChatUsageTotals } from "../chat/shared/protocol";
-import { answerStart, describeToolCall, exhaustedWindow, formatAge, formatCacheHit, formatQuotaExhausted, formatQuotaSummary, formatReset, modelCacheStats, parseUriList, selectedModelProvider, sessionGroup } from "../chat/webview/format";
+import { answerStart, contextIndicator, contextIndicatorTitle, describeToolCall, exhaustedWindow, formatAge, formatCacheHit, formatQuotaExhausted, formatQuotaSummary, formatReset, modelCacheStats, parseUriList, selectedModelProvider, sessionGroup } from "../chat/webview/format";
 import { groupModels } from "../chat/shared/model-groups";
 
 function time(date: Date): string {
@@ -47,6 +47,20 @@ suite("Chat webview formatting", () => {
 		const now = new Date(2026, 10, 18, 9, 0).getTime();
 		const past = new Date(2026, 10, 18, 8, 0);
 		assert.strictEqual(formatReset(past.getTime(), now), `${time(past)} (now)`);
+	});
+});
+
+suite("Chat webview context formatting", () => {
+	test("shows the full context window when the answer reserve is known", () => {
+		const models = groupModels([{ id: "codex::model", name: "Model (Codex)", maxInputTokens: 442_232, maxOutputTokens: 32_768 }]);
+		assert.strictEqual(contextIndicator({ promptTokens: 12_000 }, models, "codex::model"), "12k / 475k");
+		assert.strictEqual(contextIndicatorTitle(models, "codex::model"), "Prompt tokens / context window (32.8k reserved for the answer)");
+	});
+
+	test("uses the input limit when the answer reserve is unknown", () => {
+		const models = groupModels([{ id: "codex::model", name: "Model (Codex)", maxInputTokens: 442_232 }]);
+		assert.strictEqual(contextIndicator({ promptTokens: 12_000 }, models, "codex::model"), "12k / 442k");
+		assert.strictEqual(contextIndicatorTitle(models, "codex::model"), "Prompt tokens / context window");
 	});
 });
 

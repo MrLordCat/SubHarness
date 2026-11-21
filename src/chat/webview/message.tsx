@@ -1,7 +1,7 @@
 import { Component, type ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { attachmentLabel, attachmentTitle, imageMimeType } from "../shared/attachment-label";
-import type { ChatLimitInfo, ChatMessage, ChatPart, ChatSubagentRun, ChatSubagentStep } from "../shared/protocol";
+import type { ChatLimitInfo, ChatMessage, ChatPart, ChatSessionMeta, ChatSubagentRun, ChatSubagentStep } from "../shared/protocol";
 import { SUBAGENT_TOOL_NAME } from "../tools/subagent-tool";
 import { postMessage } from "./api";
 import { EditComposer } from "./edit-composer";
@@ -26,6 +26,8 @@ export interface MessageItemProps {
 	compactionBoundary: boolean;
 	/** Retry and other end-of-answer actions only belong to the newest message. */
 	isLast: boolean;
+	/** The chat's pending continuation after a limit; given to the newest message only, so a change re-renders it. */
+	autoContinue?: ChatSessionMeta["autoContinue"];
 	/** Files the agent changed at or after this message's turn; used when editing. */
 	changedFilesSinceTurn: number;
 	/** The same context indicator the main composer shows. */
@@ -45,6 +47,7 @@ class MessageItemMemo extends Component<MessageItemProps> {
 			|| next.editing !== this.props.editing
 			|| next.compactionBoundary !== this.props.compactionBoundary
 			|| next.isLast !== this.props.isLast
+			|| next.autoContinue !== this.props.autoContinue
 			|| next.store !== this.props.store
 			|| (next.editing && (next.changedFilesSinceTurn !== this.props.changedFilesSinceTurn || next.context !== this.props.context));
 	}
@@ -56,7 +59,7 @@ class MessageItemMemo extends Component<MessageItemProps> {
 
 export const MessageItem = MessageItemMemo;
 
-function MessageView({ message, running, editing, compactionBoundary, isLast, changedFilesSinceTurn, context, store, onEdit, liveSubagentRun }: Omit<MessageItemProps, "version">) {
+function MessageView({ message, running, editing, compactionBoundary, isLast, autoContinue, changedFilesSinceTurn, context, store, onEdit, liveSubagentRun }: Omit<MessageItemProps, "version">) {
 	const [expanded, setExpanded] = useState(false);
 	const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 	const copyTimer = useRef<number | undefined>(undefined);
@@ -263,7 +266,17 @@ function MessageView({ message, running, editing, compactionBoundary, isLast, ch
 							return null;
 						case "notice":
 							if (part.limit) {
-								return <LimitCard key={index} level={part.level} text={part.text} limit={part.limit} />;
+								return (
+									<LimitCard
+										key={index}
+										level={part.level}
+										text={part.text}
+										limit={part.limit}
+										messageId={message.id}
+										sessionId={store.session?.id}
+										autoContinue={isLast && !running && autoContinue?.messageId === message.id ? autoContinue : undefined}
+									/>
+								);
 							}
 							return (
 								<div key={index} class={`msg-notice notice-${part.level}`}>
@@ -398,18 +411,44 @@ interface LimitCardProps {
 	level: "info" | "warning" | "error";
 	text: string;
 	limit: ChatLimitInfo;
+	messageId: string;
+	sessionId: string | undefined;
+	/** Present while the chat will continue this answer after the reset, or the user switched that off. */
+	autoContinue: ChatSessionMeta["autoContinue"];
 }
 
-function LimitCard({ level, text, limit }: LimitCardProps) {
+/** Matches the host: auto-continue gives up after this many continuations that hit the limit again. */
+const AUTO_CONTINUE_MAX_ATTEMPTS = 3;
+
+function LimitCard({ level, text, limit, messageId, sessionId, autoContinue }: LimitCardProps) {
 	const heading = limit.kind === "balance"
 		? `${limit.provider} balance is empty`
 		: `${limit.provider} usage limit reached`;
+	const toggle = (event: Event) => {
+		if (sessionId) {
+			postMessage({ type: "setAutoContinue", sessionId, messageId, enabled: (event.currentTarget as HTMLInputElement).checked });
+		}
+	};
 	return (
 		<div class={`limit-card notice-${level}`}>
 			<div class="limit-heading">{heading}</div>
 			<div class="limit-text">{text}</div>
 			{limit.resetAt !== undefined ? (
 				<div class="limit-reset">{`Resets at ${formatReset(limit.resetAt, Date.now())}`}</div>
+			) : null}
+			{autoContinue && sessionId ? (
+				<>
+					{!autoContinue.enabled && autoContinue.attempts >= AUTO_CONTINUE_MAX_ATTEMPTS ? (
+						<div class="limit-auto-time">{`Auto-continue stopped after ${AUTO_CONTINUE_MAX_ATTEMPTS} tries.`}</div>
+					) : null}
+					<label class="limit-auto">
+						<input type="checkbox" checked={autoContinue.enabled} onChange={toggle} />
+						Continue automatically after the reset
+					</label>
+					{autoContinue.enabled ? (
+						<div class="limit-auto-time">{`Continues at ${formatReset(autoContinue.at, Date.now())}`}</div>
+					) : null}
+				</>
 			) : null}
 			<button
 				type="button"
@@ -549,7 +588,7 @@ function ToolResultDetails({ part, messageId, store, report, openByDefault }: To
 			<summary>{toolResultLabel(part, markdown)}</summary>
 			{markdown ? <div class="tool-report"><Markdown text={part.text} /></div> : <pre class="tool-output">{part.text}</pre>}
 			{part.images?.map((image, index) => (
-				<div class="tool-result-image" key={`${index}-${image.name ?? image.mimeType}`}>🖼 {image.name ?? image.mimeType} · {formatBytes(image.byteLength)}</div>
+				<button type="button" class="tool-result-image" title="Open image" key={`${index}-${image.name ?? image.mimeType}`} onClick={() => postMessage({ type: "openToolImage", messageId, callId: part.callId, index })}>🖼 {image.name ?? image.mimeType} · {formatBytes(image.byteLength)}</button>
 			))}
 			{loading && part.preview ? <div class="part-loading">Loading full output…</div> : null}
 		</details>
@@ -755,6 +794,7 @@ function SubagentCard({ input, result, part, liveRun, running, messageId, store 
 			<button type="button" class="subagent-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>
 				<span class="subagent-glyph" aria-hidden="true">{subagentGlyph(status)}</span>
 				<span class="subagent-label">Subagent</span>
+				{run?.subagentId ? <span class="subagent-model" title="Open subagent: send it follow-ups with this id">{run.subagentId}</span> : null}
 				{model ? <span class="subagent-model">{model}</span> : null}
 				{description ? <span class="subagent-desc" title={description}>{description}</span> : null}
 				<span class="subagent-meta">{meta}</span>

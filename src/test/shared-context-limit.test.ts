@@ -67,18 +67,20 @@ suite("Shared working context limit", () => {
 		assert.strictEqual(parseCodexModelsCache(JSON.stringify({ models: {} })).size, 0);
 	});
 
-	test("follows already known Codex windows before the first request", () => {
+	test("follows the newest Sol with a known Codex window", () => {
 		const models = [
-			{ modelId: "gpt-6-sol", window: 258_400, source: "server" as const },
+			{ modelId: "gpt-6.2-sol", window: 400_000, source: "server" as const },
 			{ modelId: "gpt-6.1-sol", window: 475_000, source: "catalog" as const },
-			{ modelId: "unlisted", window: 900_000, source: "fallback" as const },
+			{ modelId: "gpt-6.3-sol", window: 900_000, source: "fallback" as const },
+			{ modelId: "gpt-6-luna", window: 500_000, source: "server" as const },
+			{ modelId: "gpt-6.1-terra", window: 950_000, source: "catalog" as const },
 		];
-		assert.deepStrictEqual(resolveCodexFollowTarget(models, "gpt-6-sol", "gpt-6.1-sol"), { modelId: "gpt-6-sol", reason: "lastUsed" });
-		assert.deepStrictEqual(resolveCodexFollowTarget(models, undefined, "gpt-6-sol"), { modelId: "gpt-6-sol", reason: "default" });
-		assert.deepStrictEqual(resolveCodexFollowTarget(models), { modelId: "gpt-6.1-sol", reason: "largest" }, "fallback windows are never the largest");
-		assert.deepStrictEqual(resolveCodexFollowTarget(models, undefined, "unlisted"), { modelId: "gpt-6.1-sol", reason: "largest" });
-		assert.strictEqual(resolveCodexFollowTarget(models, "unlisted"), undefined, "a used model with an unknown window borrows no other window");
-		assert.strictEqual(resolveCodexFollowTarget([models[2]]), undefined);
+		assert.deepStrictEqual(resolveCodexFollowTarget(models), { modelId: "gpt-6.2-sol", reason: "latestSol" });
+		assert.deepStrictEqual(resolveCodexFollowTarget(models.slice(1)), { modelId: "gpt-6.1-sol", reason: "latestSol" });
+		assert.strictEqual(resolveCodexFollowTarget(models.slice(2)), undefined);
+		assert.strictEqual(resolveCodexFollowTarget([
+			models[0], { modelId: "gpt-6.10-sol", window: 400_000, source: "catalog" },
+		])?.modelId, "gpt-6.10-sol");
 	});
 
 	test("rereads the Codex catalog only after it changes", async () => {
@@ -97,25 +99,25 @@ suite("Shared working context limit", () => {
 		}
 	});
 
-	test("follows the last used Codex window only when enabled and keeps the slider value", () => {
+	test("follows the selected Sol window only when enabled and keeps the slider value", () => {
 		const manual = { sharedContextLength: 440_921 };
 		let changes = 0;
 		const listener = onDidChangeFollowedCodexContext(() => changes++);
 		try {
 			setFollowedCodexContext(undefined);
 			changes = 0;
-			assert.strictEqual(resolveSharedContextLimit(configuration({ ...manual, sharedContextFollowCodex: true })), 440_921, "no Codex model used yet");
+			assert.strictEqual(resolveSharedContextLimit(configuration({ ...manual, sharedContextFollowCodex: true })), 440_921, "no Sol window known yet");
 			setFollowedCodexContext({ modelId: "gpt-6.1-sol", window: 475_000 });
 			assert.strictEqual(resolveSharedContextLimit(configuration({ ...manual, sharedContextFollowCodex: true })), 475_000);
 			assert.strictEqual(resolveSharedContextLimit(configuration(manual)), 440_921, "off by default");
 			assert.strictEqual(resolveManualSharedContextLimit(configuration({ ...manual, sharedContextFollowCodex: true })), 440_921);
-			setFollowedCodexContext({ modelId: "gpt-6.1-terra", window: 475_000 });
-			assert.strictEqual(changes, 1, "a model with the same window does not refresh providers");
-			assert.strictEqual(getFollowedCodexContext()?.modelId, "gpt-6.1-terra");
-			setFollowedCodexContext({ modelId: "gpt-6-sol", window: 258_400 });
-			assert.strictEqual(changes, 2);
-			assert.strictEqual(resolveSharedContextLimit(configuration({ ...manual, sharedContextFollowCodex: true })), 258_400, "a smaller window shrinks it too");
-			setFollowedCodexContext({ modelId: "huge", window: 5_000_000 });
+			setFollowedCodexContext({ modelId: "gpt-6.2-sol", window: 475_000 });
+			assert.strictEqual(changes, 2, "the label updates even when the window is unchanged");
+			assert.strictEqual(getFollowedCodexContext()?.modelId, "gpt-6.2-sol");
+			setFollowedCodexContext({ modelId: "gpt-6.2-sol", window: 258_400 });
+			assert.strictEqual(changes, 3);
+			assert.strictEqual(resolveSharedContextLimit(configuration({ ...manual, sharedContextFollowCodex: true })), 258_400);
+			setFollowedCodexContext({ modelId: "gpt-6.2-sol", window: 5_000_000 });
 			assert.strictEqual(getFollowedCodexContext()?.window, 1_048_576);
 		} finally {
 			listener.dispose();

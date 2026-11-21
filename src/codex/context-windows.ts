@@ -11,38 +11,29 @@ export interface CodexModelContextWindow {
 	source: CodexContextWindowSource;
 }
 
-/** Why a model drives the followed shared context: it was used last, it is Codex's default, or it has the largest known window. */
-export type CodexFollowReason = "lastUsed" | "default" | "largest";
+/** Why a model drives the followed shared context. */
+export type CodexFollowReason = "latestSol";
 
 export interface CodexFollowTarget {
 	modelId: string;
 	reason: CodexFollowReason;
 }
 
-/**
- * The model whose window the shared context follows. Before any Codex request
- * the windows Codex already catalogued or reported are used right away: the
- * Codex default model first, else the largest known window. Fallback-setting
- * windows never qualify; a used model whose window is still unknown follows
- * nothing until Codex reports it, rather than another model's window.
- */
-export function resolveCodexFollowTarget(
-	models: readonly CodexModelContextWindow[],
-	lastUsedModelId?: string,
-	defaultModelId?: string
-): CodexFollowTarget | undefined {
-	const known = models.filter(model => model.source !== "fallback");
-	if (lastUsedModelId) {
-		return known.some(model => model.modelId === lastUsedModelId) ? { modelId: lastUsedModelId, reason: "lastUsed" } : undefined;
+/** Selects the newest Sol version with a window from Codex usage or the catalog. */
+export function resolveCodexFollowTarget(models: readonly CodexModelContextWindow[]): CodexFollowTarget | undefined {
+	let latest: { modelId: string; major: number; minor: number } | undefined;
+	for (const model of models) {
+		const version = /^gpt-(\d+)(?:\.(\d+))?-sol$/i.exec(model.modelId);
+		if (!version || model.source === "fallback") {
+			continue;
+		}
+		const major = Number(version[1]);
+		const minor = Number(version[2] ?? 0);
+		if (!latest || major > latest.major || (major === latest.major && minor > latest.minor)) {
+			latest = { modelId: model.modelId, major, minor };
+		}
 	}
-	if (defaultModelId && known.some(model => model.modelId === defaultModelId)) {
-		return { modelId: defaultModelId, reason: "default" };
-	}
-	const largest = known.reduce<CodexModelContextWindow | undefined>(
-		(best, model) => !best || model.window > best.window ? model : best,
-		undefined
-	);
-	return largest ? { modelId: largest.modelId, reason: "largest" } : undefined;
+	return latest && { modelId: latest.modelId, reason: "latestSol" };
 }
 
 const MAX_CATALOG_BYTES = 8 * 1024 * 1024;

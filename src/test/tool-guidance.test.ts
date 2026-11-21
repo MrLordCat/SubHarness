@@ -5,7 +5,7 @@ import { BASE_CHAT_INSTRUCTIONS } from "../chat/prompt/instructions";
 import { SUBAGENT_INSTRUCTIONS } from "../chat/subagent-runner";
 import { createCoreTools } from "../chat/tools/core-tools";
 import { createAskQuestionsTool, createTodoTool } from "../chat/tools/interaction-tools";
-import { createSubagentTool } from "../chat/tools/subagent-tool";
+import { createCloseSubagentTool, createSubagentTool } from "../chat/tools/subagent-tool";
 import { createSymbolTools } from "../chat/tools/symbol-tools";
 import { createChatTerminalTools } from "../chat/tools/terminal-tools";
 import { createToolAccessTools } from "../chat/tools/tool-access-tools";
@@ -35,6 +35,7 @@ suite("Tool descriptions and guidance", () => {
 				rules: () => [],
 			}),
 			createSubagentTool({ models: () => [] }),
+			createCloseSubagentTool({ models: () => [] }),
 		];
 	}
 

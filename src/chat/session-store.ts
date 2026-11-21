@@ -5,6 +5,11 @@ import type { ChatMessage, ChatPart, ChatPromptCache, ChatSessionMeta, ChatUsage
 
 export const DEFAULT_CHAT_TITLE = "New chat";
 
+/** Requests (user messages other than continuations) a chat keeps; older ones and their answers go when it is loaded. */
+export const CHAT_MAX_REQUESTS = 1_000;
+/** End marker of a trimmed log whose kept messages have no end marker of their own. */
+const TRIMMED_END_MARKER = "trimmed";
+
 const INDEX_VERSION = 1;
 const INDEX_FILE = "index.json";
 const INDEX_TEMP_FILE = "index.json.tmp";
@@ -31,6 +36,28 @@ interface ReplayResult {
 	hasEnd: boolean;
 }
 
+/** An open subagent persisted alongside its parent chat. */
+export interface StoredSubagent {
+	/** Stable identifier. */
+	id: string;
+	/** Display label. */
+	description: string;
+	/** Provider model identifier. */
+	modelId: string;
+	/** Display name of the model. */
+	modelName: string;
+	/** Creation time. */
+	createdAt: number;
+	/** Last update time. */
+	updatedAt: number;
+	/** First line of the last task, at most 200 characters. */
+	task: string;
+	/** First 300 characters of the last report. */
+	report?: string;
+	/** Conversation so far. */
+	history: ChatMessage[];
+}
+
 export class ChatSessionStore {
 	private readonly _root: string;
 	private readonly _sessions = new Map<string, ChatSessionMeta>();
@@ -41,6 +68,42 @@ export class ChatSessionStore {
 
 	constructor(root: string) {
 		this._root = root;
+	}
+
+	/** Loads valid open subagents from the sidecar. */
+	async loadSubagents(sessionId: string): Promise<StoredSubagent[]> {
+		assertSessionId(sessionId);
+		return this._enqueue(async () => {
+			let value: unknown;
+			try {
+				value = JSON.parse(await fs.readFile(path.join(this._root, `${sessionId}.subagents.json`), "utf8"));
+			} catch (error) {
+				if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === "ENOENT") {
+					return [];
+				}
+				throw error;
+			}
+			if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.subagents)) {
+				return [];
+			}
+			return value.subagents.filter(isStoredSubagent);
+		});
+	}
+
+	/** Saves open subagents atomically without embedding image bytes. */
+	async saveSubagents(sessionId: string, subagents: readonly StoredSubagent[]): Promise<void> {
+		assertSessionId(sessionId);
+		await this._enqueue(async () => {
+			const file = path.join(this._root, `${sessionId}.subagents.json`);
+			if (subagents.length === 0) {
+				await fs.rm(file, { force: true });
+				return;
+			}
+			await fs.mkdir(this._root, { recursive: true });
+			const cleaned = subagents.map(agent => ({ ...agent, history: agent.history.map(message => ({ ...message, parts: message.parts.map(part => part.kind === "toolResult" && part.images ? { ...part, images: part.images.map(({ data: _data, ...image }) => image) } : part) })) }));
+			await fs.writeFile(`${file}.tmp`, JSON.stringify({ version: 1, subagents: cleaned }), "utf8");
+			await renameWithRetry(`${file}.tmp`, file);
+		});
 	}
 
 	async list(): Promise<ChatSessionMeta[]> {
@@ -80,7 +143,7 @@ export class ChatSessionStore {
 		return (await this.loadSession(sessionId)).messages;
 	}
 
-	async loadSession(sessionId: string): Promise<{ messages: ChatMessage[]; interruptedMessageId?: string }> {
+	async loadSession(sessionId: string, options?: { maxRequests?: number }): Promise<{ messages: ChatMessage[]; interruptedMessageId?: string }> {
 		assertSessionId(sessionId);
 		return this._enqueue(async () => {
 			const replay = await this._replaySession(this._logFile(sessionId));
@@ -88,8 +151,49 @@ export class ChatSessionStore {
 				return { messages: [] };
 			}
 			const interrupted = interruptedMessageId(replay);
+			const limit = options?.maxRequests;
+			if (limit !== undefined && Number.isSafeInteger(limit) && limit > 0) {
+				const requests = replay.messages.flatMap((message, index) => message.role === "user" && !message.continuation ? [index] : []);
+				if (requests.length > limit) {
+					replay.messages = replay.messages.slice(requests[requests.length - limit]);
+					await this._rewriteLog(sessionId, replay);
+				}
+			}
 			return interrupted ? { messages: replay.messages, interruptedMessageId: interrupted } : { messages: replay.messages };
 		});
+	}
+
+	/**
+	 * Replaces the log with one event per kept message and its end marker. A failed write keeps the old log;
+	 * the chat then holds the trimmed messages until the next load trims again.
+	 */
+	private async _rewriteLog(sessionId: string, replay: ReplayResult): Promise<void> {
+		const events: LogEvent[] = [];
+		if (replay.hasEnd && !replay.messages.some(message => replay.ended.has(message.id))) {
+			// Keeps the log marked as one written with end markers, so an unfinished last answer still reads as interrupted.
+			events.push({ t: "end", messageId: TRIMMED_END_MARKER });
+		}
+		for (const message of replay.messages) {
+			events.push({ t: "message", message });
+			if (replay.ended.has(message.id)) {
+				events.push({ t: "end", messageId: message.id });
+			}
+		}
+		const file = this._logFile(sessionId);
+		const temporary = `${file}.tmp`;
+		try {
+			await fs.writeFile(temporary, events.map(event => `${JSON.stringify(event)}\n`).join(""), "utf8");
+			await renameWithRetry(temporary, file);
+			this._safeTails.add(sessionId);
+			await this._ensureIndex();
+			const meta = this._sessions.get(sessionId);
+			if (meta) {
+				meta.messageCount = replay.messages.length;
+				await this._writeIndex();
+			}
+		} catch {
+			await fs.rm(temporary, { force: true }).catch(() => undefined);
+		}
 	}
 
 	async appendMessage(sessionId: string, message: ChatMessage): Promise<void> {
@@ -178,7 +282,7 @@ export class ChatSessionStore {
 		});
 	}
 
-	async updateMeta(sessionId: string, patch: { title?: string; modelId?: string; customTitle?: boolean }): Promise<ChatSessionMeta | undefined> {
+	async updateMeta(sessionId: string, patch: { title?: string; modelId?: string; customTitle?: boolean; autoContinue?: ChatSessionMeta["autoContinue"] | null }): Promise<ChatSessionMeta | undefined> {
 		assertSessionId(sessionId);
 		return this._enqueue(async () => {
 			await this._ensureIndex();
@@ -199,11 +303,22 @@ export class ChatSessionStore {
 				meta.modelId = patch.modelId;
 				changed = true;
 			}
+			const updateTimestamp = changed;
+			if (patch.autoContinue !== undefined) {
+				if (patch.autoContinue === null) {
+					delete meta.autoContinue;
+				} else {
+					meta.autoContinue = { ...patch.autoContinue };
+				}
+				changed = true;
+			}
 			if (changed) {
-				const now = Date.now();
-				meta.updatedAt = now;
+				if (updateTimestamp) {
+					const now = Date.now();
+					meta.updatedAt = now;
+					this._lastIndexWrite.set(sessionId, now);
+				}
 				await this._writeIndex();
-				this._lastIndexWrite.set(sessionId, now);
 			}
 			return { ...meta };
 		});
@@ -217,6 +332,7 @@ export class ChatSessionStore {
 			this._lastIndexWrite.delete(sessionId);
 			this._safeTails.delete(sessionId);
 			await fs.rm(this._logFile(sessionId), { force: true });
+			await fs.rm(path.join(this._root, `${sessionId}.subagents.json`), { force: true });
 			if (existed) {
 				await this._writeIndex();
 			}
@@ -386,6 +502,22 @@ export class ChatSessionStore {
 	}
 }
 
+/** Antivirus or an editor can hold the log for a moment on Windows. */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+	for (const delay of [50, 100, 200, undefined]) {
+		try {
+			await fs.rename(from, to);
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code ?? "";
+			if (delay === undefined || !["EPERM", "EBUSY", "EACCES"].includes(code)) {
+				throw error;
+			}
+			await new Promise(resolve => setTimeout(resolve, delay));
+		}
+	}
+}
+
 function assertSessionId(sessionId: string): void {
 	if (!SESSION_ID.test(sessionId)) {
 		throw new Error(`Invalid chat session id: ${sessionId}`);
@@ -447,6 +579,13 @@ function asSessionMeta(value: unknown): ChatSessionMeta | undefined {
 	}
 	if (typeof value.modelId === "string") {
 		meta.modelId = value.modelId;
+	}
+	const auto = value.autoContinue;
+	if (isRecord(auto) && typeof auto.messageId === "string" && auto.messageId.length > 0
+		&& typeof auto.at === "number" && Number.isFinite(auto.at)
+		&& typeof auto.enabled === "boolean" && typeof auto.attempts === "number"
+		&& Number.isSafeInteger(auto.attempts) && auto.attempts >= 0) {
+		meta.autoContinue = { messageId: auto.messageId, at: auto.at, enabled: auto.enabled, attempts: auto.attempts };
 	}
 	return meta;
 }
@@ -547,6 +686,17 @@ function asLogEvent(line: string): LogEvent | undefined {
 		return { t: "truncate", messageId: value.messageId };
 	}
 	return undefined;
+}
+
+function isStoredSubagent(value: unknown): value is StoredSubagent {
+	return isRecord(value)
+		&& typeof value.id === "string" && typeof value.description === "string"
+		&& typeof value.modelId === "string" && typeof value.modelName === "string"
+		&& typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
+		&& typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt)
+		&& typeof value.task === "string" && value.task.length <= 200
+		&& (value.report === undefined || (typeof value.report === "string" && value.report.length <= 300))
+		&& Array.isArray(value.history) && value.history.every(isChatMessage);
 }
 
 function isChatMessage(value: unknown): value is ChatMessage {

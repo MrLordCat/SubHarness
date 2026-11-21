@@ -160,8 +160,8 @@ interface ClaudeConversationSession {
 	client: ClaudeAgentSession;
 	modelId: string;
 	runtimeKey: string;
-	/** Tools registered when the SDK session started; the MCP server cannot add more later. */
-	toolNames: string[];
+	/** Schemas registered when the SDK query started. */
+	toolSchemas: ReadonlyMap<string, string>;
 	conversationId?: string;
 	copilotTurnIndex?: number;
 	userSignatures: string[];
@@ -1517,11 +1517,11 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		let rolledOver = false;
 		let runtimeChanged: boolean | undefined;
 		let toolRestart: { previous: ClaudeConversationSession } | undefined;
-		// The SDK registers this.options.tools once per query; a widened catalog needs a new query.
+		// The SDK registers tools once per query. A new tool or schema needs a new query.
 		if (session && options.modelOptions?._aabStrictTools === true) {
-			const startedTools = new Set(session.toolNames);
-			const added = nativeTools.filter(tool => !startedTools.has(tool.name)).length;
-			if (added > 0) {
+			const startedTools = session.toolSchemas;
+			const changed = nativeTools.filter(tool => startedTools.get(tool.name) !== stableJsonStringify(tool.inputSchema ?? {})).length;
+			if (changed > 0) {
 				const previous = session;
 				const resumed = previous.sdkSessionId !== undefined && this.durableSessionsEnabled();
 				session = resumed
@@ -1544,7 +1544,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 					: undefined;
 				restored = resumed;
 				toolRestart = { previous };
-				this.logSink?.log("claude.chat.tool_catalog_grew", { added, resumed });
+				this.logSink?.log("claude.chat.tool_catalog_changed", { changed, resumed });
 			}
 		}
 		let latestOnlyRecovery: {
@@ -1820,7 +1820,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		// a cold 200-500K-token first segment, and until now the live report had
 		// no way to tell "model switch" apart from "resume rebuild" or an
 		// unhealthy session.
-		let sessionMissReason: string | undefined = toolRestart ? "tool_catalog_grew" : undefined;
+		let sessionMissReason: string | undefined = toolRestart ? "tool_catalog_changed" : undefined;
 		if (!reused && !restored && !rolledOver && !toolRestart) {
 			const liveCandidates = [...this.sessions.values()].filter(candidate =>
 				candidate.modelId === modelId && candidate.conversationId === conversationId
@@ -2150,7 +2150,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			key,
 			modelId: value.modelId,
 			runtimeKey: value.runtimeKey,
-			toolNames: value.tools.map(tool => tool.name),
+			toolSchemas: new Map(value.tools.map(tool => [tool.name, stableJsonStringify(tool.inputSchema ?? {})])),
 			conversationId: value.conversationId,
 			copilotTurnIndex: value.copilotTurnIndex,
 			userSignatures: value.userSignatures,

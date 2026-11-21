@@ -7,9 +7,10 @@ import { ChangesPanel } from "./changes-panel";
 import { ChatHistory } from "./chat-history";
 import { Composer } from "./composer";
 import { useComposerActions } from "./composer-actions";
-import { contextIndicator, formatCacheHit, modelCacheStats, selectedModelProvider } from "./format";
+import { contextIndicator, contextIndicatorTitle, formatCacheHit, modelCacheStats, selectedModelProvider } from "./format";
 import { MemoryPanel } from "./memory-panel";
 import { MessageList } from "./message-list";
+import { OpenSubagentsPanel } from "./open-subagents";
 import { QueuedMessages } from "./queued-messages";
 import { QuestionCard } from "./question-card";
 import type { ChatStore } from "./store";
@@ -70,6 +71,7 @@ export function App({ store }: { store: ChatStore }) {
 
 	const title = store.session?.title ?? "Chat";
 	const context = contextIndicator(store.latestUsage, store.models, store.selectedModelId);
+	const contextTitle = contextIndicatorTitle(store.models, store.selectedModelId);
 	const cacheStats = modelCacheStats(store.messages, store.selectedModelId);
 	const cache = cacheStats ? formatCacheHit(cacheStats, selectedModelProvider(store.models, store.selectedModelId)) : undefined;
 
@@ -119,6 +121,7 @@ export function App({ store }: { store: ChatStore }) {
 					))}
 				</div>
 			) : null}
+			<OpenSubagentsPanel store={store} />
 			<QueuedMessages queued={store.queued} onRemove={onRemoveQueued} />
 			<Composer
 				key={`composer-${store.composerKey}`}
@@ -132,6 +135,7 @@ export function App({ store }: { store: ChatStore }) {
 				cache={cache}
 				quota={store.quota}
 				context={context}
+				contextTitle={contextTitle}
 				contextSettings={store.contextSettings}
 				attachments={store.pendingAttachments}
 				draft={store.draftRequest}
