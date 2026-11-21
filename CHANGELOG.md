@@ -1,5 +1,104 @@
 # Changelog
 
+## 1.21.51 (development patch) - 2026-11-21
+
+- Fixed: in a light theme, error and warning text in the chat was hard to
+  read (Light Modern's red and yellow reach about 3:1). It is darkened to pass
+  4.5:1; borders, bars and dark or high-contrast themes keep their colors.
+- Changed: a wide editor tab keeps the messages, panels and input in one
+  centered column of about 880 px instead of the full width.
+- Changed: limit, compaction and subagent cards share the same inset.
+- Added: `scripts/chat-harness-shots.mjs` saves screenshots of the chat harness
+  in fixed scenarios (light theme, cards, wide tab, 320 px sidebar) without
+  dialogs.
+- Fixed: eight chat controller tests failed now and then. Since 1.21.48 the
+  chat shows a run while it still prepares the turn, and these tests took that
+  for a started model request; they now wait for the request itself.
+
+## 1.21.50 (development patch) - 2026-11-21
+
+- Fixed: a `request_tools` card with more than ten tools could not be answered.
+  The host dropped an answer with more than ten selected tools, so **Enable**
+  and **Deny** greyed out after a click and the card stayed until the next
+  message dismissed it as a denial. Answers now take as many tools as one
+  request may ask for (30).
+
+## 1.21.49 (development patch) - 2026-11-21
+
+- Added: **↓** at the bottom right of a chat scrolled up returns to the latest
+  message; a dot marks a new message or a growing answer.
+- Added: **Copy** under an answer copies its text as Markdown, and **⧉** next
+  to a sent message copies that message. Hovering an answer shows its time; a
+  sent message has it in the tooltip.
+- Added: a sent message longer than twelve lines or 800 characters is folded
+  with **Show more**.
+- Added: **↑** in the empty input edits the last sent message.
+- Added: chats can be renamed (**✎** in the chat list) and exported to a
+  Markdown file (**⤓**). A chosen name stays through new messages and edits;
+  an empty one brings the automatic title back.
+- Changed: in the model picker, Tab moves through the stars without closing the
+  list, a focused star is outlined, and **Ctrl+D** (**Cmd+D**) in the search box
+  stars the highlighted model.
+
+## 1.21.48 (development patch) - 2026-11-21
+
+- Fixed: a queued message was lost when its delivery failed or no model was
+  left. It now comes back into the input with a notice; in a chat you are not
+  looking at it becomes the chat's draft.
+- Fixed: while the bridge read the attachments and memory of a sent message,
+  there was no **Stop**, and Stop or deleting the chat did not cancel the send.
+  **Stop** now shows at once and stopping there sends nothing and returns the
+  text to the input; a deleted chat starts no request.
+- Fixed: with several Codex accounts, the subagent list kept only the models
+  of the account listed last. Each account now keeps its own Luna and Terra,
+  and an account that is hidden, signed out or off drops its own.
+
+## 1.21.47 (development patch) - 2026-11-21
+
+- Fixed: Codex models, the Luna and Terra subagents above all, refused to edit
+  files: Codex told them "The sandbox only permits reading files" and to ask
+  for escalation. Codex threads now leave out that permissions message
+  (`include_permissions_instructions = false`). The read-only sandbox stays and
+  still fences Codex's internal tools; edits and commands go through the
+  VS Code tools as before.
+
+## 1.21.46 (development patch) - 2026-11-21
+
+- Changed: a failure the status and model polls repeat (no Codex CLI, an
+  unreachable local server) is logged when it starts or its message changes,
+  then at most every 10 minutes with the number of skipped repeats. A Codex
+  recovery is logged as `codex.status.recovered`.
+- Fixed: on Windows, saving the cache session state failed with `EPERM` when
+  another window or a virus scanner held the file. The replace is retried
+  three times, and a failed write no longer leaves a `.tmp` file behind.
+
+## 1.21.45 (development patch) - 2026-11-20
+
+- Fixed: with no model available, a message sent in the bridge chat was lost:
+  the input and the draft were already cleared. It now comes back into the
+  input with its attachments, next to the notice. An edit or a retry without a
+  model changes nothing.
+- Fixed: editing a message with **Undo changes** cut the chat and sent the new
+  text even when the files could not be restored. The edit now stops and an
+  error says why; the chat and the files stay as they were.
+- Fixed: a file the chat could not attach (over 2 MB, binary, unreadable) was
+  reported only to the model. Its chip under the sent message now shows **⚠**
+  and the reason. When reading the attachments fails as a whole, the model is
+  told which files are missing instead of getting no attachment block.
+- Fixed: `send_to_terminal` sent `\u0003` or `^C` as text, so Ctrl+C never
+  reached the command. It now has `interrupt: true`, and those texts also
+  interrupt; the chat shows "Interrupted the terminal command".
+- Fixed: in the chat list, Enter on the **New chat** or delete button opened
+  the highlighted chat. List keys now act only from the search box.
+- Fixed: a code block's **Copy** said nothing when the clipboard failed; it now
+  shows "Copy failed". The message inputs have accessible names.
+- Changed: tool descriptions say relative paths start from the first workspace
+  folder, and `read_terminal` that `waitMs` 0 returns at once.
+- Fixed: the Codex Terra subagent refused edits because Codex reports its
+  internal sandbox as read-only. The Codex instructions now say that the
+  sandbox binds only the internal Codex tools, not the VS Code tools that edit
+  files and run commands.
+
 ## 1.21.44 (development patch) - 2026-11-20
 
 - Changed: Codex subagents come only from the 6.x family. A 5.x Luna or Terra

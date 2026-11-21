@@ -12,6 +12,19 @@ body {
 	background: var(--vscode-editor-background);
 	font-family: var(--vscode-font-family);
 	font-size: var(--vscode-font-size);
+	/* Error and warning text; borders, bars and fills keep the theme colors. */
+	--aab-error-text: var(--vscode-errorForeground);
+	--aab-warning-text: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+/*
+ * Light Modern's error red (#F85149) and warning yellow (#BF8803) reach only
+ * about 3:1 against its backgrounds; darkened they pass 4.5:1. Dark and
+ * high-contrast themes already read well and keep their colors.
+ */
+body.vscode-light {
+	--aab-error-text: color-mix(in srgb, var(--vscode-errorForeground) 72%, black);
+	--aab-warning-text: color-mix(in srgb, var(--vscode-editorWarning-foreground, #bf8803) 72%, black);
 }
 
 .chat-root,
@@ -84,7 +97,7 @@ body {
 
 .activity-badge .activity-approval,
 .history-status-approval {
-	color: var(--vscode-editorWarning-foreground);
+	color: var(--aab-warning-text);
 	font-weight: 600;
 }
 
@@ -495,7 +508,7 @@ body {
 }
 
 .tool-row-error .tool-row-glyph {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .tool-row-pending .tool-row-glyph {
@@ -583,7 +596,7 @@ body {
 }
 
 .tool-result-error summary {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .tool-output {
@@ -642,7 +655,7 @@ body {
 
 .msg-notice.notice-warning {
 	border-left-color: var(--vscode-editorWarning-foreground);
-	color: var(--vscode-editorWarning-foreground);
+	color: var(--aab-warning-text);
 }
 
 .msg-notice.notice-warning::before {
@@ -651,7 +664,7 @@ body {
 
 .msg-notice.notice-error {
 	border-left-color: var(--vscode-errorForeground);
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .msg-notice.notice-error::before {
@@ -677,7 +690,8 @@ body {
 
 .limit-card {
 	margin: 0;
-	padding: 6px 10px;
+	/* Limit, compaction and subagent cards share one inset. */
+	padding: 5px 8px;
 	border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
 	border-radius: 4px;
 	background: var(--vscode-textCodeBlock-background);
@@ -693,11 +707,11 @@ body {
 }
 
 .limit-card.notice-warning .limit-heading {
-	color: var(--vscode-editorWarning-foreground);
+	color: var(--aab-warning-text);
 }
 
 .limit-card.notice-error .limit-heading {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .limit-text,
@@ -725,7 +739,7 @@ body {
 
 .compaction-card {
 	margin: 0;
-	padding: 4px 8px;
+	padding: 5px 8px;
 	border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
 	border-radius: 4px;
 	background: var(--vscode-textCodeBlock-background);
@@ -749,7 +763,7 @@ body {
 
 .compaction-fallback {
 	margin-top: 2px;
-	color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
+	color: var(--aab-warning-text);
 	font-size: 11px;
 	overflow-wrap: anywhere;
 }
@@ -817,7 +831,7 @@ body {
 	width: 100%;
 	min-width: 0;
 	margin: 0;
-	padding: 3px 8px 1px;
+	padding: 5px 8px 1px;
 	border: none;
 	background: transparent;
 	color: inherit;
@@ -853,11 +867,11 @@ body {
 }
 
 .subagent-failed .subagent-glyph {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .subagent-stopped .subagent-glyph {
-	color: var(--vscode-editorWarning-foreground);
+	color: var(--aab-warning-text);
 }
 
 .subagent-pending .subagent-glyph {
@@ -904,7 +918,7 @@ body {
 }
 
 .subagent-sub {
-	padding: 0 8px 3px 26px;
+	padding: 0 8px 5px 26px;
 	overflow: hidden;
 	white-space: nowrap;
 	text-overflow: ellipsis;
@@ -1015,7 +1029,7 @@ body {
 
 .subagent-step-tool.tool-error .subagent-step-name,
 .subagent-step-tool.tool-error .subagent-step-summary {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .subagent-step-summary {
@@ -1045,11 +1059,11 @@ body {
 }
 
 .subagent-step-notice.notice-warning {
-	color: var(--vscode-editorWarning-foreground);
+	color: var(--aab-warning-text);
 }
 
 .subagent-step-notice.notice-error {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .compaction-divider {
@@ -1106,7 +1120,7 @@ body {
 
 .quota-warning-line {
 	padding: 2px 2px 0;
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 	font-size: 12px;
 }
 
@@ -1251,6 +1265,11 @@ body {
 	font-size: 11px;
 }
 
+.attachment-chip-error .attachment-chip-open,
+.attachment-chip-error .attachment-chip-label {
+	color: var(--aab-warning-text);
+}
+
 .attachment-chip-open {
 	display: flex;
 	align-items: center;
@@ -1283,7 +1302,7 @@ body {
 }
 
 .attachment-chip-remove:hover {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .picker {
@@ -1411,11 +1430,11 @@ body {
 }
 
 .quota-chip.quota-warning {
-	color: var(--vscode-editorWarning-foreground);
+	color: var(--aab-warning-text);
 }
 
 .quota-chip.quota-error {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .quota-popup {
@@ -1618,16 +1637,16 @@ body {
 }
 
 .picker-group-quota.quota-warning {
-	color: var(--vscode-editorWarning-foreground);
+	color: var(--aab-warning-text);
 }
 
 .picker-group-quota.quota-error {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .picker-group-note {
 	padding: 0 4px 2px;
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 	font-size: 11px;
 }
 
@@ -1684,8 +1703,15 @@ body {
 
 .picker-option:hover .picker-option-star,
 .picker-option-active .picker-option-star,
-.picker-option-star-on {
+.picker-option-star-on,
+.picker-option-star:focus-visible {
 	opacity: 1;
+}
+
+/* Tab reaches the stars, so a focused one must show where the focus is. */
+.picker-option-star:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
 }
 
 .picker-option-star:hover {
@@ -1693,7 +1719,7 @@ body {
 }
 
 .picker-option-star-on {
-	color: var(--vscode-editorWarning-foreground, #cca700);
+	color: var(--aab-warning-text);
 }
 
 .picker-show-all {
@@ -1926,7 +1952,7 @@ body {
 }
 
 .history-delete:hover {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .tool-picker .tool-group {
@@ -2322,7 +2348,7 @@ body {
 }
 
 .queued-message-remove:hover {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .changes-panel {
@@ -2671,7 +2697,7 @@ body {
 }
 
 .cache-low {
-	color: var(--vscode-editorWarning-foreground);
+	color: var(--aab-warning-text);
 }
 
 .send-button {
@@ -2802,7 +2828,7 @@ body {
 
 .memory-notice {
 	padding: 0 2px;
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 	font-size: 11px;
 }
 
@@ -2867,7 +2893,7 @@ body {
 
 .memory-expired {
 	flex: 0 0 auto;
-	color: var(--vscode-editorWarning-foreground);
+	color: var(--aab-warning-text);
 	font-size: 11px;
 }
 
@@ -2918,11 +2944,11 @@ body {
 }
 
 .memory-danger:hover {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 }
 
 .memory-confirm {
-	color: var(--vscode-errorForeground);
+	color: var(--aab-error-text);
 	font-size: 11px;
 }
 
@@ -3028,5 +3054,184 @@ body {
 .limit-model-button:focus-visible {
 	outline: 1px solid var(--vscode-focusBorder);
 	outline-offset: 1px;
+}
+
+/* Message list QoL: scroll button, copy, collapse, time */
+.message-list-wrap {
+	position: relative;
+	display: flex;
+	flex: 1 1 auto;
+	flex-direction: column;
+	min-height: 0;
+}
+
+.message-scroll-bottom {
+	position: absolute;
+	right: 16px;
+	bottom: 10px;
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
+	border-radius: 50%;
+	background: var(--vscode-editorWidget-background, var(--vscode-input-background));
+	color: var(--vscode-foreground);
+	box-shadow: 0 1px 4px var(--vscode-widget-shadow, transparent);
+	font-size: 14px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.message-scroll-bottom:hover {
+	border-color: var(--vscode-focusBorder);
+}
+
+.message-scroll-bottom-new::after {
+	content: "";
+	position: absolute;
+	top: -1px;
+	right: -1px;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--vscode-activityBarBadge-background, var(--vscode-badge-background));
+}
+
+.user-message-text-collapsed {
+	/* About twelve lines, fading out at the bottom. */
+	max-height: 17em;
+	overflow: hidden;
+	mask-image: linear-gradient(to bottom, black 75%, transparent);
+}
+
+.user-copy {
+	/* Left of the bubble, next to the edit glyph, so it never covers the text. */
+	position: absolute;
+	top: 2px;
+	left: -40px;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border: none;
+	border-radius: 3px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 12px;
+	line-height: 1;
+	opacity: 0;
+	cursor: pointer;
+}
+
+.user-bubble:hover .user-copy,
+.user-bubble:focus-within .user-copy {
+	opacity: 1;
+}
+
+.user-copy:hover {
+	background: var(--vscode-toolbar-hoverBackground, transparent);
+	color: var(--vscode-foreground);
+}
+
+.user-expand,
+.message-actions button {
+	padding: 0 6px;
+	border: 1px solid var(--vscode-widget-border, var(--vscode-input-border, transparent));
+	border-radius: 3px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-family: inherit;
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.user-expand {
+	margin-top: 4px;
+}
+
+.user-expand:hover,
+.message-actions button:hover {
+	border-color: var(--vscode-focusBorder);
+	color: var(--vscode-foreground);
+}
+
+.message-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.message-time {
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	opacity: 0;
+}
+
+.msg-assistant:hover .message-time,
+.msg-assistant:focus-within .message-time {
+	opacity: 1;
+}
+
+/* Chat list: rename and export */
+.history-rename,
+.history-export {
+	flex: 0 0 auto;
+	padding: 0 6px;
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font: inherit;
+	opacity: 0;
+	cursor: pointer;
+}
+
+.history-row:hover .history-rename,
+.history-row:hover .history-export,
+.history-row.picker-option-active .history-rename,
+.history-row.picker-option-active .history-export,
+.history-rename:focus,
+.history-export:focus {
+	opacity: 1;
+}
+
+.history-rename:hover,
+.history-export:hover {
+	color: var(--vscode-foreground);
+}
+
+.history-rename-input {
+	flex: 1 1 auto;
+	min-width: 0;
+	padding: 2px 6px;
+	border: 1px solid var(--vscode-focusBorder);
+	border-radius: 2px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	font: inherit;
+	outline: none;
+}
+
+/*
+ * One centered column in a wide editor tab: messages, panels and the input keep
+ * to about 880 px, while the header and the scrollbar stay at the edges. Below
+ * that width (the sidebar) the gutter is the usual 10 px. The percentage
+ * resolves where the variable is used, against that element's container.
+ */
+.chat-root {
+	--aab-gutter: max(10px, calc((100% - 880px) / 2));
+}
+
+.chat-message,
+.run-status,
+.approval-stack,
+.chat-root > .composer {
+	padding-right: var(--aab-gutter);
+	padding-left: var(--aab-gutter);
+}
+
+.todo-panel,
+.changes-panel,
+.queued-messages {
+	margin-right: var(--aab-gutter);
+	margin-left: var(--aab-gutter);
 }
 

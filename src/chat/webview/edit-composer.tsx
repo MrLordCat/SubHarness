@@ -40,6 +40,7 @@ export function EditComposer({ store, message, changedFilesSinceTurn, context }:
 	return (
 		<Composer
 			class="composer-edit"
+			ariaLabel="Edit message"
 			autoFocus
 			initialText={text}
 			run={store.run}

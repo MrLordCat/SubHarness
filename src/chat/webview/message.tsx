@@ -1,5 +1,5 @@
 import { Component, type ComponentChildren } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { attachmentLabel, attachmentTitle, imageMimeType } from "../shared/attachment-label";
 import type { ChatLimitInfo, ChatMessage, ChatPart, ChatSubagentRun, ChatSubagentStep } from "../shared/protocol";
 import { SUBAGENT_TOOL_NAME } from "../tools/subagent-tool";
@@ -57,6 +57,21 @@ class MessageItemMemo extends Component<MessageItemProps> {
 export const MessageItem = MessageItemMemo;
 
 function MessageView({ message, running, editing, compactionBoundary, isLast, changedFilesSinceTurn, context, store, onEdit, liveSubagentRun }: Omit<MessageItemProps, "version">) {
+	const [expanded, setExpanded] = useState(false);
+	const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+	const copyTimer = useRef<number | undefined>(undefined);
+	useEffect(() => () => { if (copyTimer.current !== undefined) { clearTimeout(copyTimer.current); } }, []);
+	const text = message.parts.flatMap(part => part.kind === "text" ? [part.text] : []).join("\n\n");
+	const time = message.createdAt == null ? undefined : new Date(message.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+	const copy = () => {
+		const show = (state: "copied" | "failed") => {
+			setCopyState(state);
+			if (copyTimer.current !== undefined) { clearTimeout(copyTimer.current); }
+			copyTimer.current = window.setTimeout(() => setCopyState("idle"), 1500);
+		};
+		if (!navigator.clipboard) { show("failed"); return; }
+		void navigator.clipboard.writeText(text).then(() => show("copied"), () => show("failed"));
+	};
 	const divider = compactionBoundary
 		? <div class="compaction-divider">Earlier messages are summarized for the model</div>
 		: null;
@@ -72,9 +87,6 @@ function MessageView({ message, running, editing, compactionBoundary, isLast, ch
 		);
 	}
 	if (message.role === "user") {
-		const text = message.parts
-			.flatMap(part => part.kind === "text" ? [part.text] : [])
-			.join("\n\n");
 		if (editing) {
 			return (
 				<>
@@ -90,6 +102,7 @@ function MessageView({ message, running, editing, compactionBoundary, isLast, ch
 				</>
 			);
 		}
+		const long = text.length > 800 || text.split("\n").length > 12;
 		const editable = !running;
 		const preview = text.length > 60 ? `${text.slice(0, 60)}…` : text;
 		const startEdit = () => {
@@ -99,7 +112,7 @@ function MessageView({ message, running, editing, compactionBoundary, isLast, ch
 			onEdit(message.id);
 		};
 		const onBubbleKeyDown = (event: KeyboardEvent) => {
-			if (event.key !== "Enter" && event.key !== " ") {
+			if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) {
 				return;
 			}
 			event.preventDefault();
@@ -114,28 +127,55 @@ function MessageView({ message, running, editing, compactionBoundary, isLast, ch
 							class="user-bubble"
 							role={editable ? "button" : undefined}
 							tabIndex={editable ? 0 : undefined}
-							title={editable ? "Click to edit" : undefined}
+							title={[editable ? "Click to edit" : undefined, time].filter(Boolean).join(" · ") || undefined}
 							aria-label={editable ? `Edit message: ${preview}` : undefined}
 							onClick={startEdit}
 							onKeyDown={onBubbleKeyDown}
 						>
 							{editable ? <span class="user-edit-glyph" aria-hidden="true">✎</span> : null}
-							{text}
+							<div class={`user-message-text${long && !expanded ? " user-message-text-collapsed" : ""}`}>{text}</div>
+							{text ? (
+								<button
+									type="button"
+									class="user-copy"
+									aria-label="Copy message"
+									title={copyState === "idle" ? "Copy message" : copyState === "copied" ? "Copied" : "Copy failed"}
+									onClick={event => {
+										event.stopPropagation();
+										copy();
+									}}
+								>
+									{copyState === "idle" ? "⧉" : copyState === "copied" ? "✓" : "!"}
+								</button>
+							) : null}
 						</div>
+						{long ? (
+							<button
+								type="button"
+								class="user-expand"
+								aria-expanded={expanded}
+								onClick={event => {
+									event.stopPropagation();
+									setExpanded(value => !value);
+								}}
+							>
+								{expanded ? "Show less" : "Show more"}
+							</button>
+						) : null}
 						{message.attachments && message.attachments.length > 0 ? (
 							<div class="message-attachments">
 								{message.attachments.map(attachment => (
-									<span class="attachment-chip" key={attachment.id}>
+									<span class={`attachment-chip${attachment.error ? " attachment-chip-error" : ""}`} key={attachment.id}>
 										<button
 											type="button"
 											class="attachment-chip-open"
-											title={attachmentTitle(attachment)}
+											title={attachment.error ? `Not included: ${attachment.error}\n${attachmentTitle(attachment)}` : attachmentTitle(attachment)}
 											onClick={event => {
 												event.stopPropagation();
 												postMessage({ type: "openAttachment", attachment });
 											}}
 										>
-											{attachment.kind === "selection" ? "✂" : imageMimeType(attachment.path) ? "🖼" : "📄"}
+											{attachment.error ? "⚠" : attachment.kind === "selection" ? "✂" : imageMimeType(attachment.path) ? "🖼" : "📄"}
 											<span class="attachment-chip-label">{attachmentLabel(attachment)}</span>
 										</button>
 									</span>
@@ -243,6 +283,14 @@ function MessageView({ message, running, editing, compactionBoundary, isLast, ch
 							return <CompactionCard key={index} part={part} />;
 					}
 				})}
+				{!(running && isLast) && message.parts.some(part => part.kind === "text") ? (
+					<div class="message-actions">
+						<button type="button" title="Copy the answer as Markdown" onClick={copy}>
+							{copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy"}
+						</button>
+						{time ? <span class="message-time" title={time}>{time}</span> : null}
+					</div>
+				) : null}
 			</div>
 		</>
 	);

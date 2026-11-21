@@ -108,6 +108,8 @@ export interface ChatAttachment {
 	/** Selection text captured when it was attached. */
 	text?: string;
 	languageId?: string;
+	/** Why the host could not include this attachment. Set by the host only. */
+	error?: string;
 }
 
 /** A subscription the chat could use after the user signs in; the model picker offers it. */
@@ -207,6 +209,7 @@ export interface ChatSessionMeta {
 	updatedAt: number;
 	modelId?: string;
 	messageCount: number;
+	customTitle?: boolean;
 }
 
 export type ChatSessionActivityState = "running" | "approval" | "finished";
@@ -496,6 +499,8 @@ export type WebviewMessage =
 	| { type: "listSessions" }
 	| { type: "openSession"; sessionId: string }
 	| { type: "deleteSession"; sessionId: string }
+	| { type: "renameSession"; sessionId: string; title: string }
+	| { type: "exportSession"; sessionId: string }
 	| { type: "loadToolResult"; messageId: string; callId: string }
 	| { type: "loadPartText"; messageId: string; index: number }
 	/** Asks for the shared memory visible in this project, e.g. when the panel opens. */

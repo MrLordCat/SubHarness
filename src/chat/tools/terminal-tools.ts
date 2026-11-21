@@ -64,6 +64,10 @@ function dangerous(text: unknown, cwd: unknown, rules: readonly DangerousCommand
 	return { title, detail: `${text}${directory}`, reason: `Matches the dangerous-command rule for "${match.text}".` };
 }
 
+function isInterruptText(value: unknown): boolean {
+	return typeof value === "string" && ["\u0003", "\\U0003", "\\X03", "^C"].includes(value.trim().toUpperCase());
+}
+
 /** Terminal tools for the bridge chat; they reuse the Coco terminal manager under the name "Chat". */
 export function createChatTerminalTools(options: ChatTerminalToolsOptions): ChatTool[] {
 	const { manager, rules } = options;
@@ -110,12 +114,12 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 			name: "read_terminal",
 			group: CHAT_TOOL_GROUPS.terminal,
 			readOnly: true,
-			description: "Read the bounded output and state of a command started by run_in_terminal. Optional waitMs waits for the command to finish, up to 60000 ms; do not poll repeatedly.",
+			description: "Read the bounded output and state of a command started by run_in_terminal. Without waitMs or with 0, returns the current output at once. A positive waitMs (up to 60000) waits for the running command to finish; use it after run_in_terminal returns state running.",
 			inputSchema: {
 				type: "object",
 				properties: {
 					terminalId: { type: "string" },
-					waitMs: { type: "number", minimum: 0, maximum: 60_000 },
+					waitMs: { type: "number", minimum: 0, maximum: 60_000, description: "Wait this many milliseconds for a running command to finish; 0 returns immediately." },
 					maxChars: { type: "number", minimum: 1, maximum: 128_000, description: "Most recent output characters to return (default 30000)." },
 				},
 				required: ["terminalId"],
@@ -131,27 +135,32 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 		{
 			name: "send_to_terminal",
 			group: CHAT_TOOL_GROUPS.terminal,
-			description: "Send input to a command that is running in a chat terminal. addNewLine defaults to true; for Ctrl+C send the text \\u0003 with addNewLine false. Never ask the user for passwords or tokens through this tool; they can type in the terminal themselves.",
+			description: "Send input to a command that is running in a chat terminal. addNewLine defaults to true; use interrupt: true to send Ctrl+C. Never ask the user for passwords or tokens through this tool; they can type in the terminal themselves. kill_terminal closes the shell instead.",
 			inputSchema: {
 				type: "object",
 				properties: {
 					terminalId: { type: "string" },
 					text: { type: "string" },
+					interrupt: { type: "boolean", description: "Send Ctrl+C to stop the running command; text and addNewLine are then ignored." },
 					addNewLine: { type: "boolean", default: true },
 				},
-				required: ["terminalId", "text"],
+				required: ["terminalId"],
 				additionalProperties: false,
 			},
-			needsConfirmation: input => dangerous(record(input).text, undefined, rules(), "Send a dangerous command to a terminal"),
+			needsConfirmation: input => record(input).interrupt === true || isInterruptText(record(input).text) ? undefined : dangerous(record(input).text, undefined, rules(), "Send a dangerous command to a terminal"),
 			invoke: async (input, token) => {
 				if (token.isCancellationRequested) {
 					throw new vscode.CancellationError();
 				}
 				const value = record(input);
-				if (typeof value.text !== "string") {
-					throw new Error("text must be a string.");
+				const terminalId = requireString(value, "terminalId");
+				if (value.interrupt === true || isInterruptText(value.text)) {
+					return formatTerminalSnapshot(manager.send(terminalId, "\u0003", false), MANAGER_DEFAULT_MAX_CHARS);
 				}
-				return formatTerminalSnapshot(manager.send(requireString(value, "terminalId"), value.text, value.addNewLine !== false), MANAGER_DEFAULT_MAX_CHARS);
+				if (typeof value.text !== "string" || value.text.trim() === "") {
+					throw new Error("text must be a non-empty string; use interrupt: true to stop a command.");
+				}
+				return formatTerminalSnapshot(manager.send(terminalId, value.text, value.addNewLine !== false), MANAGER_DEFAULT_MAX_CHARS);
 			},
 		},
 		{

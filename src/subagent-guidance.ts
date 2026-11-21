@@ -38,7 +38,7 @@ export function subagentProviderForSource(source: Pick<ChatModelSource, "protoco
 	return "api";
 }
 
-const catalogs = new Map<SubagentProvider, SubagentModelProfile[]>();
+const catalogs = new Map<SubagentProvider, Map<string, SubagentModelProfile[]>>();
 
 /** Codex subagent roles: Luna, the fast affordable model, takes small steps; Terra takes larger ones. */
 export type CodexSubagentRole = "luna" | "terra";
@@ -98,9 +98,14 @@ function newestCodexSubagents(profiles: readonly SubagentModelProfile[]): Subage
 	return [...newest.values()];
 }
 
+/**
+ * Codex passes its account id so two ChatGPT accounts keep their own subagents;
+ * without a scope the call replaces every scope of the provider.
+ */
 export function setSubagentModelProfiles(
 	provider: SubagentProvider,
-	profiles: readonly SubagentModelProfile[]
+	profiles: readonly SubagentModelProfile[],
+	scope?: string
 ): void {
 	const eligible = provider === "codex" ? newestCodexSubagents(profiles) : profiles;
 	const unique = new Map(eligible.map(profile => [profile.id, profile]));
@@ -113,7 +118,29 @@ export function setSubagentModelProfiles(
 		}
 		return left.label.localeCompare(right.label);
 	});
-	catalogs.set(provider, sorted);
+
+	if (scope === undefined) {
+		if (sorted.length === 0) {
+			catalogs.delete(provider);
+		} else {
+			catalogs.set(provider, new Map([["", sorted]]));
+		}
+		return;
+	}
+
+	let scopes = catalogs.get(provider);
+	if (sorted.length === 0) {
+		scopes?.delete(scope);
+		if (scopes?.size === 0) {
+			catalogs.delete(provider);
+		}
+		return;
+	}
+	if (!scopes) {
+		scopes = new Map();
+		catalogs.set(provider, scopes);
+	}
+	scopes.set(scope, sorted);
 }
 
 export function getSubagentModelProfiles(): SubagentModelProfile[] {
@@ -123,12 +150,22 @@ export function getSubagentModelProfiles(): SubagentModelProfile[] {
 	const seenLabels = new Set<string>();
 	const profiles: SubagentModelProfile[] = [];
 	for (const provider of SUBAGENT_PROVIDER_ORDER) {
-		for (const profile of catalogs.get(provider) ?? []) {
-			if (seenLabels.has(profile.label)) {
-				continue;
+		const scopes = catalogs.get(provider);
+		const orderedScopes = scopes
+			? [...scopes.keys()].sort((left, right) => {
+				if (left === "") { return right === "" ? 0 : -1; }
+				if (right === "") { return 1; }
+				return left.localeCompare(right);
+			})
+			: [];
+		for (const scope of orderedScopes) {
+			for (const profile of scopes!.get(scope) ?? []) {
+				if (seenLabels.has(profile.label)) {
+					continue;
+				}
+				seenLabels.add(profile.label);
+				profiles.push(profile);
 			}
-			seenLabels.add(profile.label);
-			profiles.push(profile);
 		}
 	}
 	return profiles;

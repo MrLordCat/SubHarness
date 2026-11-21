@@ -260,6 +260,28 @@ suite("chat tool policy", () => {
 		assert.deepStrictEqual(calls[1], ["kill", "term-4"]);
 	});
 
+	test("terminal interrupts send Ctrl+C without confirmation", async () => {
+		const cases: Array<{ input: Record<string, unknown>; text: string }> = [
+			{ input: { terminalId: "term-5", interrupt: true }, text: "\u0003" },
+			{ input: { terminalId: "term-5", text: "\\u0003" }, text: "\u0003" },
+			{ input: { terminalId: "term-5", text: "^C" }, text: "\u0003" },
+			{ input: { terminalId: "term-5", text: "\u0003" }, text: "\u0003" },
+		];
+		for (const { input, text: sent } of cases) {
+			const calls: TerminalCall[] = [];
+			const send = terminalTools({ terminalId: "term-5", terminalName: "Chat 5", state: "running", output: "", truncated: false }, calls)
+				.find(tool => tool.name === "send_to_terminal");
+			assert.ok(send);
+			assert.strictEqual(send.needsConfirmation?.(input), undefined);
+			await send.invoke(input, token());
+			assert.deepStrictEqual(calls[0], ["send", "term-5", sent, false]);
+		}
+		const empty = terminalTools({ terminalId: "term-5", terminalName: "Chat 5", state: "running", output: "", truncated: false }, [])
+			.find(tool => tool.name === "send_to_terminal");
+		assert.ok(empty);
+		await assert.rejects(empty.invoke({ terminalId: "term-5", text: "" }, token()), /interrupt/);
+	});
+
 	test("the catalog groups builtins, bridge tools and external tools with the right defaults", () => {
 		const bridge: vscode.LanguageModelTool<object> = { invoke: () => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart("bridge ran")]) };
 		const registry = fakeRegistry(

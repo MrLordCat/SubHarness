@@ -154,6 +154,14 @@ export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, on
 	};
 
 	const onSearchKeyDown = (event: KeyboardEvent) => {
+		if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "d") {
+			const entry = flat[highlight];
+			if (entry && onSetFavorite) {
+				event.preventDefault();
+				onSetFavorite(entry.id, !favoriteSet.has(entry.id));
+			}
+			return;
+		}
 		switch (event.key) {
 			case "ArrowDown":
 				event.preventDefault();
@@ -171,20 +179,35 @@ export function ModelPicker({ models, selectedModelId, quota, onRefreshQuota, on
 				}
 				break;
 			}
-			case "Tab":
-				setOpen(false);
-				break;
 			default:
 				break;
 		}
 	};
 
 	const onPopupKeyDown = (event: KeyboardEvent) => {
-		if (event.key !== "Escape") {
+		if (event.key === "Escape") {
+			event.preventDefault();
+			closeAndFocus();
 			return;
 		}
-		event.preventDefault();
-		closeAndFocus();
+		if (event.key !== "Tab") {
+			return;
+		}
+		// Tab and Shift+Tab wrap inside the open list, so the stars stay reachable without closing it.
+		const focusable = Array.from(popupRef.current?.querySelectorAll<HTMLElement>("input:not(:disabled), button:not(:disabled), [tabindex]") ?? [])
+			.filter(element => element.tabIndex >= 0 && element.offsetParent !== null);
+		if (focusable.length === 0) {
+			return;
+		}
+		const first = focusable[0];
+		const last = focusable[focusable.length - 1];
+		if (event.shiftKey && (document.activeElement === first || !popupRef.current?.contains(document.activeElement))) {
+			event.preventDefault();
+			last.focus();
+		} else if (!event.shiftKey && (document.activeElement === last || !popupRef.current?.contains(document.activeElement))) {
+			event.preventDefault();
+			first.focus();
+		}
 	};
 
 	return (
@@ -313,11 +336,11 @@ function FavoriteStar({ name, favorite, onToggle }: FavoriteStarProps) {
 	return (
 		<button
 			type="button"
-			tabIndex={-1}
+			tabIndex={0}
 			class={`picker-option-star${favorite ? " picker-option-star-on" : ""}`}
 			aria-pressed={favorite}
 			aria-label={favorite ? `Remove ${name} from favorites` : `Add ${name} to favorites`}
-			title={favorite ? "Remove from favorites" : "Add to favorites"}
+			title={favorite ? "Remove from favorites (Ctrl+D)" : "Add to favorites (Ctrl+D)"}
 			// Keeps the focus, and with it the arrow keys, in the search field.
 			onMouseDown={event => event.preventDefault()}
 			onClick={event => {

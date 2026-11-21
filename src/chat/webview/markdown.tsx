@@ -176,7 +176,7 @@ function renderInlineToken(token: Token, key: number): ComponentChildren {
 }
 
 function CodeBlock({ code, lang }: { code: string; lang: string | undefined }) {
-	const [copied, setCopied] = useState(false);
+	const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 	const timer = useRef<number | undefined>(undefined);
 
 	useEffect(() => () => {
@@ -185,25 +185,33 @@ function CodeBlock({ code, lang }: { code: string; lang: string | undefined }) {
 		}
 	}, []);
 
+	const showCopyState = (state: "copied" | "failed") => {
+		setCopyState(state);
+		if (timer.current !== undefined) {
+			clearTimeout(timer.current);
+		}
+		timer.current = window.setTimeout(() => setCopyState("idle"), 1500);
+	};
+
 	const copy = () => {
 		const clipboard = navigator.clipboard;
 		if (!clipboard) {
+			showCopyState("failed");
 			return;
 		}
-		void clipboard.writeText(code).then(() => {
-			setCopied(true);
-			if (timer.current !== undefined) {
-				clearTimeout(timer.current);
-			}
-			timer.current = window.setTimeout(() => setCopied(false), 1500);
-		}, () => undefined);
+		void clipboard.writeText(code).then(
+			() => showCopyState("copied"),
+			() => showCopyState("failed"),
+		);
 	};
 
 	return (
 		<div class="md-code">
 			<div class="md-code-head">
 				<span class="md-code-lang">{lang || "code"}</span>
-				<button type="button" class="md-copy" onClick={copy}>{copied ? "Copied" : "Copy"}</button>
+				<button type="button" class="md-copy" title={copyState === "failed" ? "Clipboard is not available" : undefined} onClick={copy}>
+					{copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy"}
+				</button>
 			</div>
 			<pre><code>{code}</code></pre>
 		</div>

@@ -86,6 +86,7 @@ import { BoundedMap, convertMessages, convertTools, sanitizeFunctionName, stable
 import { prepareHttpToolHistory } from "./providers/http-tool-history";
 import { ensureBuiltInTools } from "./tools/wait-terminal";
 import { LlamaLogSink } from "./logger";
+import { RepeatedFailureLog } from "./repeated-failure-log";
 import { buildMemoryQuery, injectAppendOnlySharedMemoryContext } from "./memory/prompt";
 import { getCurrentWorkspaceScopeId } from "./memory/scope";
 import type { SharedMemoryContextProvider, SharedMemoryPromptContext } from "./memory/types";
@@ -2576,6 +2577,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     private static readonly CONTINUATION_STATE_KEY = "llamacpp.continuation_snapshots.v1";
     private static readonly SESSION_STATE_PERSIST_THROTTLE_MS = 2_000;
     private lastSessionStatePersistAt = 0;
+    /** Model discovery polls an unreachable server again and again with the same error. */
+    private readonly failureLog = new RepeatedFailureLog();
 
     private loadPersistedReasoningMap(): void {
         if (this.reasoningMapLoaded || !this.globalState) {
@@ -2777,6 +2780,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             return;
         }
         this.lastSessionStatePersistAt = now;
+        let tmpPath: string | undefined;
         try {
             const filePath = this.sessionStateFilePath();
             if (!filePath) {
@@ -2839,10 +2843,11 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             }
 
             const payload = JSON.stringify({ prefixSnapshots, conversations, toolCatalogs });
-            const tmpPath = filePath + ".tmp";
+            tmpPath = filePath + ".tmp";
             fs.mkdirSync(path.dirname(filePath), { recursive: true });
             fs.writeFileSync(tmpPath, payload, "utf8");
-            fs.renameSync(tmpPath, filePath);
+            await this.renameWithRetry(tmpPath, filePath);
+            tmpPath = undefined;
             // The version marker stays small in globalState; large payloads no
             // longer live there.
             const extVersion = vscode.extensions.getExtension("mrlordcat.llama-vscode-chat")
@@ -2855,7 +2860,41 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             }
         } catch (error) {
             this.logError("chat.cache.session_state_persist_failed", error);
+            if (tmpPath) {
+                try {
+                    fs.rmSync(tmpPath, { force: true });
+                } catch {
+                    // The next write replaces it anyway.
+                }
+            }
         }
+    }
+
+    /** Windows briefly locks a file another window or a virus scanner is reading; retry the replace before giving up. */
+    private async renameWithRetry(from: string, to: string): Promise<void> {
+        const delays = [50, 100, 200];
+        for (let attempt = 0; ; attempt++) {
+            try {
+                fs.renameSync(from, to);
+                return;
+            } catch (error) {
+                const code = (error as NodeJS.ErrnoException).code;
+                if (attempt >= delays.length || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) {
+                    throw error;
+                }
+                await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+            }
+        }
+    }
+
+    /** Logs a failure when it starts or changes, and now and then with the count of skipped repeats while it lasts. */
+    private logRepeatedFailure(key: string, event: string, error: unknown, context: Record<string, unknown>): boolean {
+        const repeats = this.failureLog.report(key, error);
+        if (repeats === undefined) {
+            return false;
+        }
+        this.logError(event, error, repeats > 0 ? { ...context, repeats } : context);
+        return true;
     }
 
     private async persistPrefixSnapshots(): Promise<void> {
@@ -3706,6 +3745,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 },
                 this.getModelDiscoveryTimeoutMs()
             );
+            this.failureLog.clear(`runtime_context:${serverUrl}`);
 
             if (!response.ok) {
                 this.log("models.runtime_context.slots_unavailable", {
@@ -3761,7 +3801,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             });
             return runtimeContextLength;
         } catch (error) {
-            this.logError("models.runtime_context.failed", error, {
+            this.logRepeatedFailure(`runtime_context:${serverUrl}`, "models.runtime_context.failed", error, {
                 endpoint: `${serverUrl}/slots`,
             });
             return undefined;
@@ -4018,6 +4058,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 this.publishApiContextMaximum(models, source, runtimeContextLength);
                 const entries = models.map(model => this.mapModelInfo(model, source, runtimeContextLength));
                 allEntries.push(...entries);
+                this.failureLog.clear(`models_request:${source.key}`);
                 this.log("models.request.success", {
                     source: source.key,
                     serverUrl: source.serverUrl,
@@ -4032,13 +4073,13 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     })),
                 });
             } catch (err) {
-                if (!(err instanceof SourceRetryDeferredError)) {
-                    this.logError("models.request.failed", err, {
-                        source: source.key,
-                        serverUrl: source.serverUrl,
-                        silent: options.silent,
-                    });
-                }
+                // A new or changed failure; its repeats on the next polls stay out of the log and the console.
+                const logged = !(err instanceof SourceRetryDeferredError) && this.logRepeatedFailure(
+                    `models_request:${source.key}`,
+                    "models.request.failed",
+                    err,
+                    { source: source.key, serverUrl: source.serverUrl, silent: options.silent }
+                );
                 const staleModels = this.getAnyCachedModels(source, apiKeyPresent);
                 if (staleModels) {
                     this.publishApiContextMaximum(staleModels, source, runtimeContextLength);
@@ -4053,7 +4094,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     }
                     return;
                 }
-                if (!options.silent && !retryDeferred) {
+                if (!options.silent && !retryDeferred && logged) {
                     console.error(`[Llama.cpp Provider] Failed to fetch models from ${source.label}`, err);
                 }
             }

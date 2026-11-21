@@ -169,7 +169,7 @@ async function runVariant(client, label, features, modelId) {
 		approvalPolicy: "on-request",
 		sandbox: "read-only",
 		environments: [],
-		config: { web_search: "disabled", mcp_servers: {}, tools: { web_search: false }, features },
+		config: { web_search: "disabled", mcp_servers: {}, tools: { web_search: false }, include_permissions_instructions: false, features },
 		developerInstructions: "Use only the advertised dynamic tools for actions.",
 		ephemeral: args.durable !== "true",
 		historyMode: "legacy",

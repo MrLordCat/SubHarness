@@ -151,7 +151,7 @@ export function createSymbolTools(options: { roots?: WorkspaceRoots } = {}): Cha
 			type: "object",
 			properties: {
 				symbol: { type: "string", description: "The symbol name, for example a function, class or variable." },
-				filePath: { type: "string", description: "Absolute path or a path relative to the workspace folder." },
+				filePath: { type: "string", description: "Absolute path or a path relative to the first workspace folder." },
 				lineContent: { type: "string", description: "Part of the line where the symbol appears, which picks the occurrence." },
 			},
 			required: ["symbol", "filePath"],
@@ -230,7 +230,7 @@ export function createSymbolTools(options: { roots?: WorkspaceRoots } = {}): Cha
 			type: "object",
 			properties: {
 				symbol: { type: "string", description: "The current symbol name." },
-				filePath: { type: "string", description: "Absolute path or a path relative to the workspace folder." },
+				filePath: { type: "string", description: "Absolute path or a path relative to the first workspace folder." },
 				lineContent: { type: "string", description: "Part of the line where the symbol appears, which picks the occurrence." },
 				newName: { type: "string", description: "The new symbol name." },
 			},

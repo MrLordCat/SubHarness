@@ -25,6 +25,15 @@ export function App({ store }: { store: ChatStore }) {
 		const attachments = store.takeAttachments();
 		postMessage(attachments.length > 0 ? { type: "send", text, attachments } : { type: "send", text });
 	}, [store]);
+	const onEditLast = useCallback(() => {
+		if (store.editing) {
+			return;
+		}
+		const message = [...store.messages].reverse().find(candidate => candidate.role === "user" && !candidate.continuation);
+		if (message) {
+			store.startEdit(message.id);
+		}
+	}, [store]);
 	const {
 		onStop,
 		onSelectModel,
@@ -77,6 +86,8 @@ export function App({ store }: { store: ChatStore }) {
 					onList={onListSessions}
 					onOpen={onOpenSession}
 					onDelete={onDeleteSession}
+					onRename={(sessionId, title) => postMessage({ type: "renameSession", sessionId, title })}
+					onExport={sessionId => postMessage({ type: "exportSession", sessionId })}
 					onNewChat={onNewChat}
 				/>
 				<MemoryPanel memory={store.memory} onList={onListMemory} />
@@ -125,6 +136,7 @@ export function App({ store }: { store: ChatStore }) {
 				attachments={store.pendingAttachments}
 				draft={store.draftRequest}
 				onSend={onSend}
+				onEditLast={onEditLast}
 				onStop={onStop}
 				onSelectModel={onSelectModel}
 				favoriteModels={store.favoriteModels}

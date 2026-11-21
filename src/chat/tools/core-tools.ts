@@ -627,7 +627,7 @@ export function createCoreTools(options: {
 		inputSchema: {
 			type: "object",
 			properties: {
-				filePath: { type: "string", description: "Absolute path or a path relative to the workspace folder." },
+				filePath: { type: "string", description: "Absolute path or a path relative to the first workspace folder." },
 				startLine: { type: "integer", minimum: 1, description: "First line to return (1-based)." },
 				endLine: { type: "integer", minimum: 1, description: "Last line to return (1-based, inclusive)." },
 			},
@@ -748,7 +748,7 @@ export function createCoreTools(options: {
 		inputSchema: {
 			type: "object",
 			properties: {
-				path: { type: "string", description: "Absolute path or a path relative to the workspace folder." },
+				path: { type: "string", description: "Absolute path or a path relative to the first workspace folder." },
 			},
 			required: ["path"],
 		},
@@ -827,7 +827,7 @@ export function createCoreTools(options: {
 			properties: {
 				query: { type: "string", description: "Text or regular expression to search for." },
 				isRegexp: { type: "boolean", description: "Treat the query as a regular expression (default false)." },
-				includePattern: { type: "string", description: "Glob relative to the workspace folder that limits which files are searched, for example src/**/*.ts." },
+				includePattern: { type: "string", description: "Glob relative to the first workspace folder that limits which files are searched, for example src/**/*.ts." },
 				caseSensitive: { type: "boolean", description: "Match case exactly (default false)." },
 				maxResults: { type: "integer", minimum: 1, maximum: 1000, description: "Maximum number of matching lines (default 100)." },
 			},

@@ -397,6 +397,8 @@ suite("Chat webview tool call descriptions", () => {
 		assert.deepStrictEqual(describeToolCall("run_in_terminal", { command: "npm test\n&& echo done" }), { title: "Ran npm test" });
 		assert.deepStrictEqual(describeToolCall("read_terminal", { terminalId: "1" }), { title: "Read terminal output" });
 		assert.deepStrictEqual(describeToolCall("send_to_terminal", { terminalId: "1", text: "y" }), { title: "Sent input to the terminal" });
+		assert.deepStrictEqual(describeToolCall("send_to_terminal", { terminalId: "1", interrupt: true }), { title: "Interrupted the terminal command" });
+		assert.deepStrictEqual(describeToolCall("send_to_terminal", { terminalId: "1", text: "^C" }), { title: "Interrupted the terminal command" });
 		assert.deepStrictEqual(describeToolCall("kill_terminal", { terminalId: "1" }), { title: "Closed a terminal" });
 	});
 

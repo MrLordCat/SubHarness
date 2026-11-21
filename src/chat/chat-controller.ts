@@ -8,11 +8,12 @@ import { compactChatHistory, estimateTextTokens, planChatCompaction, previousMod
 import { activeCompaction, systemMessage } from "./lm-messages";
 import { MEMORY_INDEX_ID, type ChatMemoryContext, type ChatMemorySource } from "./memory-context";
 import type { ChatMemoryStore } from "./memory-store";
-import type { ChatSessionStore } from "./session-store";
+import { DEFAULT_CHAT_TITLE, titleFromParts, type ChatSessionStore } from "./session-store";
+import { chatExportFileName, renderChatMarkdown } from "./chat-export";
 import { runChatSubagent } from "./subagent-runner";
 import { ASK_QUESTIONS_TOOL_NAME, TODO_TOOL_NAME } from "./tools/interaction-tools";
 import { SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
-import { LIST_TOOLS_TOOL_NAME, REQUEST_TOOLS_TOOL_NAME, shortToolDescription, toolsArriveMidTurn } from "./tools/tool-access-tools";
+import { LIST_TOOLS_TOOL_NAME, MAX_REQUESTED_TOOLS, REQUEST_TOOLS_TOOL_NAME, shortToolDescription, toolsArriveMidTurn } from "./tools/tool-access-tools";
 import { groupModels, modelProvider, thinkingOptions } from "./shared/model-groups";
 import {
 	appendChatText,
@@ -72,6 +73,8 @@ export interface ChatControllerDeps {
 	/** Records the files each turn changed; without it the chat has no Keep/Undo. */
 	changes?: ChatChangeTrackerLike;
 	openChange?: (sessionId: string, id: string) => Promise<void>;
+	/** Asks where to save an exported chat and writes it; resolves to the saved path or undefined when cancelled. */
+	saveExport?: (suggestedName: string, content: string) => Promise<string | undefined>;
 	/** System prompt and per-turn host context; without it requests carry only the history. */
 	prompt?: ChatPromptProvider;
 	/** Summarizes older turns before another model takes over a long chat. */
@@ -161,7 +164,12 @@ const DRAFT_LIMIT = 50;
 /** Base64 of a pasted file at PASTED_FILE_MAX_BYTES, with room for padding. */
 const PASTED_FILE_MAX_BASE64 = Math.ceil(PASTED_FILE_MAX_BYTES / 3) * 4 + 4;
 const MAX_QUESTION_ANSWERS = 5;
-const MAX_QUESTION_SELECTED = 10;
+/**
+ * The longest option list a card shows: a request_tools card lists every requested tool,
+ * preselected. A lower cap dropped the whole answer and left the card stuck; sanitizeAnswers
+ * keeps only the labels the card offered anyway.
+ */
+const MAX_QUESTION_SELECTED = MAX_REQUESTED_TOOLS;
 const MAX_ANSWER_CHARS = 2_000;
 
 interface DeltaBuffer {
@@ -186,6 +194,8 @@ interface SessionRuntime {
 	messages: ChatMessage[];
 	changes: ChatChangeSet;
 	running: RunningTurn | undefined;
+	/** A send is being prepared (attachments, memory) before its turn starts; Stop cancels it. */
+	preparing: vscode.CancellationTokenSource | undefined;
 	/** A turn, edit or keep/undo is under way in this chat. */
 	busy: boolean;
 	completion: Promise<void>;
@@ -277,6 +287,7 @@ function storedAttachment(attachment: ChatAttachment): ChatAttachment {
 		...(attachment.startLine !== undefined ? { startLine: attachment.startLine } : {}),
 		...(attachment.endLine !== undefined ? { endLine: attachment.endLine } : {}),
 		...(attachment.languageId !== undefined ? { languageId: attachment.languageId } : {}),
+		...(attachment.error !== undefined ? { error: attachment.error } : {}),
 	};
 }
 
@@ -489,7 +500,11 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 		case "signIn":
 			return typeof value.provider === "string" && /^[a-z][a-z0-9-]{0,39}$/.test(value.provider) ? { type: "signIn", provider: value.provider } : undefined;
 		case "listSessions": return { type: "listSessions" };
+		case "renameSession":
+			return typeof value.sessionId === "string" && SESSION_ID.test(value.sessionId) && typeof value.title === "string" && value.title.length <= 500
+				? { type: "renameSession", sessionId: value.sessionId, title: value.title } : undefined;
 		case "openSession":
+		case "exportSession":
 		case "deleteSession":
 			return typeof value.sessionId === "string" && SESSION_ID.test(value.sessionId)
 				? { type: value.type, sessionId: value.sessionId }
@@ -709,6 +724,42 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
+	/** A chosen title stays through new messages and edits; an empty one brings the automatic title back. */
+	private async _renameSession(sessionId: string, title: string): Promise<void> {
+		if (!await this._deps.store.get(sessionId)) {
+			return;
+		}
+		const normalized = title.replace(/\s+/g, " ").trim().slice(0, 120);
+		let automatic: string | undefined;
+		if (!normalized) {
+			const first = (await this._deps.store.load(sessionId)).find(message => message.role === "user" && !message.continuation);
+			automatic = (first ? titleFromParts(first.parts) : undefined) ?? DEFAULT_CHAT_TITLE;
+		}
+		const meta = await this._deps.store.updateMeta(sessionId, { title: normalized || automatic, customTitle: normalized.length > 0 });
+		if (!meta) {
+			return;
+		}
+		const runtime = this._runtimes.get(sessionId);
+		if (runtime) {
+			runtime.meta = meta;
+			this._emit(runtime, { type: "session", session: meta });
+		}
+		this._broadcast(await this._sessionsMessage());
+	}
+
+	private async _exportSession(sessionId: string): Promise<void> {
+		try {
+			const meta = await this._deps.store.get(sessionId);
+			if (!meta) {
+				return;
+			}
+			const messages = await this._deps.store.load(sessionId);
+			await this._deps.saveExport?.(chatExportFileName(meta.title), renderChatMarkdown(meta, messages));
+		} catch (error) {
+			this._log("chat.export.failed", { message: errorMessage(error) });
+		}
+	}
+
 	private async _deleteSession(sessionId: string): Promise<void> {
 		await this._ensureSession();
 		const meta = await this._deps.store.get(sessionId);
@@ -725,6 +776,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		const active = this._activeId === sessionId;
 		const runtime = this._runtimes.get(sessionId);
 		if (runtime) {
+			runtime.preparing?.cancel();
 			runtime.running?.cts.cancel();
 			for (const approval of [...runtime.approvals.values()]) {
 				approval.settle(false);
@@ -790,6 +842,19 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		} catch (error) {
 			this._log("chat.draft.persist_failed", { message: errorMessage(error) });
 		}
+	}
+
+	/** Returns unsent content to the shown composer or merges it into the stored draft. */
+	private async _returnToDraft(runtime: SessionRuntime, text: string, attachments: readonly ChatAttachment[]): Promise<void> {
+		const id = runtime.meta.id;
+		if (id === this._activeId) {
+			this._emit(runtime, { type: "restoreDraft", text, attachments: [...attachments] });
+			return;
+		}
+		const draft = this._draft(id);
+		const mergedText = [draft?.text, text].filter(part => part).join("\n\n");
+		const mergedAttachments = [...new Map([...(draft?.attachments ?? []), ...attachments].map(attachment => [attachment.id, attachment])).values()];
+		await this._saveDraft(undefined, id, mergedText, mergedAttachments);
 	}
 
 	/** Keeps a chat's unsent composer content; other views of the shown chat take it over. */
@@ -864,6 +929,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 		this._disposed = true;
 		for (const runtime of this._runtimes.values()) {
+			runtime.preparing?.cancel();
+			runtime.preparing = undefined;
 			for (const approval of [...runtime.approvals.values()]) {
 				approval.settle(false);
 			}
@@ -1033,6 +1100,12 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "openSession":
 				await this.openSession(message.sessionId);
 				return;
+			case "renameSession":
+				await this._renameSession(message.sessionId, message.title);
+				break;
+			case "exportSession":
+				await this._exportSession(message.sessionId);
+				break;
 			case "deleteSession":
 				await this.deleteSession(message.sessionId);
 				return;
@@ -1052,6 +1125,12 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		await this._ensureSession();
 		const runtime = this._active();
 		if (!runtime) {
+			return;
+		}
+		// Without a model nothing is sent, so the composer gets the text back instead of losing it.
+		if (!await this._hasModel()) {
+			this._emit(runtime, { type: "restoreDraft", text, attachments: attachments ?? [] });
+			await this._appendErrorNotice(runtime);
 			return;
 		}
 		await this._clearDraft(runtime.meta.id);
@@ -1090,9 +1169,24 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		runtime.queued = [];
 		this._emit(runtime, { type: "queued", queued: [] });
 		const text = taken.map(message => message.text).join("\n\n");
-		void this._sendTo(runtime, text, mergeQueuedAttachments(taken)).catch(error => {
-			this._log("chat.queue.deliver_failed", { message: errorMessage(error) });
-		});
+		const attachments = mergeQueuedAttachments(taken) ?? [];
+		const before = runtime.messages.length;
+		void (async () => {
+			try {
+				if (!await this._hasModel()) {
+					await this._returnToDraft(runtime, text, attachments);
+					await this._appendErrorNotice(runtime);
+					return;
+				}
+				await this._sendTo(runtime, text, attachments);
+			} catch (error) {
+				this._log("chat.queue.deliver_failed", { message: errorMessage(error) });
+				if (this._runtimes.get(runtime.meta.id) === runtime && runtime.messages.length === before) {
+					await this._returnToDraft(runtime, text, attachments);
+					await this._appendErrorNotice(runtime, `The queued message was not sent: ${errorMessage(error)}. It is back in the input.`);
+				}
+			}
+		})().catch(error => this._log("chat.queue.deliver_failed", { message: errorMessage(error) }));
 	}
 
 	private async _resolveChanges(action: "keep" | "undo", ids: readonly string[] | undefined): Promise<void> {
@@ -1150,6 +1244,10 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		if (!runtime || runtime.busy) {
 			return;
 		}
+		if (!await this._hasModel()) {
+			await this._appendErrorNotice(runtime);
+			return;
+		}
 		runtime.busy = true;
 		try {
 			const index = runtime.messages.findIndex(message => message.id === messageId && message.role === "user" && !message.continuation);
@@ -1164,6 +1262,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 					await (undoChanges ? tracker.undoSinceTurn(runtime.meta.id, turn) : tracker.forgetTurnsFrom(runtime.meta.id, turn));
 				} catch (error) {
 					this._log("chat.changes.edit_rollback_failed", { message: errorMessage(error) });
+					// Files that were not restored must not lose the messages that explain them.
+					if (undoChanges) {
+						await this._appendErrorNotice(runtime, `Could not undo the file changes, so the message was not edited: ${errorMessage(error)}`);
+						return;
+					}
 				}
 				await this._refreshChanges(runtime.meta.id);
 			}
@@ -1200,6 +1303,10 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		if (!runtime || runtime.busy || runtime.running) {
 			return;
 		}
+		if (!await this._hasModel()) {
+			await this._appendErrorNotice(runtime);
+			return;
+		}
 		const failed = runtime.messages.at(-1);
 		if (!failed || failed.id !== messageId || failed.role !== "assistant") {
 			return;
@@ -1215,6 +1322,22 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
+	private async _hasModel(): Promise<boolean> {
+		await this._ensureModels();
+		return this._selectedModelId !== undefined && this._models.some(model => model.id === this._selectedModelId);
+	}
+
+	/** Shows an error as an answer of its own, outside any turn the model ran. */
+	private async _appendErrorNotice(runtime: SessionRuntime, text = NO_MODEL_NOTICE): Promise<void> {
+		const turn = Math.max(1, maxTurn(runtime.messages));
+		const answer: ChatMessage = { id: randomUUID(), role: "assistant", turn, createdAt: Date.now(), parts: [{ kind: "notice", level: "error", text }] };
+		await this._appendMessage(runtime, answer);
+		// Without the end marker the next load would take this notice for an interrupted answer.
+		await this._deps.store.endMessage(runtime.meta.id, answer.id).catch(error => {
+			this._log("chat.persist.end_failed", { message: errorMessage(error) });
+		});
+	}
+
 	private async _sendTurn(
 		runtime: SessionRuntime,
 		text: string,
@@ -1227,73 +1350,99 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		const modelId = this._selectedModelId;
 		const model = modelId === undefined ? undefined : this._models.find(candidate => candidate.id === modelId);
 		if (!model) {
-			const turn = Math.max(1, maxTurn(messages));
-			const notice: ChatStructuredPart = { kind: "notice", level: "error", text: NO_MODEL_NOTICE };
-			const answer: ChatMessage = { id: randomUUID(), role: "assistant", turn, createdAt: Date.now(), parts: [notice] };
-			await this._appendMessage(runtime, answer);
-			// Without the end marker the next load would take this notice for an interrupted answer.
-			await this._deps.store.endMessage(runtime.meta.id, answer.id).catch(error => {
-				this._log("chat.persist.end_failed", { message: errorMessage(error) });
-			});
+			await this._appendErrorNotice(runtime);
 			return;
 		}
-		const turn = maxTurn(messages) + 1;
-		const hostContext = this._turnContext();
-		let display: ChatAttachment[] | undefined;
-		let attachmentContext = "";
-		let images: ChatToolImage[] = [];
-		if (preserved) {
-			display = preserved.attachments;
-			attachmentContext = preserved.attachmentContext ?? "";
-			images = preserved.images ?? [];
-		} else if (attachments && attachments.length > 0 && this._deps.attachments) {
-			display = attachments;
-			try {
-				const contents = await this._deps.attachments.read(attachments);
+		const cts = new vscode.CancellationTokenSource();
+		runtime.preparing = cts;
+		this._emit(runtime, { type: "run", run: { running: true } });
+		this._broadcastActivity();
+		let started = false;
+		try {
+			const turn = maxTurn(messages) + 1;
+			const hostContext = this._turnContext();
+			let display: ChatAttachment[] | undefined;
+			let attachmentContext = "";
+			let images: ChatToolImage[] = [];
+			if (preserved) {
+				display = preserved.attachments;
+				attachmentContext = preserved.attachmentContext ?? "";
+				images = preserved.images ?? [];
+			} else if (attachments && attachments.length > 0 && this._deps.attachments) {
+				let contents: readonly AttachmentContent[];
+				try {
+					contents = await this._deps.attachments.read(attachments);
+				} catch (error) {
+					this._log("chat.attachments.read_failed", { message: errorMessage(error) });
+					// The model still learns which files are missing.
+					contents = attachments.map(attachment => ({ attachment, error: `could not be read: ${errorMessage(error)}` }));
+				}
+				// The chips show the user what the model did not get.
+				const errors = new Map(contents.flatMap(content => content.error ? [[content.attachment.id, content.error] as const] : []));
+				display = attachments.map(attachment => {
+					const error = errors.get(attachment.id);
+					return error ? { ...attachment, error } : attachment;
+				});
 				attachmentContext = renderAttachments(contents);
 				images = contents.flatMap(content => content.image ? [content.image] : []);
-			} catch (error) {
-				this._log("chat.attachments.read_failed", { message: errorMessage(error) });
+			}
+			// A continuation repeats no request of its own; the memory of the request it continues is already shown.
+			const memory = continuation ? undefined : await this._memoryContext(text, messages);
+			if (cts.token.isCancellationRequested || this._runtimes.get(runtime.meta.id) !== runtime) {
+				if (this._runtimes.get(runtime.meta.id) === runtime && !continuation) {
+					await this._returnToDraft(runtime, text, preserved?.attachments ?? attachments ?? []);
+				}
+				return;
+			}
+			const user: ChatMessage = {
+				id: randomUUID(),
+				role: "user",
+				turn,
+				createdAt: Date.now(),
+				parts: [{ kind: "text", text }],
+				...(hostContext ? { hostContext } : {}),
+				...(memory ? { memoryContext: memory.text, memoryRevisions: memory.revisions.map(revision => ({ ...revision })) } : {}),
+				...(attachmentContext ? { attachmentContext } : {}),
+				...(display && display.length > 0 ? { attachments: display.map(storedAttachment) } : {}),
+				...(images.length > 0 ? { images } : {}),
+				...(continuation ? { continuation: { ...continuation } } : {}),
+			};
+			await this._appendMessage(runtime, user);
+			await this._refreshSessionMeta(runtime);
+			const history = messages.slice();
+			const assistant: ChatMessage = { id: randomUUID(), role: "assistant", turn, createdAt: Date.now(), modelId: model.id, parts: [] };
+			await this._appendMessage(runtime, assistant);
+			// A chat deleted while its messages were being saved must not start a turn nobody can stop.
+			if (this._runtimes.get(runtime.meta.id) !== runtime) {
+				return;
+			}
+			const running: RunningTurn = {
+				runtime,
+				sessionId: runtime.meta.id,
+				message: assistant,
+				model,
+				cts,
+				persistedParts: 0,
+				buffer: undefined,
+				timer: undefined,
+			};
+			runtime.running = running;
+			runtime.preparing = undefined;
+			started = true;
+			runtime.completion = this._runTurn(running, model, history, turn);
+			await runtime.completion;
+		} finally {
+			if (!started) {
+				if (runtime.preparing === cts) {
+					runtime.preparing = undefined;
+				}
+				cts.dispose();
+				if (this._runtimes.get(runtime.meta.id) === runtime) {
+					this._emit(runtime, { type: "run", run: { running: false } });
+					this._broadcastActivity();
+				}
 			}
 		}
-		// A continuation repeats no request of its own; the memory of the request it continues is already shown.
-		const memory = continuation ? undefined : await this._memoryContext(text, messages);
-		const user: ChatMessage = {
-			id: randomUUID(),
-			role: "user",
-			turn,
-			createdAt: Date.now(),
-			parts: [{ kind: "text", text }],
-			...(hostContext ? { hostContext } : {}),
-			...(memory ? { memoryContext: memory.text, memoryRevisions: memory.revisions.map(revision => ({ ...revision })) } : {}),
-			...(attachmentContext ? { attachmentContext } : {}),
-			...(display && display.length > 0 ? { attachments: display.map(storedAttachment) } : {}),
-			...(images.length > 0 ? { images } : {}),
-			...(continuation ? { continuation: { ...continuation } } : {}),
-		};
-		await this._appendMessage(runtime, user);
-		await this._refreshSessionMeta(runtime);
-		const history = messages.slice();
-		const assistant: ChatMessage = { id: randomUUID(), role: "assistant", turn, createdAt: Date.now(), modelId: model.id, parts: [] };
-		await this._appendMessage(runtime, assistant);
-		// A chat deleted while its messages were being saved must not start a turn nobody can stop.
-		if (this._runtimes.get(runtime.meta.id) !== runtime) {
-			return;
-		}
-		const running: RunningTurn = {
-			runtime,
-			sessionId: runtime.meta.id,
-			message: assistant,
-			model,
-			cts: new vscode.CancellationTokenSource(),
-			persistedParts: 0,
-			buffer: undefined,
-			timer: undefined,
-		};
-		runtime.running = running;
-		this._emit(runtime, { type: "run", run: { running: true } });
-		runtime.completion = this._runTurn(running, model, history, turn);
-		await runtime.completion;
 	}
 
 	private async _runTurn(running: RunningTurn, model: vscode.LanguageModelChatInformation, history: ChatMessage[], turn: number): Promise<void> {
@@ -1728,6 +1877,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		if (!runtime) {
 			return;
 		}
+		runtime.preparing?.cancel();
 		const running = runtime.running;
 		if (running) {
 			if (running.timer) {
@@ -2201,6 +2351,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			messages: loaded.messages,
 			changes: await this._loadChanges(meta.id),
 			running: undefined,
+			preparing: undefined,
 			busy: false,
 			completion: Promise.resolve(),
 			approvals: new Map(),
@@ -2303,7 +2454,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	}
 
 	private _runState(): ChatRunState {
-		return { running: this._active()?.running !== undefined };
+		const runtime = this._active();
+		return { running: runtime?.running !== undefined || runtime?.preparing !== undefined };
 	}
 
 	private _active(): SessionRuntime | undefined {
@@ -2323,7 +2475,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			if (runtime.meta.id === this._activeId) {
 				continue;
 			}
-			const state: ChatSessionActivityState | undefined = runtime.approvals.size > 0 || runtime.questions.size > 0 ? "approval" : runtime.running ? "running" : runtime.finished ? "finished" : undefined;
+			const state: ChatSessionActivityState | undefined = runtime.approvals.size > 0 || runtime.questions.size > 0 ? "approval" : runtime.running || runtime.preparing ? "running" : runtime.finished ? "finished" : undefined;
 			if (state) {
 				activity.push({ id: runtime.meta.id, title: runtime.meta.title, state });
 			}

@@ -13,6 +13,8 @@ interface ChatHistoryProps {
 	onList: () => void;
 	onOpen: (sessionId: string) => void;
 	onDelete: (sessionId: string) => void;
+	onRename: (sessionId: string, title: string) => void;
+	onExport: (sessionId: string) => void;
 	onNewChat: () => void;
 }
 
@@ -40,10 +42,31 @@ const STATUS_GLYPHS: Record<ChatSessionActivityState, string> = {
 
 const GROUP_ORDER: SessionGroup[] = ["Today", "Yesterday", "Last 7 days", "Older"];
 
-export function ChatHistory({ title, sessions, activeId, activity, activeRunning, openRequest, onList, onOpen, onDelete, onNewChat }: ChatHistoryProps) {
+export function ChatHistory({ title, sessions, activeId, activity, activeRunning, openRequest, onList, onOpen, onDelete, onRename, onExport, onNewChat }: ChatHistoryProps) {
 	const instanceId = useId();
 	const [open, setOpen] = useState(false);
 	const [query, setQuery] = useState("");
+	const [renaming, setRenaming] = useState<string>();
+	const renameRef = useRef<HTMLInputElement>(null);
+	const editingRef = useRef<string | undefined>(undefined);
+	useLayoutEffect(() => {
+		if (renaming) {
+			renameRef.current?.focus();
+			renameRef.current?.select();
+		}
+	}, [renaming]);
+	/** Enter and blur save, Escape cancels; the blur after either finds nothing left to save. */
+	const finishRename = (save: boolean) => {
+		const id = editingRef.current;
+		if (!id) {
+			return;
+		}
+		editingRef.current = undefined;
+		if (save) {
+			onRename(id, renameRef.current?.value ?? "");
+		}
+		setRenaming(undefined);
+	};
 	const [highlight, setHighlight] = useState(0);
 	const [now, setNow] = useState(() => Date.now());
 	const wrapperRef = useRef<HTMLDivElement>(null);
@@ -161,6 +184,11 @@ export function ChatHistory({ title, sessions, activeId, activity, activeRunning
 	};
 
 	const onPopupKeyDown = (event: KeyboardEvent) => {
+		// List keys act only from the search box or the popup itself, not from a focused row button.
+		const target = event.target;
+		if (event.key !== "Escape" && target !== searchRef.current && target !== popupRef.current) {
+			return;
+		}
 		switch (event.key) {
 			case "ArrowDown":
 				event.preventDefault();
@@ -246,7 +274,23 @@ export function ChatHistory({ title, sessions, activeId, activity, activeRunning
 												aria-selected={selected}
 												aria-current={active ? "true" : undefined}
 											>
-												<button type="button" class="history-open" onClick={() => choose(entry.session)}>
+												{renaming === entry.session.id ? (
+													<input
+														ref={renameRef}
+														class="history-rename-input"
+														defaultValue={entry.session.title}
+														aria-label="Chat title"
+														onBlur={() => finishRename(true)}
+														onKeyDown={event => {
+															// Keys typed here belong to the title, not to the chat list.
+															event.stopPropagation();
+															if (event.key === "Enter" || event.key === "Escape") {
+																event.preventDefault();
+																finishRename(event.key === "Enter");
+															}
+														}}
+													/>
+												) : <button type="button" class="history-open" onClick={() => choose(entry.session)}>
 													{state ? (
 														<span class={`history-status history-status-${state}`} title={STATUS_LABELS[state]} aria-label={STATUS_LABELS[state]}>
 															{STATUS_GLYPHS[state]}
@@ -256,6 +300,27 @@ export function ChatHistory({ title, sessions, activeId, activity, activeRunning
 													)}
 													<span class="history-row-title">{entry.session.title}</span>
 													<span class="history-row-age">{formatAge(entry.session.updatedAt, now)}</span>
+												</button>}
+												<button
+													type="button"
+													class="history-rename"
+													aria-label={`Rename chat "${entry.session.title}"`}
+													title="Rename"
+													onClick={() => {
+														editingRef.current = entry.session.id;
+														setRenaming(entry.session.id);
+													}}
+												>
+													✎
+												</button>
+												<button
+													type="button"
+													class="history-export"
+													aria-label={`Export chat "${entry.session.title}" to Markdown`}
+													title="Export to Markdown"
+													onClick={() => onExport(entry.session.id)}
+												>
+													⤓
 												</button>
 												<button
 													type="button"

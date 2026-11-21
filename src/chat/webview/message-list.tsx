@@ -46,6 +46,9 @@ export function MessageList({ store, running, context }: MessageListProps) {
 	const passesFrameRef = useRef(0);
 	const [viewportHeight, setViewportHeight] = useState(0);
 	const [scrollTop, setScrollTop] = useState(0);
+	const [away, setAway] = useState(false);
+	const [hasNew, setHasNew] = useState(false);
+	const latestRef = useRef<{ source: ChatMessage[]; count: number; id: string | undefined; text: string } | undefined>(undefined);
 	const [, setRevision] = useState(0);
 
 	// A starting run closes the editor; the host would drop it anyway.
@@ -62,6 +65,20 @@ export function MessageList({ store, running, context }: MessageListProps) {
 		layoutRef.current = new VirtualLayout(ESTIMATED_HEIGHT);
 		stickRef.current = true;
 	}
+	const latest = store.messages[store.messages.length - 1];
+	const latestText = latest?.parts.flatMap(part => part.kind === "text" ? [part.text] : []).join("\n\n") ?? "";
+	useEffect(() => {
+		const previous = latestRef.current;
+		if (previous && previous.source === store.messages && !stickRef.current && (store.messages.length > previous.count || (latest?.id === previous.id && latestText.length > previous.text.length))) {
+			setHasNew(true);
+		}
+		// Another chat starts at its bottom.
+		if (previous && previous.source !== store.messages) {
+			setHasNew(false);
+			setAway(false);
+		}
+		latestRef.current = { source: store.messages, count: store.messages.length, id: latest?.id, text: latestText };
+	});
 	const layout = layoutRef.current as VirtualLayout;
 	layout.setCount(store.messages.length);
 
@@ -170,6 +187,9 @@ export function MessageList({ store, running, context }: MessageListProps) {
 			shiftRef.current = 0;
 		}
 		const top = scroller.scrollTop;
+		const distance = scroller.scrollHeight - top - scroller.clientHeight;
+		setAway(distance > STICK_THRESHOLD);
+		if (distance <= 1) { setHasNew(false); }
 		lastTopRef.current = top;
 		if (top === scrollTop) {
 			return;
@@ -218,6 +238,8 @@ export function MessageList({ store, running, context }: MessageListProps) {
 		}
 		const top = scroller.scrollTop;
 		const distance = scroller.scrollHeight - top - scroller.clientHeight;
+		setAway(distance > STICK_THRESHOLD);
+		if (distance <= 1) { setHasNew(false); }
 		// Any upward move releases the bottom, however small; only coming back down near the end sticks again.
 		if (distance <= 1) {
 			stickRef.current = true;
@@ -264,16 +286,41 @@ export function MessageList({ store, running, context }: MessageListProps) {
 		);
 	}
 
+	const scrollLabel = hasNew ? "Scroll to the new message" : "Scroll to the latest message";
+	const scrollToBottom = () => {
+		const scroller = scrollerRef.current;
+		if (!scroller) {
+			return;
+		}
+		stickRef.current = true;
+		scroller.scrollTop = scroller.scrollHeight;
+		setAway(false);
+		setHasNew(false);
+		requestScrollSync();
+	};
 	return (
-		<div
-			class="message-scroller"
-			ref={scrollerRef}
-			onScroll={onScroll}
-			onWheel={onWheel}
-			onKeyDown={onKeyDown}
-			onPointerDown={onPointerDown}
-		>
-			<div class="message-canvas" style={{ height: `${layout.totalHeight}px` }}>{items}</div>
+		<div class="message-list-wrap">
+			<div
+				class="message-scroller"
+				ref={scrollerRef}
+				onScroll={onScroll}
+				onWheel={onWheel}
+				onKeyDown={onKeyDown}
+				onPointerDown={onPointerDown}
+			>
+				<div class="message-canvas" style={{ height: `${layout.totalHeight}px` }}>{items}</div>
+			</div>
+			{away ? (
+				<button
+					type="button"
+					class={`message-scroll-bottom${hasNew ? " message-scroll-bottom-new" : ""}`}
+					aria-label={scrollLabel}
+					title={scrollLabel}
+					onClick={scrollToBottom}
+				>
+					↓
+				</button>
+			) : null}
 		</div>
 	);
 }

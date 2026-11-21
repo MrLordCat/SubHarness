@@ -34,6 +34,8 @@ interface ComposerProps {
 	attachments: ChatAttachment[];
 	/** Text the textarea starts with; later changes come from typing. */
 	initialText?: string;
+	/** Accessible name for the message textarea. */
+	ariaLabel?: string;
 	/** Focus the textarea on mount and put the caret at the end. */
 	autoFocus?: boolean;
 	/** Text the composer takes over when seq changes, e.g. what Stop took back from the queue. */
@@ -42,6 +44,7 @@ interface ComposerProps {
 	onTextChange?: (text: string) => void;
 	/** When given, Escape cancels, a Cancel button appears and Stop is never shown. */
 	onCancel?: () => void;
+	onEditLast?: () => void;
 	/** Rendered below the input row, e.g. the edit hint. */
 	footer?: ComponentChildren;
 	placeholder?: string;
@@ -131,10 +134,12 @@ export function Composer({
 	contextSettings,
 	attachments,
 	initialText,
+	ariaLabel,
 	autoFocus,
 	draft,
 	onTextChange,
 	onCancel,
+	onEditLast,
 	footer,
 	placeholder,
 	class: extraClass,
@@ -296,6 +301,11 @@ export function Composer({
 			onCancel();
 			return;
 		}
+		if (event.key === "ArrowUp" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && !text.trim() && attachments.length === 0 && !run.running && !onCancel) {
+			event.preventDefault();
+			onEditLast?.();
+			return;
+		}
 		if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
 			return;
 		}
@@ -390,6 +400,7 @@ export function Composer({
 				<textarea
 					ref={textareaRef}
 					class="composer-input"
+					aria-label={ariaLabel ?? "Message"}
 					rows={1}
 					placeholder={placeholder ?? (run.running && !onCancel ? "Add a message for the running agent…" : "Ask anything…")}
 					value={text}

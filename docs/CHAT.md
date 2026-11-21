@@ -6,7 +6,8 @@ runs its own tools directly.
 
 Open it from the **AI Agent Bridge** activity bar container → **Chat**, or run
 **AI Agent Bridge: Open Chat in Editor** for an editor tab. The sidebar and the
-tab show the same chat.
+tab show the same chat; a wide tab keeps the messages and the input in one
+centered column.
 
 ## Writing a message
 
@@ -18,6 +19,13 @@ tab show the same chat.
   input, and the agent reads it after the tool calls it is running now. Several
   queued messages go out together; **×** removes one. **Stop** ends the answer
   and puts the queued messages back into the input.
+- **Stop** shows as soon as a message is sent, also while the bridge still
+  reads its attachments. Stopping then sends nothing and puts the text back
+  into the input; deleting the chat then starts no request.
+- When no model is available, a sent message is not lost: it comes back into
+  the input with its attachments, and a notice says why. The same holds for
+  queued messages whose delivery fails; in a chat you are not looking at they
+  become its draft.
 - The model picker groups models by provider and has a search box. Each group
   shows that provider's 5-hour window, the weekly one only once it is used up,
   or its balance, fetched again when the picker opens or a model is picked. A provider with a used-up limit is dimmed with its reset
@@ -29,7 +37,9 @@ tab show the same chat.
   picker opens on the starred models, grouped by provider, plus the selected
   model; **Show all models** lists every model, and a search always looks
   through all of them. Stars are kept for every workspace, and a model that is
-  missing for a while (signed out, offline) keeps its star.
+  missing for a while (signed out, offline) keeps its star. From the keyboard,
+  **Ctrl+D** (**Cmd+D** on macOS) in the search box stars the highlighted model,
+  and Tab moves through the stars without closing the list.
 - **Thinking** appears for models with reasoning levels. The choice is
   remembered per model.
 - **Tools** lists every tool the model may use. The bridge's own tools are on;
@@ -73,7 +83,8 @@ each can be up to 20 MB, ten at a time.
 Attachments show as chips above the input and under the sent message; click
 one to open it. Files are read when the message is sent, including unsaved
 editor content. Each file is capped at 60,000 characters and a message at
-150,000; binary files and files over 2 MB are named but not included.
+150,000; binary files and files over 2 MB are named but not included. The
+chip of a file the model did not get shows **⚠**; hover it for the reason.
 Images (PNG, JPEG, GIF or WebP up to 3.75 MB) go to models that accept images
 after the message text; other models get a note that they were left out.
 
@@ -85,7 +96,9 @@ The chat's own tools read, search, create, edit (`replace_string_in_file`,
 pages (`fetch_webpage`), work with symbols through the language servers
 (`list_code_usages`, `rename_symbol`, `workspace_symbols`), report problems and
 start subagents. Images returned by MCP and extension tools also reach the
-model; the chat shows their name and size.
+model; the chat shows their name and size. `send_to_terminal` with
+`interrupt: true` stops the running command with Ctrl+C. Relative paths in tool
+calls start from the first workspace folder.
 
 A turn has no limit on tool rounds: it runs until the model answers without a
 tool call or you press **Stop**. A subagent stops after 100 tool rounds.
@@ -161,19 +174,38 @@ edit tools wrote, and says how many other changed files it left out. Undo in
 one chat therefore cannot revert another chat's work. Do not let two chats
 edit the same file.
 
+## Reading the chat
+
+- When you scroll up, **↓** at the bottom right takes you back to the latest
+  message; a dot on it means a new message or more of the answer arrived.
+- **Copy** under an answer copies its text as Markdown; **⧉** next to a sent
+  message copies that message. Hovering an answer shows when it was written,
+  and the tooltip of a sent message shows when it was sent.
+- A sent message longer than twelve lines or 800 characters is folded;
+  **Show more** unfolds it.
+
 ## Editing a sent message
 
-Click a sent message to edit it. The editor has the same controls as the
+Click a sent message, or press **↑** in the empty input, to edit it (↑ opens
+the last one). The editor has the same controls as the
 input: model, thinking level, tools and attachments. Sending replaces that
 message and everything after it. If the agent changed files since then, a
-checkbox also undoes those changes. **Escape** or **Cancel** closes the editor.
+checkbox also undoes those changes; if they cannot be undone, the message and
+the chat stay as they were and an error says why. **Escape** or **Cancel**
+closes the editor.
 
 ## Chat history and background chats
 
 Click the chat title, or the history button in the view title, to search
 earlier chats grouped by day, open one, start a new chat or delete one.
-Arrow keys, Enter, Delete and Escape work in the list. A chat keeps its model
+Arrow keys, Enter and Delete work from the search box; Escape closes the list. A chat keeps its model
 when you return to it. A chat you leave without sending anything is removed.
+
+**✎** in a row renames the chat: Enter or a click elsewhere saves, Escape
+cancels, and an empty name brings the automatic title back. A chosen name stays
+when the chat goes on or a message is edited. **⤓** exports the chat to a
+Markdown file: every message with its text, attached files and tool names,
+without thinking and tool output.
 
 Opening another chat does not stop a running answer. Several chats can run at
 the same time. The header badge counts chats that are running (●), waiting for
@@ -260,3 +292,14 @@ Chats are saved per workspace in the extension's workspace storage:
 holds the Keep/Undo state and the private snapshots, and `chat-attachments`
 holds pasted files. Images sent with a message are kept in its chat log.
 Drafts are kept in the workspace state.
+
+## Checking the chat's look
+
+`node scripts/build-webview.mjs --harness` builds a browser harness of the
+chat with a fake host in `artifacts/chat-harness/`. Its URL takes `theme`
+(`dark`, `dark-plus`, `abyss`, `light`, `hc-dark`, `hc-light`), `host=editor`
+and `count` (number of messages). `node scripts/chat-harness-shots.mjs` opens it
+in headless Edge or Chrome and saves screenshots of fixed scenarios (light
+theme errors, the cards, a wide editor tab, a 320 px sidebar with its popups)
+to `artifacts/screens/`; `--only=name,name` picks scenarios. It shows no
+dialogs, so an agent can run it unattended.

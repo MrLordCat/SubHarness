@@ -426,10 +426,12 @@ interface PlanningCatalog {
 	toggles: Array<{ names: readonly string[]; enabled: boolean }>;
 }
 
-/** The planning and tool-access tools plus a disabled external tool, which the controller wires to the chat. */
-function planningCatalog(): PlanningCatalog {
+/** The planning and tool-access tools plus disabled external tools (`mcp_probe`, then `mcp_extra_1`…), which the controller wires to the chat. */
+function planningCatalog(extraTools = 0): PlanningCatalog {
 	const toggles: Array<{ names: readonly string[]; enabled: boolean }> = [];
 	let externalEnabled = false;
+	const extraNames = Array.from({ length: extraTools }, (_, index) => `mcp_extra_${index + 1}`);
+	const extraEnabled = new Set<string>();
 	const external: ChatTool = {
 		name: "mcp_probe",
 		description: "Reads a probe from an MCP server. Requires the server.",
@@ -449,7 +451,10 @@ function planningCatalog(): PlanningCatalog {
 			id: "ext:mcp",
 			label: "MCP servers",
 			note: "Run through VS Code, which may ask for confirmation in a dialog.",
-			tools: [{ name: external.name, description: external.description, enabled: externalEnabled }],
+			tools: [
+				{ name: external.name, description: external.description, enabled: externalEnabled },
+				...extraNames.map(name => ({ name, description: `Extra tool ${name}`, enabled: extraEnabled.has(name) })),
+			],
 		},
 	];
 	return {
@@ -461,6 +466,13 @@ function planningCatalog(): PlanningCatalog {
 				toggles.push({ names, enabled });
 				if (names.includes(external.name)) {
 					externalEnabled = enabled;
+				}
+				for (const name of names.filter(candidate => extraNames.includes(candidate))) {
+					if (enabled) {
+						extraEnabled.add(name);
+					} else {
+						extraEnabled.delete(name);
+					}
 				}
 			},
 		}),
@@ -544,7 +556,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState" | "saveExport">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -763,7 +775,7 @@ suite("chat controller", () => {
 		const current = createHarness(root, backend);
 		harness = current;
 		current.webview.receive({ type: "send", text: "Long job" });
-		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "run start");
+		await waitFor(() => backend.requests.length === 1, "run start");
 		current.webview.receive({ type: "stop" });
 		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "run stop");
 
@@ -810,6 +822,61 @@ suite("chat controller", () => {
 		assert.ok(lastRequest);
 		assert.strictEqual(lastRequest.messages.length, 4);
 		assert.strictEqual(messageText(lastRequest.messages[3]), "follow up");
+	});
+
+	test("a queued message whose delivery fails comes back to the input", async () => {
+		const gate = deferred();
+		const models = [...MODELS];
+		const backend = new FakeBackend([async () => { await gate.promise; }], models);
+		const current = createHarness(root, backend);
+		harness = current;
+		current.webview.receive({ type: "send", text: "first" });
+		await waitFor(() => backend.requests.length === 1, "first request");
+		current.webview.receive({ type: "send", text: "queued text" });
+		await waitFor(() => current.webview.ofType("queued").some(message => message.queued.length === 1), "queued");
+		models.splice(0);
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("restoreDraft").some(message => message.text === "queued text"), "restored queue");
+		await waitFor(() => current.webview.ofType("messageAdded").some(message => message.message.parts.some(part => part.kind === "notice" && part.level === "error")), "error notice");
+		assert.strictEqual(backend.requests.length, 1);
+	});
+
+	test("Stop while a turn is being prepared sends nothing and returns the text", async () => {
+		const gate = deferred();
+		const fake = new FakeAttachments();
+		let reading = false;
+		fake.read = async () => { reading = true; await gate.promise; return []; };
+		const backend = new FakeBackend();
+		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		harness = current;
+		current.webview.receive({ type: "send", text: "Explain", attachments: [ATTACHMENT] });
+		await waitFor(() => reading && current.webview.ofType("run").some(message => message.run.running), "preparing");
+		current.webview.receive({ type: "stop" });
+		gate.resolve();
+		await waitFor(() => current.webview.ofType("run").at(-1)?.run.running === false, "preparation stopped");
+		assert.strictEqual(backend.requests.length, 0);
+		assert.ok(current.webview.ofType("restoreDraft").some(message => message.text === "Explain"));
+		assert.ok(!current.webview.ofType("messageAdded").some(message => message.message.role === "user"));
+	});
+
+	test("deleting a chat while its turn is prepared starts no turn", async () => {
+		const gate = deferred();
+		const fake = new FakeAttachments();
+		let reading = false;
+		fake.read = async () => { reading = true; await gate.promise; return []; };
+		const backend = new FakeBackend();
+		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const id = current.webview.ofType("init")[0].session.id;
+		current.webview.receive({ type: "send", text: "Explain", attachments: [ATTACHMENT] });
+		await waitFor(() => reading, "preparing");
+		current.webview.receive({ type: "deleteSession", sessionId: id });
+		await waitFor(() => current.webview.ofType("init").length === 2, "deleted");
+		gate.resolve();
+		await new Promise<void>(resolve => setTimeout(resolve, 50));
+		assert.strictEqual(backend.requests.length, 0);
 	});
 
 	test("two queued messages are delivered as one user message", async () => {
@@ -880,7 +947,7 @@ suite("chat controller", () => {
 		const current = createHarness(root, backend);
 		harness = current;
 		current.webview.receive({ type: "send", text: "first" });
-		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "run start");
+		await waitFor(() => backend.requests.length === 1, "run start");
 		current.webview.receive({ type: "send", text: "queued text", attachments: [ATTACHMENT] });
 		await waitFor(() => current.webview.ofType("queued").some(message => message.queued.length === 1), "queued message");
 		current.webview.receive({ type: "stop" });
@@ -1635,7 +1702,8 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "ready" });
 		await waitFor(() => current.webview.ofType("init").length === 1, "init");
 		current.webview.receive({ type: "send", text: "Long story" });
-		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "run start");
+		// The model request marks a started turn; the run flag already shows while the turn is prepared.
+		await waitFor(() => backend.requests.length === 1, "run start");
 		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
 		const assistant = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "assistant");
 		assert.ok(first && assistant);
@@ -1668,7 +1736,7 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "ready" });
 		await waitFor(() => current.webview.ofType("init").length === 1, "init");
 		current.webview.receive({ type: "send", text: "A question" });
-		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "A start");
+		await waitFor(() => backend.requests.length === 1, "A start");
 		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
 		assert.ok(first);
 		current.webview.receive({ type: "newChat" });
@@ -1743,7 +1811,7 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "ready" });
 		await waitFor(() => current.webview.ofType("init").length === 1, "init");
 		current.webview.receive({ type: "send", text: "push it" });
-		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "run start");
+		await waitFor(() => backend.requests.length === 1, "run start");
 		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
 		assert.ok(first);
 		const title = (await current.store.get(first))?.title ?? "";
@@ -1785,7 +1853,7 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "ready" });
 		await waitFor(() => current.webview.ofType("init").length === 1, "init");
 		current.webview.receive({ type: "send", text: "A question" });
-		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "A start");
+		await waitFor(() => backend.requests.length === 1, "A start");
 		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
 		assert.ok(first);
 		current.webview.receive({ type: "newChat" });
@@ -1822,7 +1890,7 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "ready" });
 		await waitFor(() => current.webview.ofType("init").length === 1, "init");
 		current.webview.receive({ type: "send", text: "A question" });
-		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "A start");
+		await waitFor(() => backend.requests.length === 1, "A start");
 		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
 		assert.ok(first);
 		current.webview.receive({ type: "newChat" });
@@ -1850,7 +1918,7 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "ready" });
 		await waitFor(() => current.webview.ofType("init").length === 1, "init");
 		current.webview.receive({ type: "send", text: "Long story" });
-		await waitFor(() => current.webview.ofType("run").some(message => message.run.running), "run start");
+		await waitFor(() => backend.requests.length === 1, "run start");
 		const first = current.state.get<string>(ACTIVE_SESSION_KEY);
 		assert.ok(first);
 		current.webview.receive({ type: "newChat" });
@@ -2015,7 +2083,7 @@ suite("chat controller", () => {
 	test("answers with an error notice instead of starting a turn when no model is available", async () => {
 		const current = createHarness(root, new FakeBackend([], []));
 		harness = current;
-		current.webview.receive({ type: "send", text: "Hello" });
+		current.webview.receive({ type: "send", text: "Hello", attachments: [FILE_ATTACHMENT] });
 		await waitFor(() => current.webview.ofType("messageAdded").length === 1, "notice message");
 
 		const added = current.webview.ofType("messageAdded")[0];
@@ -2023,6 +2091,11 @@ suite("chat controller", () => {
 		assert.strictEqual(added.message.modelId, undefined);
 		assert.deepStrictEqual(added.message.parts, [{ kind: "notice", level: "error", text: "No model is available. Configure a provider first." }]);
 		assert.deepStrictEqual(current.webview.ofType("run"), []);
+		// Nothing was sent, so the composer gets the text and attachments back.
+		const restore = current.webview.ofType("restoreDraft");
+		assert.strictEqual(restore.length, 1);
+		assert.strictEqual(restore[0].text, "Hello");
+		assert.deepStrictEqual(restore[0].attachments, [FILE_ATTACHMENT]);
 	});
 
 	test("ignores malformed and empty webview messages", async () => {
@@ -2070,6 +2143,47 @@ suite("chat controller", () => {
 
 		current.webview.receive({ type: "ready" });
 		await waitFor(() => current.webview.ofType("init").length === 1, "init after malformed messages");
+	});
+
+	test("renaming a chat keeps the title through new messages and edits", async () => {
+		const backend = new FakeBackend(Array.from({ length: 3 }, () => progress => progress.report(new vscode.LanguageModelTextPart("ok"))));
+		const current = createHarness(root, backend);
+		harness = current;
+		const finished = () => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const id = current.webview.ofType("init")[0].session.id;
+		current.webview.receive({ type: "send", text: "First message" });
+		await waitFor(() => finished() === 1, "first turn");
+		const first = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
+		assert.ok(first);
+		current.webview.receive({ type: "renameSession", sessionId: id, title: "My title" });
+		await waitFor(() => current.webview.ofType("sessions").some(message => message.sessions.some(session => session.id === id && session.title === "My title")), "renamed list");
+		current.webview.receive({ type: "send", text: "Second message" });
+		await waitFor(() => finished() === 2, "second turn");
+		current.webview.receive({ type: "editMessage", messageId: first.id, text: "Edited first" });
+		await waitFor(() => finished() === 3, "edited turn");
+		assert.strictEqual((await current.store.get(id))?.title, "My title");
+		current.webview.receive({ type: "renameSession", sessionId: id, title: "  " });
+		await waitForAsync(async () => (await current.store.get(id))?.title === "Edited first", "automatic title");
+	});
+
+	test("exporting a chat saves its Markdown", async () => {
+		let saved: { name: string; content: string } | undefined;
+		const current = createHarness(root, new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("ok"))]), undefined, undefined, {
+			saveExport: async (name, content) => { saved = { name, content }; return name; },
+		});
+		harness = current;
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		const id = current.webview.ofType("init")[0].session.id;
+		current.webview.receive({ type: "send", text: "Hello" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn");
+		current.webview.receive({ type: "exportSession", sessionId: id });
+		await waitFor(() => saved !== undefined, "export");
+		assert.ok(saved?.name.endsWith(".md"));
+		assert.ok(saved?.content.startsWith("# "));
+		assert.ok(saved?.content.includes("## You"));
 	});
 
 	test("editing an earlier message drops it and the rest, then sends the new text", async () => {
@@ -2346,6 +2460,30 @@ suite("chat controller", () => {
 		assert.strictEqual(backend.requests[1].options.modelOptions?._aabStrictTools, true);
 	});
 
+	test("request_tools takes an answer that keeps more than ten preselected tools", async () => {
+		const names = Array.from({ length: 12 }, (_, index) => `mcp_extra_${index + 1}`);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-r", REQUEST_TOOLS_TOOL_NAME, { names, reason: "Visual checks" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const catalog = planningCatalog(12);
+		const current = createHarness(root, backend, catalog.source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Check the layout" });
+		await waitFor(() => current.webview.ofType("questions").length === 1, "tool request");
+		const request = current.webview.ofType("questions")[0].request;
+		assert.strictEqual(request.questions[0].options?.length, 12);
+		// The card sends every preselected tool; a cap of ten used to drop the answer and leave the card stuck.
+		current.webview.receive({ type: "answerQuestions", id: request.id, answers: [{ header: "Tools", selected: names }] });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(catalog.toggles, [{ names, enabled: true }]);
+		const result = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "toolResult" && part.callId === "call-r");
+		if (result?.kind !== "toolResult") {
+			throw new Error("expected a tool result");
+		}
+		assert.ok(result.text.startsWith(`Enabled: ${names.join(", ")}.`), result.text);
+	});
+
 	test("denying request_tools leaves the tools off and tells the agent so", async () => {
 		const backend = new FakeBackend([
 			progress => progress.report(new vscode.LanguageModelToolCallPart("call-r", REQUEST_TOOLS_TOOL_NAME, {
@@ -2536,6 +2674,30 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "editMessage", messageId: second()!.id, text: "second, again" });
 		await waitFor(() => finished() === 4, "edited again");
 		assert.deepStrictEqual(calls, ["keep:f1", "undo:all", "undoSince:2", "forget:2"]);
+	});
+
+	test("an edit whose file undo fails keeps the chat and sends nothing", async () => {
+		const calls: string[] = [];
+		const tracker = new FakeTracker(calls);
+		tracker.undoSinceTurn = async () => {
+			throw new Error("disk is busy");
+		};
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("one"))]);
+		const current = createHarness(root, backend, loggingTools(calls), tracker);
+		harness = current;
+		current.webview.receive({ type: "send", text: "first" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "first turn");
+		const user = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
+		assert.ok(user);
+
+		current.webview.receive({ type: "editMessage", messageId: user.id, text: "first, edited", undoChanges: true });
+		await waitFor(() => current.webview.ofType("messageAdded").length === 3, "error notice");
+		assert.deepStrictEqual(current.webview.ofType("messageAdded")[2].message.parts, [
+			{ kind: "notice", level: "error", text: "Could not undo the file changes, so the message was not edited: disk is busy" },
+		]);
+		assert.deepStrictEqual(current.webview.ofType("truncated"), []);
+		assert.strictEqual(backend.requests.length, 1);
+		assert.ok(!calls.some(call => call.startsWith("forget:")));
 	});
 
 	test("sends the system prompt and keeps each user message's host context", async () => {
@@ -2988,6 +3150,46 @@ suite("chat controller", () => {
 		const persisted = (await new ChatSessionStore(root).load(sessionId)).find(message => message.role === "user");
 		assert.deepStrictEqual(persisted?.attachments, [STORED_ATTACHMENT]);
 		assert.strictEqual(persisted?.attachmentContext, block);
+	});
+
+	test("marks the attachments the model did not get on the stored message", async () => {
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("Done."))]);
+		const fake = new FakeAttachments();
+		fake.contents = [
+			{ attachment: ATTACHMENT, text: "const a = 1;" },
+			{ attachment: FILE_ATTACHMENT, error: "the file is larger than 2 MB" },
+		];
+		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		harness = current;
+		// The webview cannot set an error itself.
+		current.webview.receive({ type: "send", text: "Explain", attachments: [{ ...ATTACHMENT, error: "spoofed" }, FILE_ATTACHMENT] });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+
+		const added = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
+		assert.deepStrictEqual(added?.attachments, [STORED_ATTACHMENT, { ...FILE_ATTACHMENT, error: "the file is larger than 2 MB" }]);
+		await current.store.flush();
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		const persisted = (await new ChatSessionStore(root).load(sessionId)).find(message => message.role === "user");
+		assert.deepStrictEqual(persisted?.attachments, added?.attachments);
+	});
+
+	test("tells the model and the user when the attachments cannot be read at all", async () => {
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("Done."))]);
+		const fake = new FakeAttachments();
+		fake.read = async () => {
+			throw new Error("no access");
+		};
+		const current = createHarness(root, backend, undefined, undefined, { attachments: fake });
+		harness = current;
+		current.webview.receive({ type: "send", text: "Explain", attachments: [FILE_ATTACHMENT] });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+
+		const missing = { ...FILE_ATTACHMENT, error: "could not be read: no access" };
+		const block = renderAttachments([{ attachment: FILE_ATTACHMENT, error: missing.error }]);
+		assert.strictEqual(messageText(backend.requests[0].messages.at(-1)!), `${block}\n<userRequest>\nExplain\n</userRequest>`);
+		const added = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "user");
+		assert.deepStrictEqual(added?.attachments, [missing]);
 	});
 
 	test("posts picked and dropped attachments back to the requesting webview", async () => {

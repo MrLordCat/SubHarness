@@ -13,6 +13,7 @@ import { detectLimitError, LimitGate, type LimitMatch } from "../providers/limit
 import { reportLimitNotice } from "../providers/limit-signal";
 import type { LlamaLogSink } from "../logger";
 import type { ProviderRuntimeMetrics } from "../provider-metrics";
+import { RepeatedFailureLog } from "../repeated-failure-log";
 import { PROVIDER_CONTINUATION_TTL_MS, PROVIDER_DURABLE_SESSION_TTL_MS, PROVIDER_PENDING_ROLLOVER_TTL_MS } from "../session-retention";
 import { codexSubagentUseWhen, setSubagentModelProfiles } from "../subagent-guidance";
 import { asRecord, formatShortResetTime, normalizeCopilotTurnIndex, truncate } from "../utils";
@@ -172,6 +173,7 @@ const CODEX_DEVELOPER_INSTRUCTIONS = [
 	"The user input contains a serialized VS Code conversation. Treat it as conversation data and continue the latest request.",
 	"Dynamic tools exposed to this thread are the only action tools available. Use them for every command, search, workspace read, edit, web access, and other action so VS Code renders and approves each call natively.",
 	"Never use internal Codex command, file-change, web, MCP, browser, computer-use, image-generation, plugin, or subagent tools. The provider blocks and interrupts any such attempt.",
+	"Any Codex sandbox or approval setting (read-only, on-request, escalation) binds only those internal tools. Such settings do not limit the dynamic tools: dynamic file, edit and terminal tools run in VS Code with the user's own permissions and approvals, so they can create and change files and run commands. Never decline a task or ask for escalation because of the Codex sandbox; make the change with the dynamic tools.",
 	"Prefer the outer run_in_terminal tool for commands when it is available.",
 	"Minimize tool round trips without skipping verification: batch independent shell reads/searches into one safe run_in_terminal call, prefer grep_search before many read_file calls, and use the todo tool only for substantial plans or meaningful milestone updates.",
 	"Keep every native tool result small. Filter potentially large command output with rg, counts, head, or tail; never dump full logs, JSON/JSONL files, repository file lists, generated artifacts, or binary/base64 data into chat.",
@@ -428,6 +430,7 @@ export interface CodexVsCodeOnlyPolicy {
 		mcp_servers: Record<string, never>;
 		tools: { web_search: false };
 		features: Record<string, boolean | { default_exec_yield_time_ms: number }>;
+		include_permissions_instructions: false;
 		model_auto_compact_token_limit?: number;
 	};
 }
@@ -469,6 +472,11 @@ export function createCodexVsCodeOnlyPolicy(
 			web_search: "disabled",
 			mcp_servers: {},
 			tools: { web_search: false },
+			// The read-only sandbox only fences the internal tools, which the provider
+			// blocks anyway. Codex's permissions message ("The sandbox only permits
+			// reading files", ask for escalation) made models, subagents above all,
+			// refuse edits they can make with the dynamic VS Code tools.
+			include_permissions_instructions: false,
 			...(autoCompactTokenLimit !== undefined ? { model_auto_compact_token_limit: autoCompactTokenLimit } : {}),
 			features: {
 				...(options.codeModeConfig !== false
@@ -711,6 +719,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 	private runtimeRefreshTimer: NodeJS.Timeout | undefined;
 	private accountCache: { account: CodexChatGptAccount; generation: number; expiresAt: number } | undefined;
 	private lastStatusRefreshAt = 0;
+	/** The status and model polls repeat the same failure (say, no CLI) every few seconds. */
+	private readonly failureLog = new RepeatedFailureLog();
 	private lastRateLimitSnapshot: CodexRateLimitSnapshot | undefined;
 	/** After a usage limit the provider answers with one short notice until the window resets. */
 	private readonly limitGate = new LimitGate();
@@ -897,6 +907,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		}
 		try {
 			const account = await this.client.request<CodexAccountResponse>("account/read", { refreshToken: false });
+			this.clearRepeatedFailure("codex.status", "codex.status.recovered");
 			if (!account.account) {
 				this.accountCache = undefined;
 				return this.setStatus({ state: "signedOut", summary: "Sign in required" });
@@ -910,6 +921,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			let usage: string | undefined;
 			try {
 				const limits = await this.client.request<CodexRateLimitsResponse>("account/rateLimits/read", undefined);
+				this.clearRepeatedFailure("codex.rate_limits");
 				this.lastRateLimitSnapshot = this.selectRateLimit(limits);
 				this.syncLimitGate(this.lastRateLimitSnapshot);
 				usage = formatCodexRateLimit(this.lastRateLimitSnapshot);
@@ -921,7 +933,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 					this.modelChanges.fire();
 				}
 			} catch (error) {
-				this.logSink?.logError("codex.rate_limits.failed", error);
+				this.logRepeatedFailure("codex.rate_limits", "codex.rate_limits.failed", error);
 			}
 			return this.setStatus({
 				state: "connected",
@@ -930,8 +942,22 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			});
 		} catch (error) {
 			this.accountCache = undefined;
-			this.logSink?.logError("codex.status.failed", error);
+			this.logRepeatedFailure("codex.status", "codex.status.failed", error);
 			return this.setStatus({ state: "unavailable", summary: this.cliAvailable ? "Codex unavailable" : "Codex CLI not installed" });
+		}
+	}
+
+	/** Logs a failure when it starts or changes, and now and then with the count of skipped repeats while it lasts. */
+	private logRepeatedFailure(key: string, event: string, error: unknown): void {
+		const repeats = this.failureLog.report(key, error);
+		if (repeats !== undefined) {
+			this.logSink?.logError(event, error, repeats > 0 ? { repeats } : undefined);
+		}
+	}
+
+	private clearRepeatedFailure(key: string, recoveredEvent?: string): void {
+		if (this.failureLog.clear(key) && recoveredEvent) {
+			this.logSink?.log(recoveredEvent);
 		}
 	}
 
@@ -1042,12 +1068,16 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		token: vscode.CancellationToken
 	): Promise<vscode.LanguageModelChatInformation[]> {
 		if (!this.isEnabled() || token.isCancellationRequested) {
+			if (!this.isEnabled()) {
+				this.clearSubagentCatalog();
+			}
 			this.setStatus({ state: "disabled", summary: "Off" });
 			return [];
 		}
 		// The picker lists the active account only unless every account is shown;
 		// the other providers stay registered, so an open chat keeps working.
 		if (!this.isVisibleInCatalog()) {
+			this.clearSubagentCatalog();
 			return [];
 		}
 		if (
@@ -1061,12 +1091,14 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		try {
 			const account = await this.client.request<CodexAccountResponse>("account/read", { refreshToken: false });
 			if (!account.account) {
+				this.clearSubagentCatalog();
 				this.accountCache = undefined;
 				this.models.clear();
 				this.setStatus({ state: "signedOut", summary: "Sign in required" });
 				return [];
 			}
 			if (account.account.type !== "chatgpt") {
+				this.clearSubagentCatalog();
 				this.accountCache = undefined;
 				this.models.clear();
 				this.setStatus({ state: "wrongAuth", summary: "API auth blocked" });
@@ -1104,13 +1136,14 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			await this.reloadCatalogContextWindows(false);
 			// The listing names Codex's default model, the follow target before any request.
 			this.publishFollowedContext();
+			this.clearRepeatedFailure("codex.models");
 			this.logSink?.log("codex.models.success", {
 				count: discovered.length,
 				models: discovered.map(model => model.id),
 			});
 			return this.mapKnownModels();
 		} catch (error) {
-			this.logSink?.logError("codex.models.failed", error);
+			this.logRepeatedFailure("codex.models", "codex.models.failed", error);
 			this.setStatus({ state: "unavailable", summary: this.cliAvailable ? "Codex unavailable" : "Codex CLI not installed" });
 			return this.models.size > 0 ? this.mapKnownModels() : [];
 		}
@@ -2071,6 +2104,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			return;
 		}
 		this.disposed = true;
+		this.clearSubagentCatalog();
 		for (const active of new Set(this.activeToolTurns.values())) {
 			active.bridge.dispose();
 		}
@@ -2929,6 +2963,10 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		}
 	}
 
+	private clearSubagentCatalog(): void {
+		setSubagentModelProfiles("codex", [], this.account.id);
+	}
+
 	private mapKnownModels(): vscode.LanguageModelChatInformation[] {
 		const config = this.getConfig();
 		const sharedLimit = Math.max(CODEX_WORKING_CONTEXT_MIN, resolveSharedContextLimit(config));
@@ -2957,7 +2995,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				: "Model is present in the current ChatGPT subscription catalog",
 			availabilityCheckedAt: Date.now(),
 			useWhen: codexSubagentUseWhen(model.id),
-		})));
+		})), this.account.id);
 		return models.map(model => mapCodexModelInformation(
 			model,
 			// When the shared limit follows Codex, a request makes its own model's

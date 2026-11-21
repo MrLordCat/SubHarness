@@ -169,6 +169,59 @@ suite("subagent model guidance", () => {
 		setSubagentModelProfiles("codex", []);
 	});
 
+	test("keeps scoped Codex catalogs for separate accounts", () => {
+		const codex = (slug: string, suffix: string) => ({
+			id: `codex::${slug}`,
+			label: `${slug} (Codex)${suffix}`,
+			provider: "codex" as const,
+			useWhen: "x",
+		});
+		setSubagentModelProfiles("codex", ["gpt-6.1-terra", "gpt-6-luna"].map(slug => codex(slug, " A")), "acc-a");
+		setSubagentModelProfiles("codex", ["gpt-6.1-terra", "gpt-6-luna"].map(slug => codex(slug, " B")), "acc-b");
+
+		const profiles = getSubagentModelProfiles().filter(profile => profile.provider === "codex");
+		assert.deepStrictEqual(profiles.map(profile => profile.label), [
+			"gpt-6-luna (Codex) A",
+			"gpt-6.1-terra (Codex) A",
+			"gpt-6-luna (Codex) B",
+			"gpt-6.1-terra (Codex) B",
+		]);
+		setSubagentModelProfiles("codex", []);
+	});
+
+	test("removes only the selected scoped Codex catalog", () => {
+		const codex = (slug: string, suffix: string) => ({
+			id: `codex::${slug}`,
+			label: `${slug} (Codex)${suffix}`,
+			provider: "codex" as const,
+			useWhen: "x",
+		});
+		setSubagentModelProfiles("codex", ["gpt-6-luna", "gpt-6.1-terra"].map(slug => codex(slug, " A")), "acc-a");
+		setSubagentModelProfiles("codex", ["gpt-6-luna", "gpt-6.1-terra"].map(slug => codex(slug, " B")), "acc-b");
+
+		setSubagentModelProfiles("codex", [], "acc-a");
+		assert.deepStrictEqual(
+			getSubagentModelProfiles().filter(profile => profile.provider === "codex").map(profile => profile.label),
+			["gpt-6-luna (Codex) B", "gpt-6.1-terra (Codex) B"]
+		);
+		setSubagentModelProfiles("codex", []);
+	});
+
+	test("unscoped empty Codex catalog clears every scope", () => {
+		const codex = (suffix: string) => ({
+			id: "codex::gpt-6-luna",
+			label: `gpt-6-luna (Codex)${suffix}`,
+			provider: "codex" as const,
+			useWhen: "x",
+		});
+		setSubagentModelProfiles("codex", [codex(" A")], "acc-a");
+		setSubagentModelProfiles("codex", [codex(" B")], "acc-b");
+
+		setSubagentModelProfiles("codex", []);
+		assert.deepStrictEqual(getSubagentModelProfiles().filter(profile => profile.provider === "codex"), []);
+		setSubagentModelProfiles("codex", []);
+	});
+
 	test("gives Luna the small steps and Terra the larger ones", () => {
 		assert.strictEqual(codexSubagentRole("gpt-6-luna"), "luna");
 		assert.strictEqual(codexSubagentRole("codex::work::gpt-6.1-terra"), "terra");

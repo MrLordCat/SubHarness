@@ -384,6 +384,14 @@ function handleWebviewMessage(message: WebviewMessage): void {
 		case "openSession":
 			openHarnessSession(message.sessionId);
 			break;
+		case "renameSession": {
+			const session = fakeSessions.find(item => item.id === message.sessionId);
+			if (session) { session.title = message.title.replace(/\s+/g, " ").trim().slice(0, 120) || "New chat"; }
+			emitSessions();
+			break;
+		}
+		case "exportSession":
+			break;
 		case "deleteSession":
 			deleteHarnessSession(message.sessionId);
 			break;

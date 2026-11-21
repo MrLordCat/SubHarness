@@ -241,6 +241,10 @@ Codex actions always use Copilot's native VS Code tool loop. The provider
 forces the internal runtime to `read-only` plus `on-request`, disables built-in
 action capabilities, declines internal permission requests, and interrupts a
 turn if an internal action still appears. There is intentionally no opt-out.
+The thread sets `include_permissions_instructions = false`: Codex's own
+permissions message ("The sandbox only permits reading files", ask for
+escalation) made models and subagents refuse edits they can make with the
+dynamic VS Code tools. The sandbox itself still fences the internal tools.
 
 ## Troubleshooting
 

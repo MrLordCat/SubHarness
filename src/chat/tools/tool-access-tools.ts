@@ -8,7 +8,8 @@ export const REQUEST_TOOLS_TOOL_NAME = "request_tools";
 const TOOL_LIST_HEADER = "Enabled tools are already available to you. To use disabled ones, call request_tools with their names and a reason; the user approves them.";
 const MAX_TOOL_LINES = 300;
 const MAX_SHORT_DESCRIPTION_CHARS = 160;
-const MAX_NAMES = 30;
+/** The most tools one request_tools call may ask for; its card lists them all, preselected. */
+export const MAX_REQUESTED_TOOLS = 30;
 const MAX_REASON_CHARS = 500;
 
 const LIST_TOOLS_DESCRIPTION = "Lists every tool this chat can offer, grouped, with on/off state, including disabled ones (MCP servers, other extensions). Use it when the enabled tools are not enough, then call request_tools with the names you need.";
@@ -104,8 +105,8 @@ function textValue(value: unknown): string {
 function parseRequest(input: unknown): { names: string[]; reason: string } {
 	const record = typeof input === "object" && input !== null && !Array.isArray(input) ? input as Record<string, unknown> : {};
 	const raw = record.names;
-	if (!Array.isArray(raw) || raw.length < 1 || raw.length > MAX_NAMES) {
-		throw new Error(`names must be an array of 1 to ${MAX_NAMES} tool names.`);
+	if (!Array.isArray(raw) || raw.length < 1 || raw.length > MAX_REQUESTED_TOOLS) {
+		throw new Error(`names must be an array of 1 to ${MAX_REQUESTED_TOOLS} tool names.`);
 	}
 	const names: string[] = [];
 	for (const value of raw) {
@@ -161,7 +162,7 @@ export function createToolAccessTools(): ChatTool[] {
 			inputSchema: {
 				type: "object",
 				properties: {
-					names: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_NAMES },
+					names: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_REQUESTED_TOOLS },
 					reason: { type: "string", description: "One or two sentences on what you need them for." },
 				},
 				required: ["names", "reason"],

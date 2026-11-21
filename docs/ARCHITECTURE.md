@@ -132,6 +132,8 @@ See [provider contracts](PROVIDER_ARCHITECTURE.md) for extension points and
   normal VS Code model picker; there is no separate chat participant.
 2. A strict app-server thread starts in read-only mode with built-in shell,
   file, web, MCP, browser, plugin, hook, image, and subagent actions disabled.
+  Codex's permissions message is left out, so the model does not read the
+  sandbox as a ban on edits through the dynamic tools.
 3. The current VS Code/Copilot tool catalog is canonicalized and advertised as
   app-server dynamic tools. Core coding tools stay eager; uncommon schemas can
   be loaded through the app-server tool-search mechanism.

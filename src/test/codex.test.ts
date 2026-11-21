@@ -187,6 +187,8 @@ suite("Codex subscription provider", () => {
 		assert.strictEqual(policy.config.web_search, "disabled");
 		assert.deepStrictEqual(policy.config.mcp_servers, {});
 		assert.strictEqual(policy.config.tools.web_search, false);
+		// The model must not read the read-only sandbox as a ban on dynamic-tool edits.
+		assert.strictEqual(policy.config.include_permissions_instructions, false);
 		for (const feature of [
 			"apps",
 			"browser_use",
@@ -2031,6 +2033,8 @@ suite("Codex subscription provider", () => {
 		const resumeParams = resumeCall.params as Record<string, unknown>;
 		assert.strictEqual(typeof resumeParams.developerInstructions, "string");
 		assert.ok(String(resumeParams.developerInstructions).length > 100);
+		// The read-only Codex sandbox must not stop a model from editing through the dynamic tools.
+		assert.match(String(resumeParams.developerInstructions), /do not limit the dynamic tools/);
 		assert.deepStrictEqual({ ...resumeParams, developerInstructions: undefined }, {
 			developerInstructions: undefined,
 			threadId: "thread-durable-1",

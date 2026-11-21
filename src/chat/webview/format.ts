@@ -338,8 +338,11 @@ export function describeToolCall(name: string, input: unknown): ToolCallDescript
 			}
 			case "read_terminal":
 				return { title: "Read terminal output" };
-			case "send_to_terminal":
-				return { title: "Sent input to the terminal" };
+			case "send_to_terminal": {
+				const text = textField(record, "text");
+				const interrupt = record.interrupt === true || (text !== undefined && ["\u0003", "\\U0003", "\\X03", "^C"].includes(text.trim().toUpperCase()));
+				return interrupt ? { title: "Interrupted the terminal command" } : { title: "Sent input to the terminal" };
+			}
 			case "kill_terminal":
 				return { title: "Closed a terminal" };
 			default:

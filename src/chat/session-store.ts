@@ -103,7 +103,7 @@ export class ChatSessionStore {
 			const now = Date.now();
 			meta.updatedAt = now;
 			meta.messageCount += 1;
-			if (meta.title === DEFAULT_CHAT_TITLE && message.role === "user") {
+			if (!meta.customTitle && meta.title === DEFAULT_CHAT_TITLE && message.role === "user") {
 				const title = titleFromParts(message.parts);
 				if (title) {
 					meta.title = title;
@@ -169,14 +169,16 @@ export class ChatSessionStore {
 			meta.updatedAt = now;
 			meta.messageCount = messages.length;
 			const firstUser = messages.find(message => message.role === "user");
-			meta.title = (firstUser ? titleFromParts(firstUser.parts) : undefined) ?? DEFAULT_CHAT_TITLE;
+			if (!meta.customTitle) {
+				meta.title = (firstUser ? titleFromParts(firstUser.parts) : undefined) ?? DEFAULT_CHAT_TITLE;
+			}
 			await this._writeIndex();
 			this._lastIndexWrite.set(sessionId, now);
 			return messages.length;
 		});
 	}
 
-	async updateMeta(sessionId: string, patch: { title?: string; modelId?: string }): Promise<ChatSessionMeta | undefined> {
+	async updateMeta(sessionId: string, patch: { title?: string; modelId?: string; customTitle?: boolean }): Promise<ChatSessionMeta | undefined> {
 		assertSessionId(sessionId);
 		return this._enqueue(async () => {
 			await this._ensureIndex();
@@ -187,6 +189,10 @@ export class ChatSessionStore {
 			let changed = false;
 			if (patch.title !== undefined && patch.title !== meta.title) {
 				meta.title = patch.title;
+				changed = true;
+			}
+			if (patch.customTitle !== undefined && patch.customTitle !== meta.customTitle) {
+				meta.customTitle = patch.customTitle;
 				changed = true;
 			}
 			if (patch.modelId !== undefined && patch.modelId !== meta.modelId) {
@@ -387,7 +393,7 @@ function assertSessionId(sessionId: string): void {
 }
 
 /** Cuts at 60 characters and marks truncation, so the list stays readable. */
-function titleFromParts(parts: ChatPart[]): string | undefined {
+export function titleFromParts(parts: ChatPart[]): string | undefined {
 	for (const part of parts) {
 		if (part.kind !== "text") {
 			continue;
@@ -429,10 +435,16 @@ function asSessionMeta(value: unknown): ChatSessionMeta | undefined {
 		|| typeof value.updatedAt !== "number" || typeof value.messageCount !== "number") {
 		return undefined;
 	}
+	if (value.customTitle !== undefined && typeof value.customTitle !== "boolean") {
+		return undefined;
+	}
 	if (value.modelId !== undefined && typeof value.modelId !== "string") {
 		return undefined;
 	}
 	const meta: ChatSessionMeta = { id: value.id, title: value.title, createdAt: value.createdAt, updatedAt: value.updatedAt, messageCount: value.messageCount };
+	if (typeof value.customTitle === "boolean") {
+		meta.customTitle = value.customTitle;
+	}
 	if (typeof value.modelId === "string") {
 		meta.modelId = value.modelId;
 	}
@@ -569,7 +581,8 @@ function isChatAttachment(value: unknown): boolean {
 		&& typeof value.uri === "string"
 		&& (value.startLine === undefined || typeof value.startLine === "number")
 		&& (value.endLine === undefined || typeof value.endLine === "number")
-		&& (value.languageId === undefined || typeof value.languageId === "string");
+		&& (value.languageId === undefined || typeof value.languageId === "string")
+		&& (value.error === undefined || typeof value.error === "string");
 }
 
 function isMemoryRevision(value: unknown): boolean {

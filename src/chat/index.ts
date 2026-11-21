@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import * as os from "node:os";
 import * as vscode from "vscode";
 import { CocoTerminalManager } from "../coco/terminal-manager";
 import { CONFIG_SECTION } from "../constants";
@@ -141,6 +142,19 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		log: deps.log,
 		changes,
 		openChange: registerChangeDiff(context, changes),
+		saveExport: async (suggestedName, content) => {
+			const folder = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(os.homedir());
+			const target = await vscode.window.showSaveDialog({
+				defaultUri: vscode.Uri.joinPath(folder, suggestedName),
+				filters: { Markdown: ["md"] },
+				saveLabel: "Export",
+			});
+			if (!target) {
+				return undefined;
+			}
+			await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(content));
+			return target.fsPath;
+		},
 		prompt: new ChatPromptSource({ folders, memoryEnabled }),
 		attachments,
 		memory,
