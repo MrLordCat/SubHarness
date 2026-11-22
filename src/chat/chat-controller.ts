@@ -598,7 +598,7 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 		}
 		case "newChat": return { type: "newChat" };
 		case "signIn":
-			return typeof value.provider === "string" && /^[a-z][a-z0-9-]{0,39}$/.test(value.provider) ? { type: "signIn", provider: value.provider } : undefined;
+			return typeof value.provider === "string" && /^[a-z][a-z0-9_:-]{0,47}$/.test(value.provider) ? { type: "signIn", provider: value.provider } : undefined;
 		case "listSessions": return { type: "listSessions" };
 		case "renameSession":
 			return typeof value.sessionId === "string" && SESSION_ID.test(value.sessionId) && typeof value.title === "string" && value.title.length <= 500

@@ -2,7 +2,7 @@ import * as assert from "node:assert";
 import * as path from "node:path";
 import {
 	CODEX_DEFAULT_ACCOUNT_ID,
-	codexAccountLabelSuffix,
+	codexProviderLabel,
 	codexAccountModelPrefix,
 	codexAccountStateKey,
 	decodeCodexAccountModelId,
@@ -35,9 +35,15 @@ suite("Codex accounts", () => {
 		const accounts = resolveCodexAccounts([], home);
 		assert.strictEqual(accounts.length, 1);
 		assert.strictEqual(accounts[0].id, CODEX_DEFAULT_ACCOUNT_ID);
+		assert.strictEqual(accounts[0].providerLabel, "Codex");
 		assert.strictEqual(codexAccountModelPrefix(""), "codex::");
 		assert.strictEqual(encodeCodexAccountModelId("", "gpt-5"), "codex::gpt-5");
 		assert.strictEqual(decodeCodexAccountModelId("codex::gpt-5", ""), "gpt-5");
+	});
+
+	test("account numbers follow valid settings order", () => {
+		const accounts = resolveCodexAccounts([{ id: "work" }, { id: "work" }, { id: "bad id" }, { id: "personal" }], home);
+		assert.deepStrictEqual(accounts.map(account => account.providerLabel), ["Codex 1", "Codex 2", "Codex 3"]);
 	});
 
 	test("a named account gets its own home and model prefix", () => {
@@ -66,8 +72,8 @@ suite("Codex accounts", () => {
 		assert.strictEqual(accounts[1].label, "Second subscription");
 		assert.strictEqual(accounts[1].codexHome, path.join(home, "codex-second"));
 		assert.strictEqual(accounts[1].cliPath, path.join(home, ".local", "bin", "codex"));
-		assert.strictEqual(codexAccountLabelSuffix(accounts[0]), "");
-		assert.strictEqual(codexAccountLabelSuffix(accounts[1]), " · Second subscription");
+		assert.strictEqual(codexProviderLabel(accounts[0]), "Codex 1");
+		assert.strictEqual(codexProviderLabel(accounts[1]), "Codex 2");
 	});
 
 	test("the active account falls back to the built-in one", () => {
@@ -97,9 +103,9 @@ suite("Codex accounts", () => {
 		const primary = mapCodexModelInformation(model, 258_400, 32_768);
 		assert.strictEqual(primary.id, "codex::gpt-test");
 		assert.strictEqual(primary.name, "GPT Test (Codex)");
-		const second = mapCodexModelInformation(model, 258_400, 32_768, { accountId: "work", accountLabel: " · Work" });
+		const second = mapCodexModelInformation(model, 258_400, 32_768, { accountId: "work", providerLabel: "Codex 2" });
 		assert.strictEqual(second.id, "codex::work::gpt-test");
-		assert.strictEqual(second.name, "GPT Test (Codex) · Work");
+		assert.strictEqual(second.name, "GPT Test (Codex 2)");
 	});
 
 	test("each account keeps its own usage windows in the ledger", () => {

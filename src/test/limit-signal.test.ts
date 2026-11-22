@@ -58,6 +58,12 @@ suite("Limit signals", () => {
 		);
 	});
 
+	test("reports the account label on a limit signal", () => {
+		const { parts, progress } = recorder();
+		reportLimitNotice(progress, "codex", undefined, "Limit reached", "Codex 2");
+		assert.strictEqual(parseLimitSignal(parts[0])?.provider, "Codex 2");
+	});
+
 	test("reports a limit as a signal part followed by the same text", () => {
 		const { parts, progress } = recorder();
 		reportLimitNotice(progress, "codex", { provider: "codex", window: "5-hour", resetAt: new Date(1_700_000_000_000), reason: "usage limit" });

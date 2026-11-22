@@ -6,7 +6,9 @@ local OpenAI-compatible and DeepSeek transports.
 
 This is a model-provider integration, not a separate `@codex` participant.
 Selecting a discovered Codex model in the normal picker, including a model with
-the native `xhigh` effort option, is the intended entry point.
+the native `xhigh` effort option, is the intended entry point. When multiple
+accounts are configured, SubHarness lists each in a numbered Codex group with
+its own limits; the active account supplies subagents and status commands.
 
 ## What Subscription Access Means
 

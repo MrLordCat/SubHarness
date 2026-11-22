@@ -31,7 +31,8 @@ column. Quick Access stays in the **SubHarness** activity bar container.
   the input with its attachments, and a notice says why. The same holds for
   queued messages whose delivery fails; in a chat you are not looking at they
   become its draft.
-- The model picker groups models by provider and has a search box. Each group
+- The model picker groups models by provider and has a search box. Multiple
+  Codex accounts each have their own group and limits. Each group
   shows that provider's 5-hour window, the weekly one only once it is used up,
   or its balance, fetched again when the picker opens or a model is picked. A provider with a used-up limit is dimmed with its reset
   time, and a warning above the input says so while one of its models is

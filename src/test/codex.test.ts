@@ -1984,6 +1984,29 @@ suite("Codex subscription provider", () => {
 		provider.dispose();
 	});
 
+	test("only the active Codex account publishes subagent profiles", () => {
+		const provider = new CodexChatModelProvider("test", undefined, undefined, undefined, { id: "work", label: "Work", providerLabel: "Codex 2" });
+		const internals = provider as unknown as { models: Map<string, CodexModel>; mapKnownModels(): vscode.LanguageModelChatInformation[]; getConfig(): vscode.WorkspaceConfiguration };
+		const originalConfig = internals.getConfig.bind(provider);
+		let active = "";
+		internals.getConfig = () => {
+			const config = originalConfig();
+			return { ...config, get: (key: string, fallback: unknown) => key === "codexActiveAccount" ? active : config.get(key, fallback) } as vscode.WorkspaceConfiguration;
+		};
+		internals.models.set("gpt-6-luna", { ...model, id: "gpt-6-luna", model: "gpt-6-luna", displayName: "GPT-6 Luna" });
+		try {
+			setSubagentModelProfiles("codex", []);
+			assert.strictEqual(internals.mapKnownModels()[0].name, "GPT-6 Luna (Codex 2)");
+			assert.deepStrictEqual(getSubagentModelProfiles().filter(profile => profile.provider === "codex"), []);
+			active = "work";
+			internals.mapKnownModels();
+			assert.deepStrictEqual(getSubagentModelProfiles().filter(profile => profile.provider === "codex").map(profile => profile.label), ["GPT-6 Luna (Codex 2)"]);
+		} finally {
+			setSubagentModelProfiles("codex", []);
+			provider.dispose();
+		}
+	});
+
 	test("registers the newest Luna and Terra as subagents under their chat model ids", () => {
 		const provider = new CodexChatModelProvider("test");
 		const internals = provider as unknown as { models: Map<string, CodexModel>; mapKnownModels(): vscode.LanguageModelChatInformation[] };

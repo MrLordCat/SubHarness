@@ -61,13 +61,12 @@ export function mapCodexModelInformation(
 	model: CodexModel,
 	contextLength: number,
 	maxOutputTokens: number,
-	account?: { accountId?: string; accountLabel?: string }
+	account?: { accountId?: string; providerLabel?: string }
 ): vscode.LanguageModelChatInformation {
 	const outputTokens = Math.max(1024, Math.min(contextLength - 1, Math.floor(maxOutputTokens)));
-	const label = account?.accountLabel ?? "";
 	const info = modelInformation({
 		id: encodeCodexAccountModelId(account?.accountId ?? "", model.id),
-		name: `${model.displayName} (Codex)${label}`,
+		name: `${model.displayName} (${account?.providerLabel ?? "Codex"})`,
 		family: "codex",
 		version: model.model || model.id,
 		contextWindowTokens: contextLength,

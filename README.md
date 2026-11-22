@@ -45,9 +45,9 @@ Requires **VS Code 1.131+** on Windows x64 or Linux x64.
 
    ```sh
    # Windows x64
-   code --install-extension llama-vscode-chat-v2.0.5-win32-x64.vsix
+   code --install-extension llama-vscode-chat-v2.0.6-win32-x64.vsix
    # Linux x64
-   code --install-extension llama-vscode-chat-v2.0.5-linux-x64.vsix
+   code --install-extension llama-vscode-chat-v2.0.6-linux-x64.vsix
    ```
 
 3. Run **Developer: Reload Window**.
@@ -65,8 +65,8 @@ package is downloaded only from this repository's releases and is installed
 only when its SHA-256 digest matches the release. An older release never
 replaces a newer local build.
 
-Versions before 2.0.5 do not recognize the new repository name: install 2.0.5
-once from [Releases](https://github.com/MrLordCat/SubHarness/releases/latest),
+Versions before 2.0.5 do not recognize the new repository name: install the
+latest release once from [Releases](https://github.com/MrLordCat/SubHarness/releases/latest),
 then updates arrive as before.
 
 ## Connect a model
@@ -101,14 +101,12 @@ the active one. The same group holds everything afterwards:
 
 - each account has **Sign In** (or **Sign In Again**) and **Sign Out** of its
   own; signing out of one keeps the other signed in;
-- selecting an account makes it the active one, and its models replace the
-  others in the model picker immediately;
+- selecting an account makes it active for subagents, Quick Access and Codex
+  status commands;
 - **Remove Account** takes an account out of the list; its `~/.codex-<id>`
   folder and login stay on disk, so adding the same id again restores them;
 - threads, the last used model and the usage windows are tracked per account,
-  so the Subscriptions tab reports each subscription separately;
-- `llamacpp.codexShowAllAccounts` shows every account's models at once, with
-  the account name in the model label.
+  so the Subscriptions tab reports each subscription separately.
 
 Accounts can also be declared by hand in settings; the home defaults to
 `~/.codex-<id>` and is created on first use:
@@ -121,10 +119,11 @@ Accounts can also be declared by hand in settings; the home defaults to
 
 Reload the window after editing the list by hand.
 
-A chat that already uses a model of the previously active account keeps
-working; only the picker follows the active account. The built-in account keeps
-the historical `codex::` model ids, so existing chats and settings are
-unchanged.
+With two or more accounts, the chat model picker shows a group for each:
+Codex 1 is the built-in `~/.codex` account, followed by Codex 2, Codex 3 and
+so on in account-list order. Each group shows its own 5-hour and weekly limits,
+and the quota chip follows the selected model's account. The built-in account
+keeps the historical `codex::` model ids.
 
 ### Snowflake Coco
 
@@ -169,16 +168,16 @@ See [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md),
 [provider architecture](docs/PROVIDER_ARCHITECTURE.md), and
 [Quick Access](docs/QUICK_ACCESS.md) for the current maintenance contracts.
 
-**Latest release: 2.0.5. Current build: 2.0.5.**
+**Latest release: 2.0.6. Current build: 2.0.6.**
 
 ```sh
 npm ci
 npm run compile
 npm run check:metadata
 npm run lint
-npm test              # 1540 extension-host tests on VS Code 1.143.1 in the current 2.0.5 build
+npm test              # 1545 extension-host tests on VS Code 1.143.1 in the current 2.0.6 build
 npm run package       # builds the local VSIX
-code --install-extension ./llama-vscode-chat-2.0.5.vsix --force
+code --install-extension ./llama-vscode-chat-2.0.6.vsix --force
 ```
 
 The extension ID is `mrlordcat.llama-vscode-chat`; settings and commands retain

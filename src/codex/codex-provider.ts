@@ -20,7 +20,7 @@ import { asRecord, formatShortResetTime, normalizeCopilotTurnIndex, truncate } f
 import { CodexAppServerClient, CodexAppServerError, isCodexCliAvailable, type CodexServerRequest } from "./app-server-client";
 import {
 	CODEX_DEFAULT_ACCOUNT,
-	codexAccountLabelSuffix,
+	codexProviderLabel,
 	codexAccountStateKey,
 	decodeCodexAccountModelId,
 	encodeCodexAccountModelId,
@@ -1080,12 +1080,6 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			this.setStatus({ state: "disabled", summary: "Off" });
 			return [];
 		}
-		// The picker lists the active account only unless every account is shown;
-		// the other providers stay registered, so an open chat keeps working.
-		if (!this.isVisibleInCatalog()) {
-			this.clearSubagentCatalog();
-			return [];
-		}
 		if (
 			this.models.size > 0
 			&& this.modelCatalogGeneration === this.client.generation
@@ -1190,7 +1184,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				// A limit is not a request failure: answer with one short line so the host does not
 				// retry the request and no provider thread is started.
 				this.logSink?.log("codex.chat.limit_short_circuit", { model: model.id, notice: unresolved });
-				reportLimitNotice(progress, "codex", this.limitGate.get("codex"), unresolved);
+				reportLimitNotice(progress, "codex", this.limitGate.get("codex"), unresolved, codexProviderLabel(this.account));
 				return;
 			}
 		}
@@ -1889,7 +1883,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 							window: limit.window,
 							resetsAt: limit.resetAt?.toISOString(),
 						}, "warn");
-						reportLimitNotice(progress, "codex", limit);
+						reportLimitNotice(progress, "codex", limit, undefined, codexProviderLabel(this.account));
 						return;
 					}
 					throw normalized;
@@ -1957,7 +1951,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 						window: limit.window,
 						resetsAt: limit.resetAt?.toISOString(),
 					}, "warn");
-					reportLimitNotice(progress, "codex", limit);
+					reportLimitNotice(progress, "codex", limit, undefined, codexProviderLabel(this.account));
 					return;
 				}
 				throw error;
@@ -2982,44 +2976,36 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			DEFAULT_CODEX_MAX_OUTPUT_TOKENS
 		);
 		const models = [...this.models.values()];
-		const labelSuffix = codexAccountLabelSuffix(this.account);
+		const providerLabel = codexProviderLabel(this.account);
 		const rateLimitReached = this.isCodexRateLimitReached();
-		setSubagentModelProfiles("codex", models.map(model => ({
-			// The chat model id (`codex::<slug>`), so the bridge chat finds the model a subagent asks for.
-			id: encodeCodexAccountModelId(this.account.id, model.id),
-			// Match the model-picker label exactly (`${displayName} (Codex)`) so a
-			// subagent model= value resolves in the picker instead of being
-			// rejected or silently falling back to Auto.
-			label: `${model.displayName} (Codex)${labelSuffix}`,
-			provider: "codex",
-			defaultEffort: "high",
-			availability: rateLimitReached ? "unavailable" : "available",
-			availabilityReason: rateLimitReached
-				? `ChatGPT subscription rate limit reached (${this.codexUsageLimitPercent ?? "unknown"}%)`
-				: "Model is present in the current ChatGPT subscription catalog",
-			availabilityCheckedAt: Date.now(),
-			useWhen: codexSubagentUseWhen(model.id),
-		})), this.account.id);
+		if (this.account.id === resolveActiveCodexAccountSetting(config)) {
+			setSubagentModelProfiles("codex", models.map(model => ({
+				// The subagent id and label must match the picker model.
+				id: encodeCodexAccountModelId(this.account.id, model.id),
+				label: `${model.displayName} (${providerLabel})`,
+				provider: "codex",
+				defaultEffort: "high",
+				availability: rateLimitReached ? "unavailable" : "available",
+				availabilityReason: rateLimitReached
+					? `ChatGPT subscription rate limit reached (${this.codexUsageLimitPercent ?? "unknown"}%)`
+					: "Model is present in the current ChatGPT subscription catalog",
+				availabilityCheckedAt: Date.now(),
+				useWhen: codexSubagentUseWhen(model.id),
+			})), this.account.id);
+		} else {
+			this.clearSubagentCatalog();
+		}
 		return models.map(model => mapCodexModelInformation(
 			model,
 			Math.min(this.resolveModelContextWindow(model.id, config), sharedLimit),
 			maxOutputTokens,
-			{ accountId: this.account.id, accountLabel: labelSuffix }
+			{ accountId: this.account.id, providerLabel }
 		));
 	}
 
 	/** Durable state is per account, so two ChatGPT subscriptions never share a thread. */
 	private stateKey(baseKey: string): string {
 		return codexAccountStateKey(baseKey, this.account.id);
-	}
-
-	/** The active account owns the picker; named accounts can be hidden outright. */
-	private isVisibleInCatalog(): boolean {
-		const config = this.getConfig();
-		if (config.get<boolean>("codexShowAllAccounts", false) === true) {
-			return true;
-		}
-		return this.account.id === resolveActiveCodexAccountSetting(config);
 	}
 
 	private resolveModelContextWindow(modelId: string, config = this.getConfig()): number {

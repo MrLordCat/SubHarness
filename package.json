@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/SubHarness.git"
 	},
-	"version": "2.0.5",
+	"version": "2.0.6",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -262,12 +262,7 @@
 				"llamacpp.codexActiveAccount": {
 					"type": "string",
 					"default": "",
-					"description": "Id of the Codex account whose models appear in the chat model picker. Empty means the built-in account (~/.codex). Switch it from Quick Access -> Codex -> ChatGPT Accounts."
-				},
-				"llamacpp.codexShowAllAccounts": {
-					"type": "boolean",
-					"default": false,
-					"description": "Show the models of every Codex account in the picker instead of only the active account's models. Each model name carries the account label."
+					"description": "Id of the Codex account that subagents, Quick Access and the Codex status commands use. Empty means the built-in account (~/.codex). The chat model picker lists every account's models, grouped as Codex 1, Codex 2… Switch it from Quick Access -> Codex -> ChatGPT Accounts."
 				},
 				"llamacpp.sharedContextLength": {
 					"type": "integer",

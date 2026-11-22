@@ -55,10 +55,10 @@ export function parseLimitSignal(part: unknown): LimitSignal | undefined {
 	};
 }
 
-export function limitSignal(provider: LimitProvider, match: LimitMatch | undefined, text: string): LimitSignal {
+export function limitSignal(provider: LimitProvider, match: LimitMatch | undefined, text: string, label?: string): LimitSignal {
 	return {
 		kind: "limit",
-		provider: provider === "claude" ? "Claude" : "Codex",
+		provider: label ?? (provider === "claude" ? "Claude" : "Codex"),
 		text,
 		...(match?.window ? { window: match.window } : {}),
 		...(match?.resetAt ? { resetAt: match.resetAt.getTime() } : {}),
@@ -70,8 +70,8 @@ export function balanceSignal(failure: BalanceFailure, text: string): LimitSigna
 }
 
 /** Reports a subscription limit as a signal plus the usual short notice. */
-export function reportLimitNotice(progress: ResponseProgress, provider: LimitProvider, match: LimitMatch | undefined, text = formatLimitNotice(provider, match)): void {
-	progress.report(limitSignalPart(limitSignal(provider, match, text)));
+export function reportLimitNotice(progress: ResponseProgress, provider: LimitProvider, match: LimitMatch | undefined, text = formatLimitNotice(provider, match), label?: string): void {
+	progress.report(limitSignalPart(limitSignal(provider, match, text, label)));
 	progress.report(new vscode.LanguageModelTextPart(text));
 }
 

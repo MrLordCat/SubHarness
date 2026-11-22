@@ -1687,6 +1687,21 @@ suite("chat controller", () => {
 		}
 	});
 
+	test("signIn accepts an offered named Codex account", async () => {
+		const accounts = fakeAccounts([{ ...CODEX_OFFER, provider: "codex:work" }]);
+		try {
+			const current = createHarness(root, new FakeBackend(), undefined, undefined, { accounts: accounts.source });
+			harness = current;
+			current.webview.receive({ type: "ready" });
+			await waitFor(() => current.webview.ofType("init").length === 1, "init");
+			current.webview.receive({ type: "signIn", provider: "codex:work" });
+			await waitFor(() => accounts.signIns.length === 1, "sign-in");
+			assert.deepStrictEqual(accounts.signIns, ["codex:work"]);
+		} finally {
+			accounts.dispose();
+		}
+	});
+
 	test("signIn ignores providers that are not offered or not valid ids", async () => {
 		const accounts = fakeAccounts([CODEX_OFFER]);
 		try {

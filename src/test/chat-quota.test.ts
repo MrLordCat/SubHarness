@@ -97,6 +97,12 @@ suite("Chat quota", () => {
 		assert.strictEqual(thinkingOptions({ id: "m", name: "M", maxInputTokens: 1, configurationSchema: { properties: { reasoningEffort: { enum: [7, null] } } } }), undefined);
 	});
 
+	test("numbered provider groups sort numerically and strip suffixes", () => {
+		const groups = groupModels(["Sol (Codex 1)", "Sol (Codex 2)", "Opus (Claude)", "X (Codex 10)"].map((name, index) => ({ id: String(index), name, maxInputTokens: 1 })));
+		assert.deepStrictEqual(groups.map(group => group.provider), ["Codex 1", "Codex 2", "Codex 10", "Claude"]);
+		assert.deepStrictEqual(groups.map(group => group.models[0].name), ["Sol", "Sol", "X", "Opus"]);
+	});
+
 	test("groupModels copies only a positive finite answer reserve", () => {
 		const models = groupModels([
 			{ id: "codex::reserved", name: "Reserved (Codex)", maxInputTokens: 10, maxOutputTokens: 5 },

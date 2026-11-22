@@ -44,6 +44,7 @@ import {
 	decodeCodexAccountModelId,
 	findCodexAccount,
 	resolveActiveCodexAccountId,
+	codexProviderLabel,
 	resolveCodexAccounts,
 } from "./codex/accounts";
 import { ClaudeChatModelProvider, type ClaudeLiveTurnUpdate } from "./claude/claude-provider";
@@ -737,26 +738,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		memory: memoryService,
 		quota: {
 			snapshot: () => [
-				subscriptionQuota("Codex", activeCodex().subscriptionWindows),
+				...codexAccounts.map(account => subscriptionQuota(codexProviderLabel(account), codexProviders.get(account.id)!.subscriptionWindows)),
 				subscriptionQuota("Claude", claudeProvider.subscriptionWindows),
 				balanceQuota("DeepSeek", llamaProvider.deepSeekBalanceSummary),
 			].filter(quota => quota !== undefined),
 			refresh: async () => {
-				await Promise.allSettled([activeCodex().refreshStatus(), claudeProvider.refreshSubscriptionUsage(true), llamaProvider.refreshDeepSeekBalance(true)]);
+				await Promise.allSettled([...codexAccounts.map(account => codexProviders.get(account.id)!.refreshStatus()), claudeProvider.refreshSubscriptionUsage(true), llamaProvider.refreshDeepSeekBalance(true)]);
 			},
 			onDidChange: quotaChanges.event,
 		},
 		accounts: {
 			offers: () => [
-				...(activeCodex().needsSignIn
-					? [{ provider: "codex", label: "Sign in to Codex", detail: activeCodex().cliAvailable ? "ChatGPT subscription" : "ChatGPT subscription; downloads the Codex CLI first" }]
-					: []),
+				...codexAccounts.flatMap(account => {
+					const provider = codexProviders.get(account.id)!;
+					return provider.needsSignIn ? [{ provider: codexAccountStatusKey(account.id), label: `Sign in to ${codexProviderLabel(account)}`, detail: provider.cliAvailable ? "ChatGPT subscription" : "ChatGPT subscription; downloads the Codex CLI first" }] : [];
+				}),
 				...(claudeProvider.needsSignIn
 					? [{ provider: "claude", label: "Sign in to Claude", detail: "Claude subscription, through the bundled Claude Code" }]
 					: []),
 			],
 			signIn: async provider => {
-				await vscode.commands.executeCommand(provider === "codex" ? "llamacpp.codexSignIn" : "llamacpp.claudeSignIn");
+				if (provider === "codex" || provider.startsWith("codex:")) {
+					await vscode.commands.executeCommand("llamacpp.codexAccountSignIn", provider === "codex" ? "" : provider.slice(6));
+				} else if (provider === "claude") {
+					await vscode.commands.executeCommand("llamacpp.claudeSignIn");
+				}
 			},
 			onDidChange: quotaChanges.event,
 		},
@@ -1603,7 +1609,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 		}
 		const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 		await config.update("codexActiveAccount", account.id, vscode.ConfigurationTarget.Global);
-		// Every provider re-announces its catalog: the new account appears, the old one hides.
+		// Re-announce catalogs so subagent profiles follow the active account.
 		refreshAllCodexCatalogs();
 		quickActionsProvider.refresh();
 		const provider = codexProviders.get(account.id);
@@ -1684,8 +1690,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 			entries.push({ id: accountId, label: label.trim() || accountId });
 			await vscode.workspace.getConfiguration(CONFIG_SECTION)
 				.update("codexAccounts", entries, vscode.ConfigurationTarget.Global);
-			// The new subscription becomes the active one, so its models are the ones
-			// the picker offers once the reload finishes and the sign-in succeeds.
+			// The new subscription becomes the active one for subagents and status commands.
 			await vscode.workspace.getConfiguration(CONFIG_SECTION)
 				.update("codexActiveAccount", accountId, vscode.ConfigurationTarget.Global);
 			// Providers are created at activation, so the sign-in runs after the reload.
@@ -1717,7 +1722,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 			await vscode.workspace.getConfiguration(CONFIG_SECTION)
 				.update("codexAccounts", entries, vscode.ConfigurationTarget.Global);
 			if (activeCodexAccountId() === account.id) {
-				// Never leave the picker pointing at an account that no longer exists.
+				// Never leave the active account pointing at an account that no longer exists.
 				await vscode.workspace.getConfiguration(CONFIG_SECTION)
 					.update("codexActiveAccount", CODEX_DEFAULT_ACCOUNT_ID, vscode.ConfigurationTarget.Global);
 			}
@@ -2402,8 +2407,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 					event.affectsConfiguration("llamacpp.enableCodexSubscription") ||
 					event.affectsConfiguration("llamacpp.codexCliPath") ||
 					event.affectsConfiguration("llamacpp.codexContextLength") ||
-					event.affectsConfiguration("llamacpp.codexMaxOutputTokens") ||
-					event.affectsConfiguration("llamacpp.codexShowAllAccounts")
+					event.affectsConfiguration("llamacpp.codexMaxOutputTokens")
 				) {
 					refreshAllCodexCatalogs();
 					for (const provider of codexProviders.values()) {
@@ -2414,7 +2418,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 					// Provider instances and their registry entries are created at activation.
 					void vscode.window.showInformationMessage("Reload the window to apply the updated Codex account list.");
 				}
-				if (event.affectsConfiguration("llamacpp.codexActiveAccount") || event.affectsConfiguration("llamacpp.codexShowAllAccounts")) {
+				if (event.affectsConfiguration("llamacpp.codexActiveAccount")) {
 					refreshAllCodexCatalogs();
 					quickActionsProvider.refresh();
 				}

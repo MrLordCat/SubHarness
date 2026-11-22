@@ -61,8 +61,9 @@ function identify(model: ModelInfoLike): { provider: string; name: string } {
 }
 
 function compareProviders(a: string, b: string): number {
-	const ai = GROUP_ORDER.indexOf(a);
-	const bi = GROUP_ORDER.indexOf(b);
+	const base = (provider: string): string => provider.replace(/ \d+$/, "");
+	const ai = GROUP_ORDER.indexOf(base(a));
+	const bi = GROUP_ORDER.indexOf(base(b));
 	if (ai !== -1 || bi !== -1) {
 		if (ai === -1) {
 			return 1;
@@ -70,7 +71,7 @@ function compareProviders(a: string, b: string): number {
 		if (bi === -1) {
 			return -1;
 		}
-		return ai - bi;
+		return ai - bi || a.localeCompare(b, undefined, { numeric: true });
 	}
 	return a.localeCompare(b);
 }

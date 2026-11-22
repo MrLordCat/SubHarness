@@ -28,6 +28,7 @@ export interface CodexAccountIdentity {
 	/** Empty string for the built-in account. */
 	id: string;
 	label: string;
+	providerLabel?: string;
 	codexHome?: string;
 	cliPath?: string;
 }
@@ -66,7 +67,7 @@ export function defaultCodexAccountHome(accountId: string, homeDir = os.homedir(
 export function resolveCodexAccounts(raw: unknown, homeDir = os.homedir()): CodexAccountIdentity[] {
 	const accounts: CodexAccountIdentity[] = [{ ...CODEX_DEFAULT_ACCOUNT }];
 	if (!Array.isArray(raw)) {
-		return accounts;
+		return [{ ...accounts[0], providerLabel: "Codex" }];
 	}
 	const seen = new Set<string>([CODEX_DEFAULT_ACCOUNT_ID]);
 	for (const entry of raw) {
@@ -89,7 +90,7 @@ export function resolveCodexAccounts(raw: unknown, homeDir = os.homedir()): Code
 			: undefined;
 		accounts.push({ id, label, codexHome: home, ...(cliPath ? { cliPath } : {}) });
 	}
-	return accounts;
+	return accounts.map((account, index) => ({ ...account, providerLabel: accounts.length === 1 ? "Codex" : `Codex ${index + 1}` }));
 }
 
 export function resolveActiveCodexAccountId(
@@ -160,7 +161,6 @@ export function codexAccountStateKey(baseKey: string, accountId: string): string
 	return accountId ? `${baseKey}.account.${accountId}` : baseKey;
 }
 
-/** Human-readable suffix for a picker label; the built-in account stays unlabelled. */
-export function codexAccountLabelSuffix(account: CodexAccountIdentity): string {
-	return account.id ? ` · ${account.label}` : "";
+export function codexProviderLabel(account: CodexAccountIdentity): string {
+	return account.providerLabel ?? "Codex";
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.6 (stable release) - 2026-11-22
+
+- Changed: with two or more ChatGPT accounts the chat's model picker shows one
+  group per account: Codex 1 is the built-in `~/.codex` account, Codex 2,
+  Codex 3… follow in the order of `llamacpp.codexAccounts`. Every account
+  lists its models, not only the active one, and each group shows its own
+  5-hour and weekly limits and is dimmed on its own when they are used up. The
+  quota chip follows the selected model's account, a limit card names its
+  group ("Codex 2 usage limit reached"), and each signed-out account gets its
+  own "Sign in to Codex 2" entry. With one account the group stays "Codex".
+- Changed: the active account (`llamacpp.codexActiveAccount`) now only decides
+  which account subagents, Quick Access and the Codex status commands use.
+  `llamacpp.codexShowAllAccounts` is removed.
+
 ## 2.0.5 (stable release) - 2026-11-22
 
 - Changed: the chat moved to the secondary side bar, next to Copilot Chat,
