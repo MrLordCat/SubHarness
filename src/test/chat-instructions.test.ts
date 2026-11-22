@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
 	BASE_CHAT_INSTRUCTIONS,
 	ChatPromptSource,
+	SUBAGENT_INSTRUCTIONS,
 	type ActiveEditorInfo,
 	type PromptEnvironmentInfo,
 	type PromptFolder,
@@ -72,6 +73,20 @@ suite("Chat prompt instructions", () => {
 			now: fixedNow,
 		});
 		assert.ok(!(await withoutShell.systemPrompt()).includes("default shell"));
+	});
+
+	test("adds the subagent guide only when the subagent tool is offered, before the repository instructions", async () => {
+		const folder = await makeFolder("repo");
+		await fsp.writeFile(path.join(folder.fsPath, "AGENTS.md"), "Project rules.");
+		const prompts = source([folder]);
+		assert.ok(!(await prompts.systemPrompt()).includes(SUBAGENT_INSTRUCTIONS));
+		assert.ok(!(await prompts.systemPrompt({ subagents: false })).includes(SUBAGENT_INSTRUCTIONS));
+		const main = await prompts.systemPrompt({ subagents: true });
+		const guide = main.indexOf(SUBAGENT_INSTRUCTIONS);
+		assert.ok(guide > main.indexOf("</workspace_info>"));
+		assert.ok(guide < main.indexOf("<instructions>"));
+		assert.ok(!SUBAGENT_INSTRUCTIONS.includes("\r"));
+		assert.ok(SUBAGENT_INSTRUCTIONS.split("\n").slice(1).every(line => line.startsWith("- ")));
 	});
 
 	test("has no instructions block when no instruction file exists", async () => {

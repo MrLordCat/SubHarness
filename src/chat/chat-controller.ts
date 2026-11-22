@@ -145,7 +145,7 @@ export interface ChatQuotaSource {
 }
 
 export interface ChatPromptProvider {
-	systemPrompt(): Promise<string>;
+	systemPrompt(options?: { subagents?: boolean }): Promise<string>;
 	turnContext(): string;
 }
 
@@ -1753,7 +1753,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		};
 		let stopped = false;
 		try {
-			const system = await this._systemPrompt();
+			// Subagents get the prompt without the delegation guide: they cannot start subagents.
+			const system = await this._systemPrompt({ subagents: source.tools.some(tool => tool.name === SUBAGENT_TOOL_NAME) });
 			const thinking = this._thinkingFor(model.id);
 			const initialParts = await this._compactForModel(running, model, history, system);
 			await runAgentTurn({
@@ -2214,9 +2215,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
-	private async _systemPrompt(): Promise<string | undefined> {
+	private async _systemPrompt(options?: { subagents?: boolean }): Promise<string | undefined> {
 		try {
-			return await this._deps.prompt?.systemPrompt();
+			return await this._deps.prompt?.systemPrompt(options);
 		} catch (error) {
 			this._log("chat.prompt.system_failed", { message: errorMessage(error) });
 			return undefined;

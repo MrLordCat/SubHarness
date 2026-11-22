@@ -45,9 +45,9 @@ Requires **VS Code 1.131+** on Windows x64 or Linux x64.
 
    ```sh
    # Windows x64
-   code --install-extension llama-vscode-chat-v2.0.6-win32-x64.vsix
+   code --install-extension llama-vscode-chat-v2.0.7-win32-x64.vsix
    # Linux x64
-   code --install-extension llama-vscode-chat-v2.0.6-linux-x64.vsix
+   code --install-extension llama-vscode-chat-v2.0.7-linux-x64.vsix
    ```
 
 3. Run **Developer: Reload Window**.
@@ -168,16 +168,16 @@ See [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md),
 [provider architecture](docs/PROVIDER_ARCHITECTURE.md), and
 [Quick Access](docs/QUICK_ACCESS.md) for the current maintenance contracts.
 
-**Latest release: 2.0.6. Current build: 2.0.6.**
+**Latest release: 2.0.7. Current build: 2.0.7.**
 
 ```sh
 npm ci
 npm run compile
 npm run check:metadata
 npm run lint
-npm test              # 1545 extension-host tests on VS Code 1.143.1 in the current 2.0.6 build
+npm test              # 1548 extension-host tests on VS Code 1.143.1 in the current 2.0.7 build
 npm run package       # builds the local VSIX
-code --install-extension ./llama-vscode-chat-2.0.6.vsix --force
+code --install-extension ./llama-vscode-chat-2.0.7.vsix --force
 ```
 
 The extension ID is `mrlordcat.llama-vscode-chat`; settings and commands retain

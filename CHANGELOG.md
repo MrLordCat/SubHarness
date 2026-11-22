@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.7 (stable release) - 2026-11-22
+
+- Added: the chat's system prompt has a guide for subagents whenever the
+  subagent tool is offered. It tells the main agent to plan the work, hand
+  routine steps to the cheapest model that fits, do tiny steps itself, write
+  self-contained subagent prompts (goal, files it may change, context, project
+  rules, checks, report format), review every report, send fixes with
+  `subagentId` and close accepted subagents, fall back to a model of similar
+  size when one is unavailable and agree on large plans first. Subagents
+  themselves do not get it, and repository instructions such as `AGENTS.md`
+  still take precedence. The guide is part of the stable system prompt, so it
+  stays in the prompt cache.
+
 ## 2.0.6 (stable release) - 2026-11-22
 
 - Changed: with two or more ChatGPT accounts the chat's model picker shows one

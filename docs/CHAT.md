@@ -251,6 +251,13 @@ same model response can run while the subagent works. The model receives all
 results before its next response. The subagent card shows the model, the
 task and the current step. Expand it for the prompt, steps and report.
 
+While the tool is offered, the main agent's system prompt carries a short
+delegation guide: plan the task, delegate routine steps to the cheapest model
+that fits, do tiny steps itself, write self-contained prompts, review every
+report, send fixes with `subagentId` and close accepted subagents, fall back to
+a model of similar size and agree on large plans first. Subagents do not get
+it; repository instructions such as `AGENTS.md` take precedence.
+
 With `keepOpen` the subagent stays open after its report, with its own
 conversation. The model checks the work and either closes it with
 `close_subagent` or sends the same subagent a follow-up task with its id

@@ -2880,6 +2880,42 @@ suite("chat controller", () => {
 		assert.ok(backend.requests.every(request => request.options.modelOptions?._aabStrictTools === true), "main, subagent and continuation turns carry the marker");
 	});
 
+	test("only the main agent gets the subagent guide in its system prompt", async () => {
+		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
+		const source = createChatToolSource({ enabledTools: () => [subagent], groups: () => [], setEnabled: async () => undefined });
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-sub", SUBAGENT_TOOL_NAME, { description: "Check", prompt: "Inspect", model: "Smart (Claude)" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("REPORT")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const asked: Array<{ subagents?: boolean } | undefined> = [];
+		const current = createHarness(root, backend, source, undefined, {
+			prompt: {
+				systemPrompt: async options => { asked.push(options); return options?.subagents ? "SYSTEM+GUIDE" : "SYSTEM"; },
+				turnContext: () => "<context>\nhost\n</context>",
+			},
+		});
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(asked, [{ subagents: true }, undefined]);
+		assert.strictEqual(messageText(backend.requests[0].messages[0]), "SYSTEM+GUIDE");
+		// The subagent runner appends its own <subagent> role block to the plain prompt.
+		assert.ok(messageText(backend.requests[1].messages[0]).startsWith("SYSTEM\n\n<subagent>"));
+	});
+
+	test("a turn without the subagent tool gets no subagent guide", async () => {
+		const asked: Array<{ subagents?: boolean } | undefined> = [];
+		const backend = new FakeBackend([progress => progress.report(new vscode.LanguageModelTextPart("Hi"))]);
+		const current = createHarness(root, backend, createChatToolSource({ enabledTools: () => [], groups: () => [], setEnabled: async () => undefined }), undefined, {
+			prompt: { systemPrompt: async options => { asked.push(options); return "SYSTEM"; }, turnContext: () => "<context>\nhost\n</context>" },
+		});
+		harness = current;
+		current.webview.receive({ type: "send", text: "Hello" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(asked, [{ subagents: false }]);
+	});
+
 	test("tool toggles reach the catalog and every webview gets the new groups", async () => {
 		const catalog = guardedCatalog();
 		const current = createHarness(root, new FakeBackend(), catalog.source);
