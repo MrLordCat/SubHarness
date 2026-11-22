@@ -554,9 +554,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			logService.logError(ours ? "extension.uncaught_exception" : "extension.uncaught_exception_foreign", error);
 			// Extensions share one extension-host process: uncaught exceptions from
 			// other extensions (e.g. Copilot's git service) must not surface as a
-			// scary "AI Agent Bridge" dialog. Only our own crashes get a notice.
+			// scary "SubHarness" dialog. Only our own crashes get a notice.
 			if (ours) {
-				vscode.window.showWarningMessage(`AI Agent Bridge hit an unexpected error: ${error instanceof Error ? error.message : String(error)}. Details are in the extension log (AI Agent Bridge: Open Latest Log).`);
+				vscode.window.showWarningMessage(`SubHarness hit an unexpected error: ${error instanceof Error ? error.message : String(error)}. Details are in the extension log (SubHarness: Open Latest Log).`);
 			}
 		} catch {
 			// Nothing else we can do here.
@@ -777,7 +777,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const current = resolveAutoUpdateMode();
 			const labels: Record<AutoUpdateMode, string> = { notify: "Notify", install: "Install automatically", off: "Off" };
 			const details: Record<AutoUpdateMode, string> = { notify: "Check every 5 hours and offer new releases", install: "Download, verify and install new releases, then offer a reload", off: "Only manual checks from Quick Access" };
-			const picked = await vscode.window.showQuickPick(AUTO_UPDATE_MODES.map(mode => ({ label: labels[mode], description: mode === current ? "current" : undefined, detail: details[mode], mode })), { title: "AI Agent Bridge: Automatic Updates" });
+			const picked = await vscode.window.showQuickPick(AUTO_UPDATE_MODES.map(mode => ({ label: labels[mode], description: mode === current ? "current" : undefined, detail: details[mode], mode })), { title: "SubHarness: Automatic Updates" });
 			if (picked && picked.mode !== current) { await vscode.workspace.getConfiguration(CONFIG_SECTION).update("autoUpdate", picked.mode, vscode.ConfigurationTarget.Global); }
 		}));
 	// Development and test hosts never contact GitHub on their own.
@@ -1624,7 +1624,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 				description: account.id || "~/.codex",
 				detail: codexProviders.get(account.id)?.accountSummary,
 				accountId: account.id,
-			})), { title: "AI Agent Bridge: Codex Account", placeHolder: "Choose the ChatGPT subscription used by the model picker" });
+			})), { title: "SubHarness: Codex Account", placeHolder: "Choose the ChatGPT subscription used by the model picker" });
 			if (picked) {
 				await setActiveCodexAccount(picked.accountId);
 			}
@@ -1649,7 +1649,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 		vscode.commands.registerCommand("llamacpp.addCodexAccount", async () => {
 			const used = new Set(codexAccounts.map(account => account.id).filter(id => id !== CODEX_DEFAULT_ACCOUNT_ID));
 			const id = await vscode.window.showInputBox({
-				title: "AI Agent Bridge: Add Codex Account",
+				title: "SubHarness: Add Codex Account",
 				prompt: "Short id for the second ChatGPT subscription. It names the Codex home (~/.codex-<id>) and its models.",
 				placeHolder: "work",
 				ignoreFocusOut: true,
@@ -1672,7 +1672,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 			}
 			const accountId = id.trim().toLowerCase();
 			const label = await vscode.window.showInputBox({
-				title: "AI Agent Bridge: Add Codex Account",
+				title: "SubHarness: Add Codex Account",
 				prompt: "Name shown in Quick Access and in the model picker",
 				value: accountId,
 				ignoreFocusOut: true,

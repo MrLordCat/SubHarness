@@ -28,5 +28,5 @@ What you expected to happen.
 **Logs**
 
 Please attach the relevant JSONL turn log from the extension's global storage
-(location shown in `AI Agent Bridge: Open Latest Log`), after redacting any
+(location shown in `SubHarness: Open Latest Log`), after redacting any
 secrets and personal data.

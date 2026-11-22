@@ -157,7 +157,7 @@ suite("Coco native Chat tools", () => {
 			await segment;
 			const resumed = bridge.resume([result(callFrom(parts), "Tests passed")], { report: () => undefined }, token.token);
 			const reply = await response;
-			assert.match(String(reply.output), /^Tests passed\n\n\[AI Agent Bridge\] Your built-in action "bash: npm test" was refused automatically by the bridge, not by the user/);
+			assert.match(String(reply.output), /^Tests passed\n\n\[SubHarness\] Your built-in action "bash: npm test" was refused automatically by the bridge, not by the user/);
 			assert.strictEqual(bridge.takeRefusalNote(), undefined, "the note is delivered once");
 			finish(); await resumed;
 			assert.strictEqual(stopped, 1);

@@ -34,7 +34,7 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 	private readonly history?: ConversationHistory;
 	private historyWarningShown = false;
 	private warnHistory(): void {
-				if (!this.historyWarningShown) { console.warn("AI Agent Bridge: local handoff journal is unavailable; providers without native handoff continue with Chat-supplied messages."); this.historyWarningShown = true; }
+				if (!this.historyWarningShown) { console.warn("SubHarness: local handoff journal is unavailable; providers without native handoff continue with Chat-supplied messages."); this.historyWarningShown = true; }
 	}
 
 	constructor(

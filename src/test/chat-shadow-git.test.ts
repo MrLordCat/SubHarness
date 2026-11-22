@@ -87,13 +87,41 @@ suite("Shadow git repository", () => {
 		const shadow = getRepo();
 		const first = await shadow.snapshot();
 		const second = await shadow.snapshot();
-		assert.strictEqual(first, second);
+		assert.deepStrictEqual(first, second);
 
 		const alternatesFile = path.join(shadowDir, "objects", "info", "alternates");
 		const alternates = await fs.readFile(alternatesFile, "utf8");
 		assert.ok(alternates.endsWith("\n"));
 		assert.ok(!alternates.includes("\r"));
 		assert.strictEqual(await fs.realpath(alternates.trim()), await fs.realpath(path.join(project, ".git", "objects")));
+	});
+
+	test("does not report existing ignored files after git status when the baseline hits the cap", async function () {
+		if (!gitPath) {
+			this.skip();
+			return;
+		}
+		this.timeout(60_000);
+		await fs.writeFile(path.join(project, ".gitignore"), "*.cache\n");
+		for (const name of ["a.cache", "b.cache", "existing.cache"]) {
+			await fs.writeFile(path.join(project, name), "already present\n");
+		}
+		const shadow = new ShadowGitRepo({ gitPath, gitDir: shadowDir, workTree: project, maxIgnoredFiles: 2 });
+		const before = await shadow.snapshot();
+		await runGit(gitPath, ["-C", project, "status", "--short"]);
+		assert.deepStrictEqual(await shadow.snapshot(before), before);
+		assert.deepStrictEqual(await shadow.snapshot(), before);
+
+		await fs.rm(path.join(project, "a.cache"));
+		await fs.writeFile(path.join(project, "created.txt"), "agent change\n");
+		for (let refresh = 0; refresh < 2; refresh++) {
+			const after = await shadow.snapshot(before);
+			const changes = await shadow.diff(before, after);
+			assert.deepStrictEqual(changes.map(change => [change.path, Boolean(change.before), Boolean(change.after)]), [
+				["a.cache", true, false],
+				["created.txt", false, true],
+			]);
+		}
 	});
 
 	test("diffs modified, added and deleted files and adds small ignored files", async function () {
@@ -262,7 +290,7 @@ suite("Shadow git repository", () => {
 		const stale = new Date(Date.now() - 120_000);
 		await fs.utimes(lockFile, stale, stale);
 		const tree = await shadow.snapshot();
-		assert.match(tree, /^[0-9a-f]{40}([0-9a-f]{24})?$/);
+		assert.match(tree.tree, /^[0-9a-f]{40}([0-9a-f]{24})?$/);
 		await assert.rejects(fs.stat(lockFile));
 	});
 });

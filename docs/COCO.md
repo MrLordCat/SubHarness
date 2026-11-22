@@ -79,15 +79,15 @@ For the investigation behind SDK-managed native sessions, see the
 [Coco native integration research](COCO_NATIVE_INTEGRATION_RESEARCH.md).
 Current implementation and runtime checks are described here and in the changelog.
 
-Install the Snowflake VS Code extension. AI Agent Bridge uses its bundled
+Install the Snowflake VS Code extension. SubHarness uses its bundled
 `cortex` CLI through the Snowflake SDK and ACP. If your Snowflake CLI has
 one connection, its name is selected automatically; otherwise set
 `llamacpp.cocoConnection`. The `Auto (Coco)` entry is available immediately.
 The models granted to your Snowflake role appear after an ACP connection
-succeeds. Use **AI Agent Bridge: Refresh Models** to retry discovery.
+succeeds. Use **SubHarness: Refresh Models** to retry discovery.
 
 The Snowflake extension's Azure sign-in session is passed to its own Coco panel
-through a private API. AI Agent Bridge uses the CLI's Snowflake connection and
+through a private API. SubHarness uses the CLI's Snowflake connection and
 credential cache, so an Azure browser sign-in may be required once for the CLI.
 No token is copied from the Snowflake extension. Coco delegates tools offered
 for the turn, including private Copilot tools, to the native Chat tool loop.
@@ -159,7 +159,7 @@ answers with the one-time `reject_once` option. Nothing runs, the CLI reports a
 failed call to Coco and the turn continues, so its work and the Keep/Undo
 changes stay. ACP carries only the chosen option, so the CLI tells the model
 the user denied the action. The bridge corrects that: the next client-tool
-result carries an `[AI Agent Bridge]` note saying the bridge refused the action
+result carries an `[SubHarness]` note saying the bridge refused the action
 automatically and naming the client tools that replace it (file edits, file
 creation, `run_in_terminal`). If Coco ends its turn without another client-tool
 call, the note goes as a follow-up prompt in the same native session, at most

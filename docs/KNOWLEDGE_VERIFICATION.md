@@ -19,7 +19,7 @@ Adaptive is the default. Strict mode is intentionally more expensive because it
 can produce additional web and source tool calls.
 
 Change the mode from Quick Access under **Model Behavior**, run
-`AI Agent Bridge: Set Knowledge Verification`, or use settings JSON:
+`SubHarness: Set Knowledge Verification`, or use settings JSON:
 
 ```json
 {

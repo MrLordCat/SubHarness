@@ -5,7 +5,7 @@
 > Offline providers are hidden from Quick Access and reappear when they come
 > back online; the reason for being offline is shown in the manager.
 
-AI Agent Bridge can load models from multiple OpenAI-compatible HTTP APIs at
+SubHarness can load models from multiple OpenAI-compatible HTTP APIs at
 the same time. Profiles are managed from:
 
 `Quick Access → Providers → Providers Manager`
@@ -36,7 +36,7 @@ preserves them. Presets do not override discovered context limits.
 ### Choose models by provider
 
 Click **Models by Provider** (the tree icon) in the Chat or Quick Access title
-bar, or run **AI Agent Bridge: Models by Provider** from the command palette.
+bar, or run **SubHarness: Models by Provider** from the command palette.
 Choose a provider first, then one of its models. Use **Back to providers** to
 change the group. API profiles remain separate even when their names match;
 an enabled profile with an unavailable catalog stays visible with zero models.
@@ -130,7 +130,7 @@ and fragments are rejected. Versioned roots are supported directly:
 - `https://openrouter.ai/api/v1`
 - `https://company.example/openai/v1`
 
-When the URL already ends in a version segment, AI Agent Bridge appends
+When the URL already ends in a version segment, SubHarness appends
 `/models` and `/chat/completions` directly. Otherwise it inserts `/v1`.
 The official DeepSeek host keeps its native endpoint layout.
 

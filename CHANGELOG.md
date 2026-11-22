@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.0.5 (stable release) - 2026-11-22
+
+- Changed: the chat moved to the secondary side bar, next to Copilot Chat,
+  Claude Code and Codex. It stays there without a keyboard shortcut and keeps
+  its view id, so menus and commands work as before. The first start after the
+  update shows it once and gives focus back to the editor. Quick Access stays
+  in the activity bar.
+- Changed: the repository is renamed from `MrLordCat/ai-agent-bridge` to
+  `MrLordCat/SubHarness`. The updater asks under the new name first and falls
+  back to the former name while the new one answers 404, and it accepts
+  release packages under both names. Versions before 2.0.5 reject packages
+  under the new name, so they need one manual install of 2.0.5.
+- Changed: the README presents the SubHarness chat and no longer describes the
+  Copilot Chat integration or its patches. The release notes summarize
+  1.21.1 to 2.0.5.
+
+## 2.0.4 (development build) - 2026-11-22
+
+- Changed: the extension is now called SubHarness, formerly AI Agent Bridge.
+  The extension id, settings, commands and saved chats are unchanged, so
+  existing installs update in place.
+- Added: file links in chat answers open the file. This covers Markdown links
+  such as `[report](docs/report.md#L12)`, `file:` links and file paths in
+  inline code such as `src/chat/index.ts:40`. A link with a line opens the file
+  at that line, and a folder link reveals the folder in the Explorer. A bare
+  file name opens its only workspace match or asks which match to open.
+  When the chat is an editor tab, the file opens in another editor group.
+- Changed: links that the provider rewrites to `file:` URIs keep their line.
+  Agents are told to link the reports and files they mention.
+
+## 2.0.3 (development build) - 2026-11-21
+
+- Fixed: the Keep/Undo list no longer reports existing ignored files as added
+  when a workspace snapshot reaches the ignored-file limit.
+- Fixed: the main agent's tools can run alongside a subagent when called in
+  the same tool round.
+- Fixed: Stop switches to a stopping status while changes are saved. When
+  the chat reports that it stopped, Keep and Undo are ready.
+
 ## 2.0.2 (development build) - 2026-11-21
 
 - Fixed: existing Codex and Claude bridge chats refresh tool schemas on the

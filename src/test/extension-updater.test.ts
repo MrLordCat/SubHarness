@@ -7,11 +7,12 @@ import * as vscode from "vscode";
 import { compareVersions, describeNetworkError, ExtensionUpdater, MANUAL_CHECK_COOLDOWN_MS, parseLatestRelease, parseStableVersion, UPDATE_CHECK_INTERVAL_MS, UPDATE_OFFLINE_RETRY_MS, type ExtensionUpdaterOptions } from "../update/extension-updater";
 import { buildUpdateItem } from "../ui/quick-access";
 
-const REPO = "https://github.com/MrLordCat/ai-agent-bridge";
-function release(version: string, bytes: Uint8Array, digest = createHash("sha256").update(bytes).digest("hex")) {
-	return { tag_name: `v${version}`, html_url: `${REPO}/releases/tag/v${version}`, draft: false, prerelease: false, assets: ["win32-x64", "linux-x64"].map(target => ({
+const REPO = "https://github.com/MrLordCat/SubHarness";
+const LEGACY_REPO = "https://github.com/MrLordCat/ai-agent-bridge";
+function release(version: string, bytes: Uint8Array, digest = createHash("sha256").update(bytes).digest("hex"), repo = REPO) {
+	return { tag_name: `v${version}`, html_url: `${repo}/releases/tag/v${version}`, draft: false, prerelease: false, assets: ["win32-x64", "linux-x64"].map(target => ({
 		name: `llama-vscode-chat-v${version}-${target}.vsix`, size: bytes.length, digest: `sha256:${digest}`,
-		browser_download_url: `${REPO}/releases/download/v${version}/llama-vscode-chat-v${version}-${target}.vsix`,
+		browser_download_url: `${repo}/releases/download/v${version}/llama-vscode-chat-v${version}-${target}.vsix`,
 	})) };
 }
 function memento(): Pick<vscode.Memento, "get" | "update"> {
@@ -44,6 +45,28 @@ suite("Extension updater", () => {
 		const unsigned = release("1.20.0", bytes); unsigned.assets[0].digest = "";
 		assert.throws(() => parseLatestRelease(unsigned, "win32", "x64"), /no SHA-256 digest/);
 		assert.throws(() => parseLatestRelease({ ...release("1.20.0", bytes), prerelease: true }, "win32", "x64"), /not a stable version/);
+	});
+
+	test("accepts releases under the former repository name", () => {
+		const bytes = new Uint8Array([1]);
+		const legacy = parseLatestRelease(release("2.0.5", bytes, undefined, LEGACY_REPO), "win32", "x64");
+		assert.strictEqual(legacy.asset.url, `${LEGACY_REPO}/releases/download/v2.0.5/llama-vscode-chat-v2.0.5-win32-x64.vsix`);
+		assert.strictEqual(legacy.pageUrl, `${LEGACY_REPO}/releases/tag/v2.0.5`);
+		const lower = parseLatestRelease(release("2.0.5", bytes, undefined, REPO.toLowerCase()), "win32", "x64");
+		assert.strictEqual(lower.pageUrl, `${REPO.toLowerCase()}/releases/tag/v2.0.5`);
+		const lookalike = release("2.0.5", bytes, undefined, `${REPO}-mirror`);
+		assert.throws(() => parseLatestRelease(lookalike, "win32", "x64"), /not hosted by this repository/);
+	});
+
+	test("asks under the former name while the new repository answers 404", async () => {
+		const requests: string[] = [];
+		const updater = new ExtensionUpdater({ state: memento(), storageDir: root, currentVersion: "2.0.5", platform: "win32", arch: "x64", mode: () => "notify",
+			fetch: async input => { requests.push(String(input)); return String(input).includes("/SubHarness/") ? new Response("{}", { status: 404 })
+				: new Response(JSON.stringify(release("2.0.5", new Uint8Array([1]), undefined, LEGACY_REPO))); }, ui: ui([]) });
+		const status = await updater.check(false);
+		assert.deepStrictEqual(requests, ["https://api.github.com/repos/MrLordCat/SubHarness/releases/latest", "https://api.github.com/repos/MrLordCat/ai-agent-bridge/releases/latest"]);
+		assert.strictEqual(status.error, undefined); assert.strictEqual(status.latest?.version, "2.0.5");
+		updater.dispose();
 	});
 
 	test("a local development build newer than the release is reported up to date", async () => {

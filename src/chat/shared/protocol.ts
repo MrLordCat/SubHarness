@@ -297,6 +297,8 @@ export interface ChatModelGroup {
 
 export interface ChatRunState {
 	running: boolean;
+	/** Stop was requested and the turn is still settling. */
+	stopping?: boolean;
 	detail?: string;
 }
 
@@ -505,6 +507,8 @@ export type WebviewMessage =
 	| { type: "openAttachment"; attachment: ChatAttachment }
 	/** Opens an image of a tool result in VS Code's image viewer. */
 	| { type: "openToolImage"; messageId: string; callId: string; index: number }
+	/** Opens a file or folder named by a Markdown link or a path in inline code of a message. */
+	| { type: "openFileReference"; target: string }
 	/**
 	 * Replaces an earlier user message: it and everything after it are dropped, then the text is sent as a new turn.
 	 * undoChanges also restores the files the agent changed since that message.

@@ -7,9 +7,11 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import * as vscode from "vscode";
 
-export const UPDATE_REPOSITORY = "MrLordCat/ai-agent-bridge";
-const LATEST_RELEASE_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY}/releases/latest`;
-const DOWNLOAD_PREFIX = `https://github.com/${UPDATE_REPOSITORY}/releases/download/`;
+export const UPDATE_REPOSITORY = "MrLordCat/SubHarness";
+/** The repository's former name. Releases published before the rename name it in their URLs. */
+export const LEGACY_UPDATE_REPOSITORY = "MrLordCat/ai-agent-bridge";
+const RELEASE_REPOSITORIES = [UPDATE_REPOSITORY, LEGACY_UPDATE_REPOSITORY];
+const latestReleaseUrl = (repository: string) => `https://api.github.com/repos/${repository}/releases/latest`;
 const STATE_KEY = "llamacpp.update.state";
 export const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 60_000;
 /** Retry delay after a check that never reached GitHub (offline, sleep, DNS). */
@@ -107,6 +109,12 @@ export function resolveAutoUpdateMode(config: Pick<vscode.WorkspaceConfiguration
 	return value === "off" || value === "install" ? value : "notify";
 }
 
+/** GitHub owner and repository names are case-insensitive. */
+function hostedHere(url: string, path: string): boolean {
+	const lower = url.toLowerCase();
+	return RELEASE_REPOSITORIES.some(repository => lower.startsWith(`https://github.com/${repository.toLowerCase()}/${path}`));
+}
+
 /** Reads the GitHub "latest release" response and picks the VSIX built for this platform. */
 export function parseLatestRelease(json: unknown, platform: string, arch: string): UpdateRelease {
 	const release = json as { tag_name?: unknown; html_url?: unknown; draft?: unknown; prerelease?: unknown; assets?: unknown };
@@ -120,10 +128,10 @@ export function parseLatestRelease(json: unknown, platform: string, arch: string
 	const url = typeof asset.browser_download_url === "string" ? asset.browser_download_url : "";
 	const digest = typeof asset.digest === "string" ? /^sha256:([0-9a-f]{64})$/i.exec(asset.digest)?.[1] : undefined;
 	const size = Number(asset.size);
-	if (!url.startsWith(DOWNLOAD_PREFIX)) { throw new Error("The release package is not hosted by this repository."); }
+	if (!hostedHere(url, "releases/download/")) { throw new Error("The release package is not hosted by this repository."); }
 	if (!digest) { throw new Error(`Release ${text} publishes no SHA-256 digest for ${name}.`); }
 	if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_VSIX_BYTES) { throw new Error(`Release ${text} reports an invalid package size.`); }
-	const pageUrl = typeof release.html_url === "string" && release.html_url.startsWith(`https://github.com/${UPDATE_REPOSITORY}/`)
+	const pageUrl = typeof release.html_url === "string" && hostedHere(release.html_url, "")
 		? release.html_url : `https://github.com/${UPDATE_REPOSITORY}/releases/tag/v${text}`;
 	return { version: text, tag: `v${text}`, pageUrl, asset: { name, url, size, sha256: digest.toLowerCase() } };
 }
@@ -192,7 +200,7 @@ export class ExtensionUpdater implements vscode.Disposable {
 		const result = status.error ? `the check failed: ${status.error}`
 			: status.installedVersion ? `${status.installedVersion} is installed, reload the window to use it`
 				: `${status.currentVersion} is up to date (latest release ${status.latest?.version ?? "unknown"})`;
-		void this.ui.showInformationMessage(`AI Agent Bridge was checked ${ago}: ${result}. The next manual check is possible in ${wait} min.`);
+		void this.ui.showInformationMessage(`SubHarness was checked ${ago}: ${result}. The next manual check is possible in ${wait} min.`);
 		return status;
 	}
 
@@ -205,12 +213,7 @@ export class ExtensionUpdater implements vscode.Disposable {
 	private async runCheck(manual: boolean, react: boolean): Promise<UpdateStatus> {
 		const previous = this.stored;
 		try {
-			let response: Response;
-			try {
-				response = await this.fetch(LATEST_RELEASE_URL, { signal: AbortSignal.timeout(API_TIMEOUT_MS), headers: {
-					Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": `ai-agent-bridge/${this.options.currentVersion}`,
-				} });
-			} catch (error) { throw new UpdateNetworkError(describeNetworkError(error)); }
+			const response = await this.fetchLatestRelease();
 			if (response.status === 403 || response.status === 429) { throw new Error("GitHub rate limit reached; try again later."); }
 			if (!response.ok) { throw new Error(`GitHub answered ${response.status}.`); }
 			const latest = parseLatestRelease(await response.json(), this.options.platform ?? process.platform, this.options.arch ?? process.arch);
@@ -221,7 +224,7 @@ export class ExtensionUpdater implements vscode.Disposable {
 			const offline = error instanceof UpdateNetworkError;
 			await this.store({ ...previous, lastCheckAt: this.now(), error: message, offline: offline || undefined });
 			this.options.log?.("update.check_failed", { manual, offline, error: message });
-			if (manual) { void this.ui.showErrorMessage(`AI Agent Bridge update check failed: ${message}`); }
+			if (manual) { void this.ui.showErrorMessage(`SubHarness update check failed: ${message}`); }
 			return this.status;
 		}
 		const status = this.status;
@@ -231,10 +234,24 @@ export class ExtensionUpdater implements vscode.Disposable {
 			else if (manual || await this.claimNotification(status.latest.version)) { void this.offer(status.latest); }
 		} else if (manual) {
 			void this.ui.showInformationMessage(status.installedVersion
-				? `AI Agent Bridge ${status.installedVersion} is installed. Reload the window to use it.`
-				: `AI Agent Bridge ${status.currentVersion} is up to date (latest release ${status.latest?.version ?? "unknown"}).`);
+				? `SubHarness ${status.installedVersion} is installed. Reload the window to use it.`
+				: `SubHarness ${status.currentVersion} is up to date (latest release ${status.latest?.version ?? "unknown"}).`);
 		}
 		return status;
+	}
+
+	/** Asks under the current name first; the former name answers until the repository is renamed. */
+	private async fetchLatestRelease(): Promise<Response> {
+		let response: Response | undefined;
+		for (const repository of RELEASE_REPOSITORIES) {
+			try {
+				response = await this.fetch(latestReleaseUrl(repository), { signal: AbortSignal.timeout(API_TIMEOUT_MS), headers: {
+					Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": `SubHarness/${this.options.currentVersion}`,
+				} });
+			} catch (error) { throw new UpdateNetworkError(describeNetworkError(error)); }
+			if (response.status !== 404) { break; }
+		}
+		return response!;
 	}
 
 	/** One notification per version across all windows. */
@@ -249,7 +266,7 @@ export class ExtensionUpdater implements vscode.Disposable {
 
 	private async offer(latest: UpdateRelease): Promise<void> {
 		const choice = await this.ui.showInformationMessage(
-			`AI Agent Bridge ${latest.version} is available (installed ${this.options.currentVersion}).`, "Install", "Release Notes");
+			`SubHarness ${latest.version} is available (installed ${this.options.currentVersion}).`, "Install", "Release Notes");
 		if (choice === "Install") { await this.install(true); }
 		else if (choice === "Release Notes") { await (this.options.openExternal ?? vscode.env.openExternal)(vscode.Uri.parse(latest.pageUrl)); }
 	}
@@ -265,14 +282,14 @@ export class ExtensionUpdater implements vscode.Disposable {
 		if (!status.available && manual && !status.installedVersion && this.manualCheckWaitMs() === 0) { status = await this.track(false, false); }
 		const latest = status.latest;
 		if (!status.available || !latest) {
-			if (manual) { void this.ui.showInformationMessage(status.installedVersion ? `AI Agent Bridge ${status.installedVersion} is already installed. Reload the window to use it.` : "No AI Agent Bridge update is available."); }
+			if (manual) { void this.ui.showInformationMessage(status.installedVersion ? `SubHarness ${status.installedVersion} is already installed. Reload the window to use it.` : "No SubHarness update is available."); }
 			return false;
 		}
 		const dir = path.join(this.options.storageDir, "updates"), lock = path.join(dir, "install.lock");
 		const file = path.join(dir, latest.asset.name), partial = `${file}.part`;
 		await fs.mkdir(dir, { recursive: true });
 		if (!await this.acquireLock(lock)) {
-			if (manual) { void this.ui.showInformationMessage("Another VS Code window is installing the AI Agent Bridge update."); }
+			if (manual) { void this.ui.showInformationMessage("Another VS Code window is installing the SubHarness update."); }
 			return false;
 		}
 		try {
@@ -281,7 +298,7 @@ export class ExtensionUpdater implements vscode.Disposable {
 			await (this.options.install ?? (uri => vscode.commands.executeCommand("workbench.extensions.installExtension", uri)))(vscode.Uri.file(file));
 			await this.store({ ...this.stored, installedVersion: latest.version, error: undefined });
 			this.options.log?.("update.installed", { from: this.options.currentVersion, to: latest.version, manual });
-			void this.ui.showInformationMessage(`AI Agent Bridge ${latest.version} is installed. Reload the window to use it.`, "Reload Window").then(choice => {
+			void this.ui.showInformationMessage(`SubHarness ${latest.version} is installed. Reload the window to use it.`, "Reload Window").then(choice => {
 				if (choice === "Reload Window") { void (this.options.reload ?? (() => vscode.commands.executeCommand("workbench.action.reloadWindow")))(); }
 			});
 			return true;
@@ -289,7 +306,7 @@ export class ExtensionUpdater implements vscode.Disposable {
 			const message = error instanceof Error ? error.message : String(error);
 			await this.store({ ...this.stored, error: `Install failed: ${message}` });
 			this.options.log?.("update.install_failed", { to: latest.version, manual, error: message });
-			void this.ui.showErrorMessage(`AI Agent Bridge ${latest.version} was not installed: ${message}`);
+			void this.ui.showErrorMessage(`SubHarness ${latest.version} was not installed: ${message}`);
 			return false;
 		} finally {
 			await fs.rm(partial, { force: true }).catch(() => undefined);
@@ -311,7 +328,7 @@ export class ExtensionUpdater implements vscode.Disposable {
 
 	private async download(latest: UpdateRelease, target: string): Promise<void> {
 		const response = await this.fetch(latest.asset.url, { redirect: "follow", signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
-			headers: { "User-Agent": `ai-agent-bridge/${this.options.currentVersion}` } });
+			headers: { "User-Agent": `SubHarness/${this.options.currentVersion}` } });
 		if (!response.ok || !response.body) { throw new Error(`download failed (${response.status}).`); }
 		const hash = createHash("sha256");
 		let bytes = 0;

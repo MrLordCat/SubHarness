@@ -1,14 +1,14 @@
 {
 	"name": "llama-vscode-chat",
 	"publisher": "mrlordcat",
-	"displayName": "AI Agent Bridge",
-	"description": "Bridge local models, DeepSeek, Codex, Claude, and Snowflake Coco into native VS Code Chat with tools, subagents, memory, context control, and diagnostics.",
+	"displayName": "SubHarness",
+	"description": "One agent chat in VS Code for your AI subscriptions: Codex, Claude, Cursor, Snowflake Coco, DeepSeek and local models, with tools, subagents, shared context, memory and diagnostics.",
 	"icon": "assets/logo.png",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/MrLordCat/ai-agent-bridge.git"
+		"url": "https://github.com/MrLordCat/SubHarness.git"
 	},
-	"version": "2.0.2",
+	"version": "2.0.5",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -22,9 +22,9 @@
 		"theme": "dark"
 	},
 	"badges": [],
-	"homepage": "https://github.com/MrLordCat/ai-agent-bridge",
+	"homepage": "https://github.com/MrLordCat/SubHarness",
 	"bugs": {
-		"url": "https://github.com/MrLordCat/ai-agent-bridge/issues"
+		"url": "https://github.com/MrLordCat/SubHarness/issues"
 	},
 	"license": "MIT",
 	"activationEvents": [
@@ -35,7 +35,7 @@
 		"languageModelChatProviders": [
 			{
 				"vendor": "llamacpp",
-				"displayName": "AI Agent Bridge",
+				"displayName": "SubHarness",
 				"managementCommand": "llamacpp.manage"
 			}
 		],
@@ -43,18 +43,27 @@
 			"activitybar": [
 				{
 					"id": "llamacpp-sidebar",
-					"title": "AI Agent Bridge",
+					"title": "SubHarness",
+					"icon": "assets/activity-icon.svg"
+				}
+			],
+			"secondarySidebar": [
+				{
+					"id": "llamacpp-chat",
+					"title": "SubHarness",
 					"icon": "assets/activity-icon.svg"
 				}
 			]
 		},
 		"views": {
-			"llamacpp-sidebar": [
+			"llamacpp-chat": [
 				{
 					"type": "webview",
 					"id": "llamacpp.chat",
 					"name": "Chat"
-				},
+				}
+			],
+			"llamacpp-sidebar": [
 				{
 					"id": "llamacpp-quick-actions",
 					"name": "Quick Access",
@@ -63,7 +72,7 @@
 			]
 		},
 		"configuration": {
-			"title": "AI Agent Bridge",
+			"title": "SubHarness",
 			"properties": {
 				"llamacpp.chat.systemNotifications": {
 					"type": "boolean",
@@ -103,7 +112,7 @@
 						"\\b(?:drop\\s+(?:table|database|schema)|truncate\\s+table)\\b",
 						"\\b(?:taskkill|Stop-Process|pkill|killall)\\b[^\\n;&|]*\\bcode(?:\\.exe)?\\b"
 					],
-					"markdownDescription": "Regular expressions (case-insensitive) for terminal commands that the AI Agent Bridge chat runs only after you allow them in the chat. Every other tool call runs without asking. Remove an entry to stop asking for it, or add patterns for commands you want to confirm."
+					"markdownDescription": "Regular expressions (case-insensitive) for terminal commands that the SubHarness chat runs only after you allow them in the chat. Every other tool call runs without asking. Remove an entry to stop asking for it, or add patterns for commands you want to confirm."
 				},
 				"llamacpp.serverUrl": {
 					"type": "string",
@@ -724,7 +733,7 @@
 					],
 					"default": "notify",
 					"scope": "application",
-					"description": "Automatic updates from the GitHub releases of MrLordCat/ai-agent-bridge, stable and patch releases. Automatic checks run at most every 5 hours, 30 minutes after a check that could not reach GitHub. Only versions newer than the installed one are offered, so a local development build is never replaced by an older release."
+					"description": "Automatic updates from the GitHub releases of MrLordCat/SubHarness, stable and patch releases. Automatic checks run at most every 5 hours, 30 minutes after a check that could not reach GitHub. Only versions newer than the installed one are offered, so a local development build is never replaced by an older release."
 				},
 				"llamacpp.journalRenderRounds": {
 					"type": "number",
@@ -1310,323 +1319,323 @@
 		"commands": [
 			{
 				"command": "llamacpp.chat.new",
-				"title": "AI Agent Bridge: New Chat",
+				"title": "SubHarness: New Chat",
 				"icon": "$(add)"
 			},
 			{
 				"command": "llamacpp.chat.history",
-				"title": "AI Agent Bridge: Show Chats",
+				"title": "SubHarness: Show Chats",
 				"icon": "$(history)"
 			},
 			{
 				"command": "llamacpp.chat.openInEditor",
-				"title": "AI Agent Bridge: Open Chat in Editor",
+				"title": "SubHarness: Open Chat in Editor",
 				"icon": "$(link-external)"
 			},
 			{
 				"command": "llamacpp.chat.addSelection",
-				"title": "AI Agent Bridge: Add Selection to Chat"
+				"title": "SubHarness: Add Selection to Chat"
 			},
 			{
 				"command": "llamacpp.chat.addFile",
-				"title": "AI Agent Bridge: Add File to Chat"
+				"title": "SubHarness: Add File to Chat"
 			},
 			{
 				"command": "llamacpp.openSidebar",
-				"title": "AI Agent Bridge: Open Sidebar"
+				"title": "SubHarness: Open Sidebar"
 			},
 			{
 				"command": "llamacpp.manage",
-				"title": "AI Agent Bridge: Manage Primary Server"
+				"title": "SubHarness: Manage Primary Server"
 			},
 			{
 				"command": "llamacpp.setLocalServerUrl",
-				"title": "AI Agent Bridge: Set Local Server URL"
+				"title": "SubHarness: Set Local Server URL"
 			},
 			{
 				"command": "llamacpp.toggleLocalServer",
-				"title": "AI Agent Bridge: Toggle Local Server Source"
+				"title": "SubHarness: Toggle Local Server Source"
 			},
 			{
 				"command": "llamacpp.toggleDeepSeek",
-				"title": "AI Agent Bridge: Toggle DeepSeek Source"
+				"title": "SubHarness: Toggle DeepSeek Source"
 			},
 			{
 				"command": "llamacpp.toggleDeepSeekCompactionSummary",
-				"title": "AI Agent Bridge: Toggle DeepSeek Compaction Summaries"
+				"title": "SubHarness: Toggle DeepSeek Compaction Summaries"
 			},
 			{
 				"command": "llamacpp.memoryHealth",
-				"title": "AI Agent Bridge: Check Memory Health"
+				"title": "SubHarness: Check Memory Health"
 			},
 			{
 				"command": "llamacpp.configureDeepSeek",
-				"title": "AI Agent Bridge: Configure DeepSeek"
+				"title": "SubHarness: Configure DeepSeek"
 			},
 			{
 				"command": "llamacpp.setDeepSeekContextLength",
-				"title": "AI Agent Bridge: Set DeepSeek Maximum Context"
+				"title": "SubHarness: Set DeepSeek Maximum Context"
 			},
 			{
 				"command": "llamacpp.toggleCodexSubscription",
-				"title": "AI Agent Bridge: Toggle Codex Subscription Source"
+				"title": "SubHarness: Toggle Codex Subscription Source"
 			},
 			{
 				"command": "llamacpp.toggleCodexDeferredTools",
-				"title": "AI Agent Bridge: Toggle Codex Deferred Tools"
+				"title": "SubHarness: Toggle Codex Deferred Tools"
 			},
 			{
 				"command": "llamacpp.codexSignIn",
-				"title": "AI Agent Bridge: Sign In to Codex Subscription"
+				"title": "SubHarness: Sign In to Codex Subscription"
 			},
 			{
 				"command": "llamacpp.codexInstallCli",
-				"title": "AI Agent Bridge: Install or Update Codex CLI"
+				"title": "SubHarness: Install or Update Codex CLI"
 			},
 			{
 				"command": "llamacpp.selectCodexAccount",
-				"title": "AI Agent Bridge: Switch Codex Account"
+				"title": "SubHarness: Switch Codex Account"
 			},
 			{
 				"command": "llamacpp.addCodexAccount",
-				"title": "AI Agent Bridge: Add Codex Account"
+				"title": "SubHarness: Add Codex Account"
 			},
 			{
 				"command": "llamacpp.removeCodexAccount",
-				"title": "AI Agent Bridge: Remove Codex Account"
+				"title": "SubHarness: Remove Codex Account"
 			},
 			{
 				"command": "llamacpp.codexAccountSignIn",
-				"title": "AI Agent Bridge: Sign In to a Codex Account"
+				"title": "SubHarness: Sign In to a Codex Account"
 			},
 			{
 				"command": "llamacpp.codexAccountSignOut",
-				"title": "AI Agent Bridge: Sign Out of a Codex Account"
+				"title": "SubHarness: Sign Out of a Codex Account"
 			},
 			{
 				"command": "llamacpp.codexSignOut",
-				"title": "AI Agent Bridge: Sign Out of Codex Subscription"
+				"title": "SubHarness: Sign Out of Codex Subscription"
 			},
 			{
 				"command": "llamacpp.codexShowStatus",
-				"title": "AI Agent Bridge: Show Codex Subscription Status"
+				"title": "SubHarness: Show Codex Subscription Status"
 			},
 			{
 				"command": "llamacpp.codexContinueLatestInNewChat",
-				"title": "AI Agent Bridge: Continue Latest Codex Thread in New Chat"
+				"title": "SubHarness: Continue Latest Codex Thread in New Chat"
 			},
 			{
 				"command": "llamacpp.toggleClaudeSubscription",
-				"title": "AI Agent Bridge: Toggle Claude Subscription Source"
+				"title": "SubHarness: Toggle Claude Subscription Source"
 			},
 			{
 				"command": "llamacpp.toggleCoco",
-				"title": "AI Agent Bridge: Toggle Coco Source"
+				"title": "SubHarness: Toggle Coco Source"
 			},
 			{
 				"command": "llamacpp.cocoShowStatus",
-				"title": "AI Agent Bridge: Show Coco Connection Status"
+				"title": "SubHarness: Show Coco Connection Status"
 			},
 			{
 				"command": "llamacpp.cocoSelectConnection",
-				"title": "AI Agent Bridge: Select Coco Snowflake Connection"
+				"title": "SubHarness: Select Coco Snowflake Connection"
 			},
 			{
 				"command": "llamacpp.cocoRefreshModels",
-				"title": "AI Agent Bridge: Refresh Coco Models"
+				"title": "SubHarness: Refresh Coco Models"
 			},
 			{
 				"command": "llamacpp.cocoOpenSettings",
-				"title": "AI Agent Bridge: Open Coco Settings"
+				"title": "SubHarness: Open Coco Settings"
 			},
 			{
 				"command": "llamacpp.cocoOpenSnowflake",
-				"title": "AI Agent Bridge: Open Snowflake Coco"
+				"title": "SubHarness: Open Snowflake Coco"
 			},
 			{
 				"command": "llamacpp.claudeSignIn",
-				"title": "AI Agent Bridge: Sign In to Claude Subscription"
+				"title": "SubHarness: Sign In to Claude Subscription"
 			},
 			{
 				"command": "llamacpp.claudeSignOut",
-				"title": "AI Agent Bridge: Sign Out of Claude Subscription"
+				"title": "SubHarness: Sign Out of Claude Subscription"
 			},
 			{
 				"command": "llamacpp.claudeShowStatus",
-				"title": "AI Agent Bridge: Show Claude Subscription Status"
+				"title": "SubHarness: Show Claude Subscription Status"
 			},
 			{
 				"command": "llamacpp.claudeContinueLatestInNewChat",
-				"title": "AI Agent Bridge: Continue Latest Claude Session in New Chat"
+				"title": "SubHarness: Continue Latest Claude Session in New Chat"
 			},
 			{
 				"command": "llamacpp.setClaudeContextLength",
-				"title": "AI Agent Bridge: Set Shared Working Context"
+				"title": "SubHarness: Set Shared Working Context"
 			},
 			{
 				"command": "llamacpp.openContextControl",
-				"title": "AI Agent Bridge: Open Provider Context Control"
+				"title": "SubHarness: Open Provider Context Control"
 			},
 			{
 				"command": "llamacpp.setApiKey",
-				"title": "AI Agent Bridge: Set Primary API Key"
+				"title": "SubHarness: Set Primary API Key"
 			},
 			{
 				"command": "llamacpp.openSettings",
-				"title": "AI Agent Bridge: Open Settings",
+				"title": "SubHarness: Open Settings",
 				"icon": "$(settings-gear)"
 			},
 			{
 				"command": "llamacpp.openMemory",
-				"title": "AI Agent Bridge: Open Shared Memory"
+				"title": "SubHarness: Open Shared Memory"
 			},
 			{
 				"command": "llamacpp.openApiProviders",
-				"title": "AI Agent Bridge: Providers Manager",
+				"title": "SubHarness: Providers Manager",
 				"icon": "$(server-process)"
 			},
 			{
 				"command": "llamacpp.clearMemory",
-				"title": "AI Agent Bridge: Clear Shared Memory"
+				"title": "SubHarness: Clear Shared Memory"
 			},
 			{
 				"command": "llamacpp.setThinkingMode",
-				"title": "AI Agent Bridge: Set Thinking Mode"
+				"title": "SubHarness: Set Thinking Mode"
 			},
 			{
 				"command": "llamacpp.setCompactionTargetRatio",
-				"title": "AI Agent Bridge: Set Compaction Target"
+				"title": "SubHarness: Set Compaction Target"
 			},
 			{
 				"command": "llamacpp.setReasoningBudget",
-				"title": "AI Agent Bridge: Set Local Reasoning Cap"
+				"title": "SubHarness: Set Local Reasoning Cap"
 			},
 			{
 				"command": "llamacpp.setToolResultMode",
-				"title": "AI Agent Bridge: Set Tool Result Mode"
+				"title": "SubHarness: Set Tool Result Mode"
 			},
 			{
 				"command": "llamacpp.setToolCallingMode",
-				"title": "AI Agent Bridge: Set Tool Calling Mode"
+				"title": "SubHarness: Set Tool Calling Mode"
 			},
 			{
 				"command": "llamacpp.setKnowledgeMode",
-				"title": "AI Agent Bridge: Set Knowledge Verification"
+				"title": "SubHarness: Set Knowledge Verification"
 			},
 			{
 				"command": "llamacpp.refreshModels",
-				"title": "AI Agent Bridge: Refresh Models",
+				"title": "SubHarness: Refresh Models",
 				"icon": "$(refresh)"
 			},
 			{
 				"command": "llamacpp.openCopilotModelPicker",
-				"title": "AI Agent Bridge: Choose Chat Model",
+				"title": "SubHarness: Choose Chat Model",
 				"icon": "$(comment-discussion)"
 			},
 			{
 				"command": "llamacpp.chooseModelByProvider",
-				"title": "AI Agent Bridge: Models by Provider",
+				"title": "SubHarness: Models by Provider",
 				"icon": "$(list-tree)"
 			},
 			{
 				"command": "llamacpp.applyCopilotPatch",
-				"title": "AI Agent Bridge: Apply Copilot Chat Patch"
+				"title": "SubHarness: Apply Copilot Chat Patch"
 			},
 			{
 				"command": "llamacpp.checkForUpdates",
-				"title": "AI Agent Bridge: Check for Updates",
+				"title": "SubHarness: Check for Updates",
 				"icon": "$(sync)"
 			},
 			{
 				"command": "llamacpp.installUpdate",
-				"title": "AI Agent Bridge: Install Update",
+				"title": "SubHarness: Install Update",
 				"icon": "$(cloud-download)"
 			},
 			{
 				"command": "llamacpp.chooseAutoUpdateMode",
-				"title": "AI Agent Bridge: Choose Automatic Update Mode"
+				"title": "SubHarness: Choose Automatic Update Mode"
 			},
 			{
 				"command": "llamacpp.prepareUserVsCode",
-				"title": "AI Agent Bridge: Prepare User VS Code (Linux, no root)",
+				"title": "SubHarness: Prepare User VS Code (Linux, no root)",
 				"enablement": "isLinux && !remoteName"
 			},
 			{
 				"command": "llamacpp.copilotPatchStatus",
-				"title": "AI Agent Bridge: Show Copilot Chat Patch Status"
+				"title": "SubHarness: Show Copilot Chat Patch Status"
 			},
 			{
 				"command": "llamacpp.restoreCopilotPatch",
-				"title": "AI Agent Bridge: Restore Original Copilot Chat"
+				"title": "SubHarness: Restore Original Copilot Chat"
 			},
 			{
 				"command": "llamacpp.openLogsFolder",
-				"title": "AI Agent Bridge: Open Logs Folder"
+				"title": "SubHarness: Open Logs Folder"
 			},
 			{
 				"command": "llamacpp.runHealthCheck",
-				"title": "AI Agent Bridge: Run Provider Health Check"
+				"title": "SubHarness: Run Provider Health Check"
 			},
 			{
 				"command": "llamacpp.openSessionReport",
-				"title": "AI Agent Bridge: Open Session Quality Report"
+				"title": "SubHarness: Open Session Quality Report"
 			},
 			{
 				"command": "llamacpp.resetSessionReport",
-				"title": "AI Agent Bridge: Reset Session Metrics"
+				"title": "SubHarness: Reset Session Metrics"
 			},
 			{
 				"command": "llamacpp.clearTokenUsageHistory",
-				"title": "AI Agent Bridge: Clear Token Usage History"
+				"title": "SubHarness: Clear Token Usage History"
 			},
 			{
 				"command": "llamacpp.startBaselineUsageExperiment",
-				"title": "AI Agent Bridge: Start Baseline Usage Experiment"
+				"title": "SubHarness: Start Baseline Usage Experiment"
 			},
 			{
 				"command": "llamacpp.startDelegatedUsageExperiment",
-				"title": "AI Agent Bridge: Start Delegated Usage Experiment"
+				"title": "SubHarness: Start Delegated Usage Experiment"
 			},
 			{
 				"command": "llamacpp.stopUsageExperiment",
-				"title": "AI Agent Bridge: Stop and Export Usage Experiment"
+				"title": "SubHarness: Stop and Export Usage Experiment"
 			},
 			{
 				"command": "llamacpp.exportUsageExperiment",
-				"title": "AI Agent Bridge: Export Usage Experiment Report"
+				"title": "SubHarness: Export Usage Experiment Report"
 			},
 			{
 				"command": "llamacpp.clearUsageExperiments",
-				"title": "AI Agent Bridge: Clear Usage Experiments"
+				"title": "SubHarness: Clear Usage Experiments"
 			},
 			{
 				"command": "llamacpp.openLatestLog",
-				"title": "AI Agent Bridge: Open Latest Log"
+				"title": "SubHarness: Open Latest Log"
 			},
 			{
 				"command": "llamacpp.copyLatestLogPath",
-				"title": "AI Agent Bridge: Copy Latest Log Path"
+				"title": "SubHarness: Copy Latest Log Path"
 			},
 			{
 				"command": "llamacpp.toggleFileLogging",
-				"title": "AI Agent Bridge: Toggle File Logging"
+				"title": "SubHarness: Toggle File Logging"
 			},
 			{
 				"command": "llamacpp.toggleStreamChunkLogging",
-				"title": "AI Agent Bridge: Toggle Stream Chunk Logging"
+				"title": "SubHarness: Toggle Stream Chunk Logging"
 			},
 			{
 				"command": "llamacpp.togglePerformanceStatusBar",
-				"title": "AI Agent Bridge: Toggle Performance Status Bar"
+				"title": "SubHarness: Toggle Performance Status Bar"
 			},
 			{
 				"command": "llamacpp.toggleContextUsageStatusBar",
-				"title": "AI Agent Bridge: Toggle Context Usage Status Bar"
+				"title": "SubHarness: Toggle Context Usage Status Bar"
 			},
 			{
 				"command": "llamacpp.toggleClaudeCacheKeepAlive",
-				"title": "AI Agent Bridge: Toggle Claude Cache Keep-Alive",
-				"category": "AI Agent Bridge"
+				"title": "SubHarness: Toggle Claude Cache Keep-Alive",
+				"category": "SubHarness"
 			}
 		],
 		"menus": {

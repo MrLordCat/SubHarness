@@ -1,6 +1,8 @@
 import { Fragment, type ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { lexer, type Token, type Tokens } from "marked";
+import { postMessage } from "./api";
+import { codeFileTarget, linkFileTarget } from "../shared/file-reference";
 
 const CACHE_LIMIT = 128;
 const tokenCache = new Map<string, Token[]>();
@@ -127,6 +129,20 @@ function renderInline(tokens: Token[] | undefined): ComponentChildren[] {
 	return tokens ? tokens.map((token, index) => renderInlineToken(token, index)) : [];
 }
 
+function fileHandlers(target: string) {
+	const open = (event: Event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		postMessage({ type: "openFileReference", target });
+	};
+	return {
+		onClick: open,
+		onKeyDown: (event: KeyboardEvent) => {
+			if (event.key === "Enter" || event.key === " ") { open(event); }
+		},
+	};
+}
+
 function renderInlineToken(token: Token, key: number): ComponentChildren {
 	switch (token.type) {
 		case "text": {
@@ -141,15 +157,24 @@ function renderInlineToken(token: Token, key: number): ComponentChildren {
 			return <em key={key}>{renderInline((token as Tokens.Em).tokens)}</em>;
 		case "del":
 			return <del key={key}>{renderInline((token as Tokens.Del).tokens)}</del>;
-		case "codespan":
-			return <code key={key} class="md-inline-code">{(token as Tokens.Codespan).text}</code>;
+		case "codespan": {
+			const text = (token as Tokens.Codespan).text;
+			const decoded = text.replace(/&(?:amp|lt|gt|quot|#39);/g, entity => ({ "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" })[entity] ?? entity);
+			const target = codeFileTarget(decoded);
+			return target
+				? <code key={key} class="md-inline-code md-file-ref" role="link" tabIndex={0} title={`Open ${target}`} {...fileHandlers(target)}>{text}</code>
+				: <code key={key} class="md-inline-code">{text}</code>;
+		}
 		case "br":
 			return <br key={key} />;
 		case "link": {
 			const link = token as Tokens.Link;
 			const href = safeHref(link.href);
 			if (!href) {
-				return <Fragment key={key}>{renderInline(link.tokens)}</Fragment>;
+				const target = linkFileTarget(link.href);
+				return target
+					? <a key={key} class="md-file-link" role="link" tabIndex={0} title={target} {...fileHandlers(target)}>{renderInline(link.tokens)}</a>
+					: <Fragment key={key}>{renderInline(link.tokens)}</Fragment>;
 			}
 			return (
 				<a key={key} href={href} title={link.title ?? undefined} target="_blank" rel="noreferrer noopener">

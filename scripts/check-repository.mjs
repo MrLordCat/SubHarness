@@ -13,7 +13,7 @@ export function validateRepositoryMetadata(manifest, lock, readme, release) {
   }
   if (release) {
     if (release.tag !== `v${manifest.version}`) { errors.push('Release tag must match package.json.'); }
-    if (release.notes.split(/\r?\n/, 1)[0] !== `# AI Agent Bridge ${manifest.version}`) {
+    if (release.notes.split(/\r?\n/, 1)[0] !== `# SubHarness ${manifest.version}`) {
       errors.push('Update docs/RELEASE_NOTES.md for this version before creating the tag.');
     }
   }

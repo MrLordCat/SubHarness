@@ -31,7 +31,7 @@ export function registerUserVsCodeCommand(context: vscode.ExtensionContext, outp
 			output.appendLine("User-owned VS Code: " + installation.installationRoot + "\nLauncher: " + installation.launcher
 				+ "\nProfile: " + installation.profileDir + "\nShared extensions: " + installation.extensionsDir);
 			const choice = await vscode.window.showInformationMessage(
-				"User VS Code is ready. Open AI Agent Bridge Code to apply patches automatically. It shares your installed extensions and uses a separate profile; configure settings and accounts there. Reload that window after the patch notification.",
+				"User VS Code is ready. Open SubHarness Code to apply patches automatically. It shares your installed extensions and uses a separate profile; configure settings and accounts there. Reload that window after the patch notification.",
 				"Open User VS Code", "Show Log");
 			if (choice === "Open User VS Code") {
 				const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;

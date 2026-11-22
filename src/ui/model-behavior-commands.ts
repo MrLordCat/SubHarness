@@ -94,7 +94,7 @@ async function pickThinkingMode(current: ThinkingMode): Promise<ThinkingMode | u
 			...option,
 			detail: option.value === current ? "Current" : undefined,
 		})),
-		{ title: "AI Agent Bridge Thinking Mode", ignoreFocusOut: true }
+		{ title: "SubHarness Thinking Mode", ignoreFocusOut: true }
 	);
 	return picked?.value;
 }
@@ -107,7 +107,7 @@ async function pickToolResultMode(current: ToolResultMode): Promise<ToolResultMo
 	];
 	const picked = await vscode.window.showQuickPick(
 		options.map(option => ({ ...option, detail: option.value === current ? "Current" : undefined })),
-		{ title: "AI Agent Bridge Tool Result Mode", ignoreFocusOut: true }
+		{ title: "SubHarness Tool Result Mode", ignoreFocusOut: true }
 	);
 	return picked?.value;
 }
@@ -119,7 +119,7 @@ async function pickToolCallingMode(current: ToolCallingMode): Promise<ToolCallin
 	];
 	const picked = await vscode.window.showQuickPick(
 		options.map(option => ({ ...option, detail: option.value === current ? "Current" : undefined })),
-		{ title: "AI Agent Bridge Tool Calling Mode", ignoreFocusOut: true }
+		{ title: "SubHarness Tool Calling Mode", ignoreFocusOut: true }
 	);
 	return picked?.value;
 }
@@ -132,7 +132,7 @@ async function pickKnowledgeMode(current: KnowledgeMode): Promise<KnowledgeMode 
 	];
 	const picked = await vscode.window.showQuickPick(
 		options.map(option => ({ ...option, detail: option.value === current ? "Current" : undefined })),
-		{ title: "AI Agent Bridge Knowledge Verification", ignoreFocusOut: true }
+		{ title: "SubHarness Knowledge Verification", ignoreFocusOut: true }
 	);
 	return picked?.value;
 }
@@ -152,7 +152,7 @@ async function pickCompactionTargetRatio(current: number): Promise<number | unde
 			detail: Math.abs(option.value - current) < 0.001 ? "Current" : undefined,
 		})),
 		{
-			title: "AI Agent Bridge Compaction Target",
+			title: "SubHarness Compaction Target",
 			placeHolder: "Select how much of the current message context to retain",
 			ignoreFocusOut: true,
 		}
@@ -194,7 +194,7 @@ export function registerModelBehaviorCommands(refresh: () => void): vscode.Dispo
 			await config.update("compactionTargetRatio", next, vscode.ConfigurationTarget.Global);
 			refresh();
 			vscode.window.showInformationMessage(
-				`AI Agent Bridge compaction target: ${Math.round(next * 100)}% of current context retained`
+				`SubHarness compaction target: ${Math.round(next * 100)}% of current context retained`
 			);
 		}),
 		vscode.commands.registerCommand("llamacpp.setThinkingMode", async () => {
@@ -206,13 +206,13 @@ export function registerModelBehaviorCommands(refresh: () => void): vscode.Dispo
 			}
 			await config.update("thinkingMode", next, vscode.ConfigurationTarget.Global);
 			refresh();
-			vscode.window.showInformationMessage(`AI Agent Bridge thinking mode: ${next}`);
+			vscode.window.showInformationMessage(`SubHarness thinking mode: ${next}`);
 		}),
 		vscode.commands.registerCommand("llamacpp.setReasoningBudget", async () => {
 			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const current = Number(config.get("reasoningBudget", DEFAULT_LOCAL_REASONING_BUDGET));
 			const value = await vscode.window.showInputBox({
-				title: "AI Agent Bridge Reasoning Cap",
+				title: "SubHarness Reasoning Cap",
 				prompt: "Maximum hidden reasoning tokens for local models; DeepSeek uses High or Max effort",
 				value: Number.isFinite(current) ? String(current) : String(DEFAULT_LOCAL_REASONING_BUDGET),
 				ignoreFocusOut: true,
@@ -230,7 +230,7 @@ export function registerModelBehaviorCommands(refresh: () => void): vscode.Dispo
 			const parsed = Math.max(256, Math.min(65536, Number(value)));
 			await config.update("reasoningBudget", parsed, vscode.ConfigurationTarget.Global);
 			refresh();
-			vscode.window.showInformationMessage(`AI Agent Bridge reasoning cap: ${parsed} tokens`);
+			vscode.window.showInformationMessage(`SubHarness reasoning cap: ${parsed} tokens`);
 		}),
 		vscode.commands.registerCommand("llamacpp.setToolResultMode", async () => {
 			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
@@ -241,7 +241,7 @@ export function registerModelBehaviorCommands(refresh: () => void): vscode.Dispo
 			}
 			await config.update("toolResultMode", next, vscode.ConfigurationTarget.Global);
 			refresh();
-			vscode.window.showInformationMessage(`AI Agent Bridge tool result mode: ${next}`);
+			vscode.window.showInformationMessage(`SubHarness tool result mode: ${next}`);
 		}),
 		vscode.commands.registerCommand("llamacpp.setToolCallingMode", async () => {
 			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
@@ -252,7 +252,7 @@ export function registerModelBehaviorCommands(refresh: () => void): vscode.Dispo
 			}
 			await config.update("toolCallingMode", next, vscode.ConfigurationTarget.Global);
 			refresh();
-			vscode.window.showInformationMessage(`AI Agent Bridge tool calling mode: ${next}`);
+			vscode.window.showInformationMessage(`SubHarness tool calling mode: ${next}`);
 		}),
 		vscode.commands.registerCommand("llamacpp.setKnowledgeMode", async () => {
 			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
@@ -263,7 +263,7 @@ export function registerModelBehaviorCommands(refresh: () => void): vscode.Dispo
 			}
 			await config.update("knowledgeMode", next, vscode.ConfigurationTarget.Global);
 			refresh();
-			vscode.window.showInformationMessage(`AI Agent Bridge knowledge verification: ${next}`);
+			vscode.window.showInformationMessage(`SubHarness knowledge verification: ${next}`);
 		}),
 		vscode.commands.registerCommand("llamacpp.toggleDeepSeekCompactionSummary", async () => {
 			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
@@ -271,7 +271,7 @@ export function registerModelBehaviorCommands(refresh: () => void): vscode.Dispo
 			await config.update("deepSeekCompactionSummary", next, vscode.ConfigurationTarget.Global);
 			refresh();
 			vscode.window.showInformationMessage(
-				`AI Agent Bridge AI compaction summaries: ${next ? "On (paid DeepSeek request per compaction)" : "Off"}`
+				`SubHarness AI compaction summaries: ${next ? "On (paid DeepSeek request per compaction)" : "Off"}`
 			);
 		}),
 	];

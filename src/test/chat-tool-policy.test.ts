@@ -297,7 +297,7 @@ suite("chat tool policy", () => {
 		assert.deepStrictEqual(groups.map(group => [group.label, group.tools.map(tool => `${tool.name}:${tool.enabled}`)]), [
 			["Files", ["read_file:true"]],
 			["Terminal", ["run_in_terminal:true"]],
-			["AI Agent Bridge", ["llamacpp_store_memory:true"]],
+			["SubHarness", ["llamacpp_store_memory:true"]],
 			["dotnet", ["dotnet_install:false"]],
 			["MCP servers", ["mcp_github_search:false"]],
 			["pylance", ["pylance_tool:false"]],

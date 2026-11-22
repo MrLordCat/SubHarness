@@ -586,7 +586,7 @@ export class ApiProviderManagerPanel {
 		}
 		const panel = vscode.window.createWebviewPanel(
 			ApiProviderManagerPanel.viewType,
-			"AI Agent Bridge · Providers Manager",
+			"SubHarness · Providers Manager",
 			vscode.ViewColumn.Active,
 			{
 				enableScripts: true,

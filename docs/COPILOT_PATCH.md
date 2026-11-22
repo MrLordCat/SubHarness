@@ -180,9 +180,9 @@ most once per VS Code build and extension version. Quick Access shows
 
 Command Palette exposes:
 
-- `AI Agent Bridge: Apply Copilot Chat Patch`;
-- `AI Agent Bridge: Show Copilot Chat Patch Status`;
-- `AI Agent Bridge: Restore Original Copilot Chat`.
+- `SubHarness: Apply Copilot Chat Patch`;
+- `SubHarness: Show Copilot Chat Patch Status`;
+- `SubHarness: Restore Original Copilot Chat`.
 
 On a local Linux desktop, permission failures and partial application offer
 **Prepare User VS Code (no root)** and **Apply patches with administrator rights**.
@@ -224,7 +224,7 @@ original backup rather than stacking edits on the already modified bundle.
 
 The backup itself is checked as well:
 
-- a backup is written only from bundle bytes that carry no AI Agent Bridge
+- a backup is written only from bundle bytes that carry no SubHarness
   marker, and from the bytes that were checked, not from a second read;
 - a lock file next to the bundle (`*.llama-vscode-chat.lock`) serialises
   patching across VS Code windows and the elevated runner. Two windows that
@@ -271,18 +271,18 @@ override.
 
 ### Thinking Effort Is Missing
 
-Run `AI Agent Bridge: Show Copilot Chat Patch Status`. If the patch is applied, reload
+Run `SubHarness: Show Copilot Chat Patch Status`. If the patch is applied, reload
 all VS Code windows and start a new chat session with a model from this provider.
 
 ### VS Code Was Updated
 
 The new installation has a new Copilot bundle. With auto-patch enabled, activate
-AI Agent Bridge once and accept its reload prompt. Otherwise run `AI Agent Bridge: Apply
+SubHarness once and accept its reload prompt. Otherwise run `SubHarness: Apply
 Copilot Chat Patch`. Do not copy a patched bundle from an older VS Code build.
 
 ### Patch Installation Without Administrator Rights
 
-Open the `AI Agent Bridge Copilot Patch` output channel to identify the failure.
+Open the `SubHarness Copilot Patch` output channel to identify the failure.
 `Copilot bundle shape changed` or `VS Code workbench shape changed` means the
 patch needs an update for the installed VS Code build; elevation cannot fix it.
 

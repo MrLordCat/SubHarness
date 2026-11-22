@@ -486,10 +486,10 @@ class FakeTracker implements ChatChangeTrackerLike {
 	constructor(readonly calls: string[]) {}
 	async beginTurn(): Promise<TurnSnapshot | undefined> {
 		this.calls.push("begin");
-		return new Map([["root", "tree-before"]]);
+		return new Map([["root", { tree: "tree-before", ignoredLimitReached: false }]]);
 	}
 	async endTurn(_sessionId: string, turn: number, begin: TurnSnapshot): Promise<void> {
-		this.calls.push(`end:${turn}:${begin.get("root")}`);
+		this.calls.push(`end:${turn}:${begin.get("root")?.tree}`);
 		this.set = { files: [{ id: "f1", path: "a.txt", status: "modified" }], sinceTurn: [{ turn, files: 1 }] };
 	}
 	async changeSet(): Promise<ChatChangeSet> {
@@ -557,7 +557,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "osNotify" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState" | "saveExport" | "openImage" | "terminals" | "now" | "setTimer" | "maxRequests">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "osNotify" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState" | "saveExport" | "openImage" | "openFileReference" | "terminals" | "now" | "setTimer" | "maxRequests">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -945,6 +945,72 @@ suite("chat controller", () => {
 		assert.strictEqual(current.webview.ofType("run").at(-1)?.run.running, false);
 	});
 
+	test("Stop cancels a writing tool still waiting for the initial snapshot", async () => {
+		const calls: string[] = [];
+		const snapshot = deferred();
+		const tracker = new class extends FakeTracker {
+			override async beginTurn(): Promise<TurnSnapshot | undefined> {
+				calls.push("snapshot");
+				await snapshot.promise;
+				return super.beginTurn();
+			}
+		}(calls);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("write", "writer", {})),
+		]);
+		const current = createHarness(root, backend, loggingTools(calls), tracker);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Edit a file" });
+		try {
+			await waitFor(() => calls.includes("snapshot"), "initial snapshot");
+			current.webview.receive({ type: "stop" });
+			await waitFor(() => current.webview.ofType("run").at(-1)?.run.stopping === true, "stop request");
+		} finally {
+			snapshot.resolve();
+		}
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.ok(!calls.includes("tool:writer"));
+		assert.strictEqual(backend.requests.length, 1);
+	});
+
+	test("a stopped turn unlocks Keep as soon as it reports Stopped", async () => {
+		const calls: string[] = [];
+		const finishing = deferred();
+		const tracker = new class extends FakeTracker {
+			override async endTurn(sessionId: string, turn: number, snapshot: TurnSnapshot): Promise<void> {
+				calls.push("finishing");
+				await finishing.promise;
+				await super.endTurn(sessionId, turn, snapshot);
+			}
+		}(calls);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("write", "writer", {})),
+			async (_progress, token) => {
+				await new Promise<void>(resolve => token.onCancellationRequested(() => resolve()));
+				throw new vscode.CancellationError();
+			},
+		]);
+		const current = createHarness(root, backend, loggingTools(calls), tracker);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Edit a file" });
+		await waitFor(() => backend.requests.length === 2, "writing tool");
+		current.webview.receive({ type: "stop" });
+
+		const stopped = () => current.webview.ofType("partAdded").find(message => message.part.kind === "notice" && message.part.text === "Stopped.");
+		try {
+			await waitFor(() => calls.includes("finishing"), "final change snapshot");
+			assert.deepStrictEqual(current.webview.ofType("run").at(-1)?.run, { running: true, stopping: true, detail: "Stopping…" });
+			assert.strictEqual(stopped(), undefined);
+		} finally {
+			finishing.resolve();
+		}
+		await waitFor(() => stopped() !== undefined, "stop notice");
+		assert.strictEqual(current.webview.ofType("run").at(-1)?.run.running, false);
+		assert.deepStrictEqual(current.webview.ofType("changes").at(-1)?.changes.files.map(file => file.path), ["a.txt"]);
+		current.webview.receive({ type: "keepChanges", ids: ["f1"] });
+		await waitFor(() => calls.includes("keep:f1"), "keep after stop");
+	});
+
 	test("a message sent while a turn runs waits for the round and starts the next turn", async () => {
 		const gate = deferred();
 		const backend = new FakeBackend([
@@ -1284,6 +1350,30 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "ready" });
 		await waitFor(() => current.webview.ofType("init").length === 1, "controller still responds");
 		assert.strictEqual(calls.length, 2);
+	});
+
+	test("openFileReference passes a valid target to the opener and survives failures", async () => {
+		const targets: string[] = [];
+		const logs: string[] = [];
+		const current = createHarness(root, new FakeBackend(), undefined, undefined, {
+			openFileReference: async target => {
+				targets.push(target);
+				if (target === "broken.md") {
+					throw new Error("open failed");
+				}
+			},
+			log: event => { logs.push(event); },
+		});
+		harness = current;
+		current.webview.receive({ type: "openFileReference", target: 42 });
+		current.webview.receive({ type: "openFileReference", target: "" });
+		current.webview.receive({ type: "openFileReference", target: "x".repeat(2049) });
+		current.webview.receive({ type: "openFileReference", target: "docs/CHAT.md#L12" });
+		current.webview.receive({ type: "openFileReference", target: "broken.md" });
+		await waitFor(() => logs.includes("chat.file_reference.open_failed"), "open failure logged");
+		assert.deepStrictEqual(targets, ["docs/CHAT.md#L12", "broken.md"]);
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "controller still responds");
 	});
 
 	test("init loads only the newest requests", async () => {
@@ -3372,6 +3462,45 @@ suite("chat controller", () => {
 		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
 		assert.ok(sessionId);
 		assert.deepStrictEqual(await current.store.loadSubagents(sessionId), []);
+	});
+
+	test("runs the main agent's tools while a subagent from the same round works", async () => {
+		const finishSubagent = deferred();
+		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
+		const probe: ChatTool = {
+			name: "probe",
+			description: "Read a file.",
+			inputSchema: { type: "object", properties: {} },
+			group: "files",
+			readOnly: true,
+			invoke: async () => "probe result",
+		};
+		const source = createChatToolSource({ enabledTools: () => [subagent, probe], groups: () => [], setEnabled: async () => undefined });
+		const backend = new FakeBackend([
+			progress => {
+				progress.report(new vscode.LanguageModelToolCallPart("delegate", SUBAGENT_TOOL_NAME, { prompt: "Inspect a file", model: "Smart (Claude)" }));
+				progress.report(new vscode.LanguageModelToolCallPart("probe", "probe", {}));
+			},
+			async progress => {
+				await finishSubagent.promise;
+				progress.report(new vscode.LanguageModelTextPart("Subagent report"));
+			},
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Inspect two files" });
+
+		const results = () => current.webview.ofType("partAdded").flatMap(({ part }) => part.kind === "toolResult" ? [part.callId] : []);
+		try {
+			await waitFor(() => backend.requests.length === 2 && results().includes("probe"), "main tool result while subagent is running");
+			assert.deepStrictEqual(results(), ["probe"]);
+		} finally {
+			finishSubagent.resolve();
+		}
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(results(), ["probe", "delegate"]);
+		assert.strictEqual(backend.requests.length, 3);
 	});
 
 	test("runs a subagent and gives the parent only its report", async () => {

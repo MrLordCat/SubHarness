@@ -3117,7 +3117,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		try {
 			const account = await this.client.request<CodexAccountResponse>("account/read", { refreshToken: true });
 			if (!account.account) {
-				throw new Error("Codex is not signed in. Run AI Agent Bridge: Sign In to Codex Subscription.");
+				throw new Error("Codex is not signed in. Run SubHarness: Sign In to Codex Subscription.");
 			}
 			if (account.account.type !== "chatgpt") {
 				throw new Error(
@@ -3138,7 +3138,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				}
 				const account = await this.client.request<CodexAccountResponse>("account/read", { refreshToken: true });
 				if (!account.account || account.account.type !== "chatgpt") {
-					throw new Error("Codex session expired. Run AI Agent Bridge: Sign In to Codex Subscription.", { cause: error });
+					throw new Error("Codex session expired. Run SubHarness: Sign In to Codex Subscription.", { cause: error });
 				}
 				this.cacheSubscriptionAccount(account.account);
 				return account.account;

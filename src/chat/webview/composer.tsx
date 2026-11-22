@@ -443,23 +443,15 @@ export function Composer({
 					<div class="composer-actions">
 						{cache ? <span class={`cache-indicator cache-${cache.level}`} title={cache.title}>{cache.text}</span> : null}
 						<ContextIndicator context={context} title={contextTitle} settings={contextSettings} />
-						{run.running && !onCancel ? (
-							<>
-								<button type="button" class="send-button send-button-stop" aria-label="Stop" title="Stop" onClick={onStop}>
-									<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-										<rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor" />
-									</svg>
-								</button>
-								{sendButton}
-							</>
-						) : (
-							<>
-								{onCancel ? (
-									<button type="button" class="composer-cancel" onClick={onCancel}>Cancel</button>
-								) : null}
-								{sendButton}
-							</>
-						)}
+						{run.running && !run.stopping && !onCancel ? (
+							<button type="button" class="send-button send-button-stop" aria-label="Stop" title="Stop" onClick={onStop}>
+								<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+									<rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor" />
+								</svg>
+							</button>
+						) : null}
+						{onCancel ? <button type="button" class="composer-cancel" onClick={onCancel}>Cancel</button> : null}
+						{sendButton}
 					</div>
 				</div>
 			</div>

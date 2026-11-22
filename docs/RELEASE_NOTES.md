@@ -1,89 +1,107 @@
-# AI Agent Bridge 1.21.0
+# SubHarness 2.0.5
 
-A stable release that consolidates the 1.20.13–1.20.23 patches: several
-ChatGPT subscriptions side by side, Codex turns that survive a prompt sent
-mid-flow, subscription statistics from complete windows only, and safer
-VS Code patches.
+AI Agent Bridge is now called SubHarness. Its own agent chat in the VS Code
+secondary side bar is the main place to work with your models and tools. These
+notes summarize versions 1.21.1 through 2.0.5 since the 1.21.0 stable release.
 
-## Several ChatGPT subscriptions
+## Upgrade notes
 
-- `llamacpp.codexAccounts` adds extra ChatGPT accounts. Each one gets its own
-  `CODEX_HOME` (default `~/.codex-<id>`), app-server process, file-based login,
-  native threads and usage windows, so two plans never mix. The built-in
-  account keeps `~/.codex` and the existing `codex::<model>` ids.
-- Quick Access → Codex → **ChatGPT Accounts** adds, switches, signs in, signs
-  out and removes accounts; a new account signs in by itself after the reload.
-  `llamacpp.codexShowAllAccounts` lists every account's models at once.
-- Codex sign-in no longer needs the official Codex extension; any Codex CLI can
-  be used through `llamacpp.codexCliPath`.
+- The repository is now `MrLordCat/SubHarness`, formerly
+  `MrLordCat/ai-agent-bridge`; old links redirect to the new address.
+- Versions before 2.0.5 cannot update automatically across the rename. Install
+  2.0.5 once by hand from
+  https://github.com/MrLordCat/SubHarness/releases/latest, choosing
+  `llama-vscode-chat-v2.0.5-win32-x64.vsix` or
+  `llama-vscode-chat-v2.0.5-linux-x64.vsix`, then run **Developer: Reload
+  Window**. Version 2.0.5 and later find updates under both repository names.
+- The extension id `mrlordcat.llama-vscode-chat`, settings, `llamacpp.*`
+  commands and saved chats remain unchanged. Quick Access stays in the activity
+  bar; the chat moves to the secondary side bar.
+- Each chat keeps its newest 1,000 requests and answers. Older entries are
+  deleted from the chat and its log when the chat opens or VS Code starts;
+  entries are not deleted by age.
 
-## Codex during an active agent flow
+## Chat
 
-- A prompt sent while a native VS Code tool is running reaches Codex. It used to
-  resume the old turn with only the tool result and drop the prompt; the turn
-  is now interrupted and the same thread continues with the result and the
-  prompt as one new user turn.
-- A tool result of an interrupted turn left deep in the chat history no longer
-  rejects later requests with "belongs to an interrupted Codex turn" until a
-  window reload. Only the current round is checked.
-- A reset ChatGPT window no longer keeps answering "limit reached": the gate
-  follows Codex's own window numbers, and limits read from error text are
-  verified before a request is refused.
-- Codex error notifications log their real message; errors Codex retries
-  itself are warnings, and "no active turn to interrupt" is no longer an error.
+- Use the chat in the side bar or open it in an editor tab. Choose Codex,
+  Claude, Coco, Cursor, DeepSeek or local models in a searchable picker grouped
+  by provider. Star favorites and choose a thinking level where available.
+- Search, switch, rename, export or delete chats from the history. Chats and
+  drafts, including attachments, survive a reload. Several chats can work in
+  the background; badges show running, waiting and unseen finished chats.
+- Send a message while an agent works to queue it after the current tool calls.
+  Remove queued messages before delivery; Stop returns them to the input.
+  Failed delivery also restores the message.
+- Attach selections, open editors, workspace files or other files, including
+  by paste and drag. Supported images reach models that accept them. Attachment
+  chips show failures and open the attached file or lines.
+- Edit a sent message with the full composer and optionally undo later file
+  changes. Copy messages and answers, jump to the latest message and expand
+  long messages, tool results and subagent steps.
+- File links and paths in answers open files at the indicated line; folder
+  links reveal folders in Explorer. A matching bare filename opens directly or
+  offers a choice. Images in tool results open in the image viewer.
+- Desktop notifications can announce a completed chat, approval or question
+  while VS Code is unfocused or minimized. Disable them with
+  `llamacpp.chat.systemNotifications`.
 
-## Subscriptions tab
+## Tools and changes
 
-- Every request counts in the provider window it ran in, a window spanning its
-  reset time minus 5 hours or 7 days. Requests after a reset no longer land in
-  the old window, and a Codex window that restarts right after a weekly 100%
-  takes back its own start instead of being split into two rows.
-- Finished windows and the capacity median keep only windows tracked from
-  start to end. A window first seen already in use, or one that kept rising
-  without requests from this extension, is shown while it runs, marked partial,
-  and never saved.
-- Codex records the tokens of failed and cancelled turns, including the turn
-  that runs into the usage limit, which every exhausted window used to miss.
+- The chat has tools for files, search, diagnostics, terminals, web pages,
+  images and language-server operations. The searchable Tools picker enables
+  groups; the agent can ask you to enable additional available tools.
+- Commands matching `llamacpp.chat.dangerousCommands` require Allow or Deny,
+  as do file edits outside the workspace and folder deletions. Stop denies a
+  pending approval. Other chat and bridge tools run directly.
+- The changed-files panel shows diffs as work progresses. Keep or Undo all
+  changes or individual files; Undo preserves later manual edits. Changes
+  survive reloads and stay separate when chats run concurrently. Git is needed
+  for change tracking.
+- Subagents can take on tasks with their own tools and show their progress and
+  report in the chat. Their changes join Keep/Undo and dangerous commands need
+  approval. Open subagents retain context for follow-up tasks and survive a
+  reload; you can close them from the chat.
+- Agent todos appear above the input and questions appear in cards. Terminals
+  belong to their chat or subagent and reuse idle terminals.
+- Stop shows a stopping state while changes are saved. Retry continues an
+  interrupted or failed answer with its work and file changes intact.
 
-## Patches and settings
+## Providers
 
-- The Copilot chat-history, workbench terminal and agent-host patches write
-  through a temporary file and a rename, take one cross-window lock, are
-  syntax-checked before writing, and restore in place: restoring one patch no
-  longer drops another, and an outdated backup is never copied over a newer
-  file.
-- `codexCliPath`, `claudeCliPath`, `cocoCliPath` and `codexAccounts` are
-  machine-scoped, so a workspace cannot choose the executable the extension
-  starts.
+- Sign in to Codex and Claude from the model picker when needed. Codex can
+  download and install the official CLI if none is available; Quick Access and
+  Providers Manager can install or update it. Claude sign-in uses the bundled
+  Claude Code CLI; signing out also signs Claude Code out on this computer.
+- Codex subagents use the newest available Luna and Terra models in the 6.x
+  family. Multiple Codex accounts keep their own available subagent models.
+- Coco receives images returned by tools. Its sessions refresh changed
+  instructions, recover after the CLI exits, and avoid repeated automatic
+  Snowflake sign-in checks. Denied built-in actions can leave the turn running
+  so Coco can use the chat tools.
+- Subagent choices distinguish local models, DeepSeek and other API profiles.
 
-## Other fixes
+## Context and memory
 
-- Subagents on bridge models work again: `runSubagent.model` lists the
-  qualified `Name (llamacpp)` labels VS Code resolves.
-- Links in answers open: attachment placeholders and Windows paths quoted by a
-  model become `file:` links, and links to missing files become code spans.
-- Coco reuses its idle terminal and changes directory in it instead of opening
-  a terminal per command, and only `cd`s into safe existing directories.
-- Long chats keep only the newest 100 images in the shared transcript
-  (`llamacpp.journalImageRetention`), so reloading them is fast again.
-- Quick Access is tidier: Claude limits show the reset on its own row, and
-  duplicated rows are merged.
+- The chat supplies workspace and project instructions, the open file and
+  selection, and shared memory to providers. The memory panel lets you search,
+  add, edit, pin and delete project and global entries.
+- When another model takes over a long chat, older context is summarized while
+  the full history remains visible. The compaction card shows the summary and
+  its source; recent tool rounds and your requests are retained. If DeepSeek
+  cannot summarize, the incoming model can do so, with an extract as fallback.
+- Click the context counter to adjust shared context and model-switch limits or
+  follow the Codex Sol window. The counter shows the model's full window and
+  its tooltip shows the answer reserve.
 
-## Verification
+## Usage and reliability
 
-- 964 extension-host tests passed on the installed VS Code, together with
-  compile, lint and metadata checks. Release CI repeats metadata checks, lint
-  and tests on Windows and Linux with VS Code 1.131 and 1.141 before packaging
-  and publication.
+- The composer and model picker show provider limits or balance, with reset
+  details. A limit card offers another model; after a five-hour Codex or Claude
+  limit, the chat can resume automatically after reset, including after reload.
+- A prompt-cache indicator shows the selected model's cache use since it took
+  over the chat. Coco's cache counters and Claude's usage reporting are more
+  accurate.
+- Long chats and tool output load more efficiently. Interrupted answers can
+  be retried after a reload, and the changes panel reports when it could not
+  list files from an interrupted turn.
 
-## Install from VSIX
-
-Installations of 1.20.0 or newer are offered this release by the updater.
-To install it manually, download the package matching your platform:
-
-```sh
-# Windows x64
-code --install-extension llama-vscode-chat-v1.21.0-win32-x64.vsix --force
-# Linux x64
-code --install-extension llama-vscode-chat-v1.21.0-linux-x64.vsix --force
-```

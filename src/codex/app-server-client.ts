@@ -317,7 +317,7 @@ export class CodexAppServerClient implements vscode.Disposable {
 				{
 					clientInfo: {
 						name: "llama-vscode-chat",
-						title: "AI Agent Bridge",
+						title: "SubHarness",
 						version: this.clientVersion,
 					},
 					capabilities: {

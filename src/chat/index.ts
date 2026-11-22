@@ -11,9 +11,10 @@ import { ChatAttachmentSource } from "./attachment-source";
 import { ChatChangeTracker } from "./changes/change-tracker";
 import { findGitExecutable } from "./changes/shadow-git";
 import { ChatController, type ChatAccountSource, type ChatQuotaSource } from "./chat-controller";
-import { registerChatView } from "./chat-view";
+import { ChatViewHost, registerChatView } from "./chat-view";
 import { CHAT_COMPACTION_TARGET_TOKENS, createChatSummarizer } from "./compaction";
 import { createChatContextSettingsSource } from "./context-settings";
+import { createVscodeFileReferenceOpener, openFileReference } from "./file-opener";
 import { createChatMemorySource } from "./memory-context";
 import { chatImageFileName } from "./image-file";
 import { createChatMemoryStore } from "./memory-store";
@@ -83,6 +84,30 @@ function registerChangeDiff(context: vscode.ExtensionContext, tracker: ChatChang
 			: changeUri(original.path, sessionId, id, true);
 		await vscode.commands.executeCommand("vscode.diff", left, right, `${path.posix.basename(original.path)} (agent changes)`);
 	};
+}
+
+/** Set once the chat was shown in the secondary side bar, its home since 2.0.5. */
+export const CHAT_REVEALED_KEY = "llamacpp.chat.secondarySidebarRevealed";
+
+/**
+ * Shows the chat in the secondary side bar once, so users find it after it moved there.
+ * Focus returns to the editor; later the side bar keeps whatever the user chose.
+ */
+export async function revealChatOnce(
+	state: { get(key: string): unknown; update(key: string, value: unknown): Thenable<void> },
+	run: (command: string) => Thenable<unknown> = command => vscode.commands.executeCommand(command),
+): Promise<boolean> {
+	if (state.get(CHAT_REVEALED_KEY) === true) {
+		return false;
+	}
+	await state.update(CHAT_REVEALED_KEY, true);
+	try {
+		await run("llamacpp.chat.focus");
+		await run("workbench.action.focusActiveEditorGroup");
+	} catch {
+		// The chat stays reachable from its side bar icon.
+	}
+	return true;
 }
 
 /** Wires the chat webview to a controller that runs agent turns through the composite provider. */
@@ -175,6 +200,10 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 			await vscode.workspace.fs.writeFile(uri, Buffer.from(image.data, "base64"));
 			await vscode.commands.executeCommand("vscode.open", uri);
 		},
+		openFileReference: async target => {
+			const opener = createVscodeFileReferenceOpener(() => folders().map(folder => folder.fsPath), ChatViewHost.panelViewType);
+			deps.log?.("chat.file_reference.opened", { outcome: await openFileReference(target, opener) });
+		},
 		saveExport: async (suggestedName, content) => {
 			const folder = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(os.homedir());
 			const target = await vscode.window.showSaveDialog({
@@ -222,6 +251,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 	const focusChat = async (): Promise<void> => {
 		await Promise.resolve(vscode.commands.executeCommand("llamacpp.chat.focus")).catch(() => undefined);
 	};
+	void revealChatOnce(context.globalState);
 	context.subscriptions.push(
 		terminals,
 		controller,

@@ -28,7 +28,7 @@
   - Copilot Chat — `runSubagent`, `model` из списка в его описании (сейчас
     `deepseek-flash (DeepSeek) (llamacpp)`, `GPT-6-Luna (Codex) (llamacpp)`,
     `GPT-6.1 Terra (Codex) (llamacpp)`);
-  - бридж-чат (AI Agent Bridge Chat) — `subagent`, `model` из списка в его
+  - чат SubHarness (бывший AI Agent Bridge Chat) — `subagent`, `model` из списка в его
     описании, а под Coco — из описания параметра `model` (сейчас
     `deepseek-flash (DeepSeek)`, `GPT-6-Luna (Codex)`, `GPT-6.1 Terra (Codex)`;
     вариант с ` (llamacpp)` тоже принимается).
@@ -186,7 +186,7 @@ bash scripts/stable-release.sh 1.20.2
 ```
 Тег `v*` запускает workflow Release: lint + тесты + `npm run package`,
 затем GitHub Release с платформенными VSIX для Windows и Linux. Описание релиза
-берётся из `docs/RELEASE_NOTES.md` (первая строка `# AI Agent Bridge 1.20.2`),
+берётся из `docs/RELEASE_NOTES.md` (первая строка `# SubHarness 1.20.2`),
 поэтому его и `CHANGELOG.md` обновляют ДО тега. Патчи тэгуются только по явной
 команде пользователя.
 

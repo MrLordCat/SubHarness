@@ -8,6 +8,14 @@ export interface ShadowGitOptions {
 	gitDir: string;
 	workTree: string;
 	timeoutMs?: number;
+	/** Upper bound on ignored files kept in the shadow index. */
+	maxIgnoredFiles?: number;
+}
+
+export interface ShadowGitSnapshot {
+	tree: string;
+	/** A comparison with this baseline cannot admit more ignored files. */
+	ignoredLimitReached: boolean;
 }
 
 /** One changed path between two trees. path is relative to workTree with forward slashes; a missing side is undefined. */
@@ -83,9 +91,12 @@ function acceptIndexFailure(code: number | null, stderr: string): boolean {
 }
 
 /** Ignored files worth recording: small regular files outside build and dependency folders. */
-async function collectIgnoredFiles(workTree: string, listing: Buffer): Promise<string[]> {
+async function collectIgnoredFiles(workTree: string, listing: Buffer, indexed: ReadonlySet<string>, limit: number): Promise<string[]> {
 	const files: string[] = [];
 	const addIfSmall = async (relative: string): Promise<void> => {
+		if (indexed.has(relative)) {
+			return;
+		}
 		try {
 			const info = await lstat(path.join(workTree, ...relative.split("/")));
 			if (info.isFile() && info.size <= MAX_IGNORED_FILE_BYTES) {
@@ -101,7 +112,7 @@ async function collectIgnoredFiles(workTree: string, listing: Buffer): Promise<s
 			return;
 		}
 		for (const entry of entries) {
-			if (files.length >= MAX_IGNORED_FILES) {
+			if (files.length >= limit) {
 				return;
 			}
 			if (entry.isSymbolicLink()) {
@@ -118,7 +129,7 @@ async function collectIgnoredFiles(workTree: string, listing: Buffer): Promise<s
 		}
 	};
 	for (const entry of listing.toString("utf8").split("\0")) {
-		if (files.length >= MAX_IGNORED_FILES) {
+		if (files.length >= limit) {
 			break;
 		}
 		if (entry.length === 0 || entry.split("/").some(segment => UNTRACKED_DIRECTORY_NAMES.has(segment))) {
@@ -217,7 +228,7 @@ export class ShadowGitRepo {
 	private initPromise: Promise<void> | undefined;
 
 	constructor(options: ShadowGitOptions) {
-		this.options = { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS };
+		this.options = { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS, maxIgnoredFiles: options.maxIgnoredFiles ?? MAX_IGNORED_FILES };
 		const environment: NodeJS.ProcessEnv = { ...process.env };
 		for (const key of CLEARED_ENV_KEYS) {
 			delete environment[key];
@@ -238,7 +249,7 @@ export class ShadowGitRepo {
 		return this.initPromise;
 	}
 
-	async snapshot(): Promise<string> {
+	async snapshot(baseline?: ShadowGitSnapshot): Promise<ShadowGitSnapshot> {
 		await this.init();
 		return this.enqueue(async () => {
 			await this.removeStaleIndexLock();
@@ -247,31 +258,46 @@ export class ShadowGitRepo {
 				label: "add",
 				acceptFailure: acceptIndexFailure,
 			});
-			const listing = await this.execGit(
-				["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
-				{ cwd: this.options.workTree, label: "ls-files" },
-			);
-			const ignored = await collectIgnoredFiles(this.options.workTree, listing);
-			if (ignored.length > 0) {
-				await this.execGit(
-					["--literal-pathspecs", "add", "-f", "--ignore-errors", "--pathspec-from-file=-", "--pathspec-file-nul"],
-					{
-						cwd: this.options.workTree,
-						input: Buffer.from(ignored.join("\0"), "utf8"),
-						label: "add-ignored",
-						acceptFailure: acceptIndexFailure,
-					},
-				);
-			}
+			// Forced entries remain in the shadow index. Count them toward the cap so a
+			// later snapshot cannot mistake the next batch of existing files for edits.
+			const ignoredLimitReached = baseline?.ignoredLimitReached || await this.stageIgnoredFiles();
 			const tree = await this.execGit(["write-tree"], { label: "write-tree" });
-			return tree.toString("utf8").trim();
+			return { tree: tree.toString("utf8").trim(), ignoredLimitReached };
 		});
 	}
 
-	diff(fromTree: string, toTree: string): Promise<ShadowTreeChange[]> {
+	private async stageIgnoredFiles(): Promise<boolean> {
+		const indexedListing = await this.execGit(
+			["ls-files", "--cached", "--ignored", "--exclude-standard", "-z"],
+			{ label: "ls-files" },
+		);
+		const indexed = new Set(indexedListing.toString("utf8").split("\0").filter(Boolean));
+		const available = this.options.maxIgnoredFiles - indexed.size;
+		if (available <= 0) {
+			return true;
+		}
+		const listing = await this.execGit(
+			["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+			{ label: "ls-files" },
+		);
+		const ignored = await collectIgnoredFiles(this.options.workTree, listing, indexed, available);
+		if (ignored.length > 0) {
+			await this.execGit(
+				["--literal-pathspecs", "add", "-f", "--ignore-errors", "--pathspec-from-file=-", "--pathspec-file-nul"],
+				{
+					input: Buffer.from(ignored.join("\0"), "utf8"),
+					label: "add-ignored",
+					acceptFailure: acceptIndexFailure,
+				},
+			);
+		}
+		return ignored.length === available;
+	}
+
+	diff(from: ShadowGitSnapshot, to: ShadowGitSnapshot): Promise<ShadowTreeChange[]> {
 		return this.enqueue(async () => {
 			const raw = await this.execGit(
-				["diff-tree", "-r", "-z", "--no-renames", "--no-commit-id", "--raw", fromTree, toTree],
+				["diff-tree", "-r", "-z", "--no-renames", "--no-commit-id", "--raw", from.tree, to.tree],
 				{ label: "diff-tree" },
 			);
 			return parseDiff(raw);

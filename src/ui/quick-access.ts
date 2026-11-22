@@ -129,11 +129,11 @@ export function buildUpdateItem(status: UpdateStatus, now = Date.now()): QuickAc
 	const action = status.installedVersion
 		? new QuickAccessItem("update.reload", "Reload Window", { description: `use ${status.installedVersion}`, icon: new vscode.ThemeIcon("refresh"), command: command("workbench.action.reloadWindow", "Reload Window") })
 		: status.available
-			? new QuickAccessItem("update.install", "Install Update", { description: status.installing ? "installing…" : `${latest}`, tooltip: `Download ${status.latest!.asset.name}, verify its SHA-256 digest and install it.`, icon: new vscode.ThemeIcon("cloud-download"), command: command("llamacpp.installUpdate", "Install AI Agent Bridge Update") })
+			? new QuickAccessItem("update.install", "Install Update", { description: status.installing ? "installing…" : `${latest}`, tooltip: `Download ${status.latest!.asset.name}, verify its SHA-256 digest and install it.`, icon: new vscode.ThemeIcon("cloud-download"), command: command("llamacpp.installUpdate", "Install SubHarness Update") })
 			: undefined;
-	return new QuickAccessItem("update", "AI Agent Bridge", {
+	return new QuickAccessItem("update", "SubHarness", {
 		description: `v${status.currentVersion} · ${summary}`,
-		tooltip: `Installed version ${status.currentVersion}. Releases come from github.com/MrLordCat/ai-agent-bridge.`,
+		tooltip: `Installed version ${status.currentVersion}. Releases come from github.com/MrLordCat/SubHarness.`,
 		icon: new vscode.ThemeIcon(status.available || status.installedVersion ? "cloud-download" : "versions"),
 		children: [
 			new QuickAccessItem("update.current", "Current Version", { description: status.currentVersion, icon: new vscode.ThemeIcon("tag") }),
@@ -147,7 +147,7 @@ export function buildUpdateItem(status: UpdateStatus, now = Date.now()): QuickAc
 				description: status.checking ? "checking…" : manualWait > 0 ? `again in ${Math.ceil(manualWait / 60_000)} min` : undefined,
 				tooltip: "Manual checks ask GitHub at most once every 5 minutes; a check within that time shows the last result.",
 				icon: new vscode.ThemeIcon("sync"),
-				command: command("llamacpp.checkForUpdates", "Check for AI Agent Bridge Updates"),
+				command: command("llamacpp.checkForUpdates", "Check for SubHarness Updates"),
 			}),
 			...(action ? [action] : []),
 			new QuickAccessItem("update.mode", "Automatic Updates", {

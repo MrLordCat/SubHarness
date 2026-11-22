@@ -54,7 +54,7 @@ const BUILTIN_GROUP_LABELS: Record<string, string> = {
 	[CHAT_TOOL_GROUPS.diagnostics]: "Diagnostics",
 	[CHAT_TOOL_GROUPS.planning]: "Planning and questions",
 	[CHAT_TOOL_GROUPS.agents]: "Subagents",
-	[CHAT_TOOL_GROUPS.bridge]: "AI Agent Bridge",
+	[CHAT_TOOL_GROUPS.bridge]: "SubHarness",
 };
 const GROUP_ORDER: readonly string[] = Object.keys(BUILTIN_GROUP_LABELS);
 const EXTERNAL_NOTE = "Run through VS Code, which may ask for confirmation in a dialog.";

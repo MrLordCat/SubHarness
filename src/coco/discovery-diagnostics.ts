@@ -30,7 +30,7 @@ export function classifyCocoDiscoveryError(error: unknown, stderr = ""): CocoDis
 }
 
 export function cocoDiscoveryFailureSummary(kind: CocoDiscoveryFailureKind, timeoutSeconds?: number): string {
-	const retry = "AI Agent Bridge: Show Coco Connection Status";
+	const retry = "SubHarness: Show Coco Connection Status";
 	switch (kind) {
 		case "timeout": return `Connection check timed out${timeoutSeconds === undefined ? "" : ` after ${timeoutSeconds}s`} — run ${retry} to retry`;
 		case "cancelled": return `Connection check cancelled — run ${retry} to retry`;

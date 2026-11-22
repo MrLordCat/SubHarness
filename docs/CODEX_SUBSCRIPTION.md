@@ -118,7 +118,7 @@ codex.chat.thread_reuse_miss events categorize reuse failures without logging
 conversation ids, text, or hashes.
 
 If the native VS Code transcript has already become too large, run
-`AI Agent Bridge: Continue Latest Codex Thread in New Chat`. The command arms the
+`SubHarness: Continue Latest Codex Thread in New Chat`. The command arms the
 newest durable completed Codex thread for 24 hours and opens a clean chat.
 Keep the same Codex model selected and send the next user message there. The
 provider resumes the inner Codex thread but does not serialize the old VS Code
@@ -144,7 +144,7 @@ usage are emitted through the normal language-model response stream.
 
 ## Live Diagnostics
 
-`AI Agent Bridge: Open Session Quality Report` updates while a Codex turn is running.
+`SubHarness: Open Session Quality Report` updates while a Codex turn is running.
 One logical user turn is upserted instead of duplicated across native tool
 result rounds. The report includes:
 
@@ -192,8 +192,8 @@ The provider resolves the executable in this order:
 4. `codex` on `PATH` (on Windows only `codex.exe`; an npm `codex.cmd` shim
    cannot be started without a shell)
 
-When none is found, `AI Agent Bridge: Sign In to Codex Subscription` offers to
-download the CLI first. `AI Agent Bridge: Install or Update Codex CLI` (also in
+When none is found, `SubHarness: Sign In to Codex Subscription` offers to
+download the CLI first. `SubHarness: Install or Update Codex CLI` (also in
 Quick Access → Codex and the Providers Manager) downloads the latest
 `@openai/codex` platform package from `registry.npmjs.org`, about 185 MB, and
 unpacks only `vendor/<target>` without the voice runtime, about 530 MB, into
@@ -203,12 +203,12 @@ leave the folder are refused, and the new binary must answer `--version`
 before `current.json` points to it. A newer version replaces the older one; a
 running app-server switches to it after Reload Window.
 
-Use `AI Agent Bridge: Sign In to Codex Subscription` for a managed browser OAuth
+Use `SubHarness: Sign In to Codex Subscription` for a managed browser OAuth
 flow. An existing ChatGPT session created with `codex login` is shared
 automatically. Signing out from the extension also signs out that shared local
 Codex CLI session.
 
-Use `AI Agent Bridge: Show Codex Subscription Status` to verify the ChatGPT plan and
+Use `SubHarness: Show Codex Subscription Status` to verify the ChatGPT plan and
 current Codex rate-limit window. OAuth tokens and the account email are not
 shown or written to extension logs.
 
@@ -250,8 +250,8 @@ dynamic VS Code tools. The sandbox itself still fences the internal tools.
 
 ### No Codex models in the picker
 
-Run `AI Agent Bridge: Show Codex Subscription Status`. A valid state is
-`Connected (<plan>)`. Then run `AI Agent Bridge: Refresh Models`.
+Run `SubHarness: Show Codex Subscription Status`. A valid state is
+`Connected (<plan>)`. Then run `SubHarness: Refresh Models`.
 
 If the status says `API auth blocked`, run `codex logout`, then sign in with a
 ChatGPT account through `codex login` or the extension command. This provider
@@ -259,7 +259,7 @@ does not use `OPENAI_API_KEY`.
 
 ### Codex CLI cannot be started
 
-Run `AI Agent Bridge: Install or Update Codex CLI`, install the official OpenAI
+Run `SubHarness: Install or Update Codex CLI`, install the official OpenAI
 extension, or set an absolute `llamacpp.codexCliPath`. After changing the path,
 reload VS Code and refresh models. The install logs
 `codex.cli_install.start` and `codex.cli_install.done`.

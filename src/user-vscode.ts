@@ -151,8 +151,8 @@ export async function prepareUserVsCode(appRoot: string, home: string,
 	const cli = path.join(installationRoot, "bin", application);
 	await writeLauncher(launcher, "#!/bin/sh\nunset VSCODE_IPC_HOOK_CLI VSCODE_PORTABLE ELECTRON_RUN_AS_NODE\nexec " + shellQuote(cli) + " --user-data-dir " + shellQuote(profileDir)
 		+ " --extensions-dir " + shellQuote(extensionsDir) + ' "$@"\n', 0o700);
-	await writeLauncher(desktopFile, "[Desktop Entry]\nType=Application\nName=AI Agent Bridge Code\n"
-		+ "Comment=User-owned VS Code for AI Agent Bridge\nExec=" + desktopQuote(launcher)
+	await writeLauncher(desktopFile, "[Desktop Entry]\nType=Application\nName=SubHarness Code\n"
+		+ "Comment=User-owned VS Code for SubHarness\nExec=" + desktopQuote(launcher)
 		+ " %F\nTerminal=false\nCategories=Development;IDE;\n", 0o600);
 	return { installationRoot, appRoot: path.join(installationRoot, "resources/app"),
 		executable: path.join(installationRoot, application), launcher, desktopFile,

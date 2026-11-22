@@ -1,4 +1,4 @@
-// Release retention for AI Agent Bridge.
+// Release retention for SubHarness.
 //
 // Keeps x.y.0 of the newest three release lines (1.20, 1.19, 1.18) and the two
 // newest patches of the newest line (1.20.2, 1.20.5). Older releases and their

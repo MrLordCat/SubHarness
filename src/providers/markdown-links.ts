@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { parseFileReference } from "../chat/shared/file-reference";
 
 /**
  * Chat prompts carry attachments as `http://_vscodecontentref_/N` placeholders.
@@ -91,9 +92,20 @@ function codeSpan(value: string): string {
 	return trimmed ? `\`${trimmed}\`` : "";
 }
 
-function fileLink(label: string, absolute: string): string {
+function fileLink(label: string, absolute: string, fragment = ""): string {
 	const text = label.trim() || path.basename(absolute);
-	return `[${text}](${vscode.Uri.file(absolute).toString()})`;
+	return `[${text}](${vscode.Uri.file(absolute).toString()}${fragment})`;
+}
+
+/** `#L12`, `#L12C3` or `#L12-L20` for a destination that names a position, so the rewritten link keeps it. */
+function positionFragment(destination: string): string {
+	const reference = parseFileReference(destination);
+	if (reference?.line === undefined) {
+		return "";
+	}
+	const column = reference.column === undefined ? "" : `C${reference.column}`;
+	const end = reference.endLine === undefined ? "" : `-L${reference.endLine}`;
+	return `#L${reference.line}${column}${end}`;
 }
 
 function reference(label: string, resolve: LinkResolver): string {
@@ -119,15 +131,15 @@ function rewriteDestination(label: string, rawDestination: string, resolve: Link
 			return reference(embedded[1], resolve);
 		}
 		const plainPath = decoded.replace(/^file:\/\/\/?/i, "").replace(/^\/([A-Za-z]:)/, "$1");
-		const found = resolve(plainPath);
-		return found ? fileLink(label, found) : codeSpan(plainPath);
+		const found = resolve(parseFileReference(destination)?.path ?? plainPath);
+		return found ? fileLink(label, found, positionFragment(destination)) : codeSpan(plainPath);
 	}
 	// Remote links and other schemes are the model's own and must not change.
 	if (SCHEME.test(destination) && !WINDOWS_ABSOLUTE.test(destination)) {
 		return undefined;
 	}
-	const found = resolve(destination);
-	return found ? fileLink(label, found) : undefined;
+	const found = resolve(parseFileReference(destination)?.path ?? destination);
+	return found ? fileLink(label, found, positionFragment(destination)) : undefined;
 }
 
 /**

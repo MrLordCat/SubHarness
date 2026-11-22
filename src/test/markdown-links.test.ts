@@ -66,6 +66,21 @@ suite("Chat markdown links", () => {
 		);
 	});
 
+	test("a resolved link keeps the line it points to", () => {
+		assert.strictEqual(
+			sanitizeChatMarkdown("[report](docs/report.md#L12)", resolver),
+			`[report](${vscode.Uri.file(REPORT).toString()}#L12)`
+		);
+		assert.strictEqual(
+			sanitizeChatMarkdown("[report](docs/report.md:5-9)", resolver),
+			`[report](${vscode.Uri.file(REPORT).toString()}#L5-L9)`
+		);
+		assert.strictEqual(
+			sanitizeChatMarkdown(`[report](${vscode.Uri.file(REPORT).toString()}#L3C7)`, resolver),
+			`[report](${vscode.Uri.file(REPORT).toString()}#L3C7)`
+		);
+	});
+
 	test("an absolute file that no longer exists stops being a link", () => {
 		const missing = "file:///D%3A/proj/deleted.md";
 		assert.strictEqual(sanitizeChatMarkdown(`[deleted.md](${missing})`, resolver), "`D:/proj/deleted.md`");

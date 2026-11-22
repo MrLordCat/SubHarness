@@ -52,7 +52,7 @@ Relevant settings:
 
 ## Provider Health Check
 
-Run `AI Agent Bridge: Run Provider Health Check` from the Command Palette or Quick
+Run `SubHarness: Run Provider Health Check` from the Command Palette or Quick
 Access. It performs read-only, non-generating checks:
 
 - model discovery for each configured source;
@@ -70,7 +70,7 @@ configuration is active, and `INFO` records expected provider-specific behavior.
 
 ## Session Quality Report
 
-Run `AI Agent Bridge: Open Session Quality Report` to open the live webview for
+Run `SubHarness: Open Session Quality Report` to open the live webview for
 metrics accumulated since extension activation or the last reset. It updates
 without replacing the webview document, preserving expanded rows and active
 model/search/issues-only filters. Turn details use stable request ids, so a new
@@ -101,13 +101,13 @@ preserved across updates.
 Reports contain metrics and model ids only. They do not retain message or tool
 result bodies. Markdown and JSON snapshots are updated automatically under
 `<globalStorage>/reports/`, so a completed run remains inspectable outside the
-webview. Use `AI Agent Bridge: Reset Session Metrics` before a controlled test.
+webview. Use `SubHarness: Reset Session Metrics` before a controlled test.
 
 ## Usage Experiments
 
-Use `AI Agent Bridge: Start Baseline Usage Experiment` and `AI Agent Bridge: Start
+Use `SubHarness: Start Baseline Usage Experiment` and `SubHarness: Start
 Delegated Usage Experiment` with the exact same task label to compare two
-routing strategies. Stop each run with `AI Agent Bridge: Stop and Export Usage
+routing strategies. Stop each run with `SubHarness: Stop and Export Usage
 Experiment`; the tracker records bounded provider usage samples and exports a
 Markdown/JSON comparison. This is intended for controlled repeated tasks, not
 for comparing unrelated prompts or different model/effort settings.

@@ -4,10 +4,15 @@ The extension has its own chat, independent of Copilot Chat. It talks to the
 same models (Codex, Claude, DeepSeek, custom APIs, local servers, Coco) and
 runs its own tools directly.
 
-Open it from the **AI Agent Bridge** activity bar container → **Chat**, or run
-**AI Agent Bridge: Open Chat in Editor** for an editor tab. The sidebar and the
-tab show the same chat; a wide tab keeps the messages and the input in one
-centered column.
+The chat lives in the secondary side bar, next to Copilot Chat, Claude Code
+and Codex: click its **SubHarness** icon there. The first start after the
+update opens it once. If the secondary side bar is hidden, show it with the
+layout button in the title bar or **View: Toggle Secondary Side Bar
+Visibility**; VS Code then keeps it open across restarts. You can drag the
+chat to the primary side bar or the panel like any other view. **SubHarness:
+Open Chat in Editor** opens it as an editor tab. The side bar and the tab show
+the same chat; a wide tab keeps the messages and the input in one centered
+column. Quick Access stays in the **SubHarness** activity bar container.
 
 ## Writing a message
 
@@ -168,14 +173,16 @@ Files the agent changes are listed above the input. Open one to see its diff,
 then **Keep** or **Undo** single files or all of them. Undo restores a file only
 while it still holds the agent's version, so later edits by hand survive.
 
-The list updates after every tool call that may write, so it grows while the
-agent works; Keep and Undo unlock when the answer ends.
+The list updates after tool calls that may write. After you press **Stop**,
+the chat shows **Stopping…** while it saves the final file list. **Keep** and
+**Undo** unlock when **Stopped.** appears.
 
 The bridge records changes with a private git snapshot of the workspace
-folders in the extension's storage; your repository is not touched. Files your
-`.gitignore` excludes are recorded too, except build and dependency folders
-(`node_modules`, `out`, `dist`, `build`, `target`, `.vscode-test`, `.venv` and
-similar) and ignored files over 1 MB.
+folders in the extension's storage. The snapshot before the first tool that
+may write includes files that already exist, including untracked files.
+Ignored files are also recorded up to a limit, excluding build and dependency
+folders (`node_modules`, `out`, `dist`, `build`, `target`, `.vscode-test`, `.venv`
+and similar) and ignored files over 1 MB.
 
 When two chats work at the same time, a chat lists only the files its own
 edit tools wrote, and says how many other changed files it left out. Undo in
@@ -191,6 +198,14 @@ edit the same file.
   and the tooltip of a sent message shows when it was sent.
 - A sent message longer than twelve lines or 800 characters is folded;
   **Show more** unfolds it.
+- File links in answers open the file. This includes Markdown links
+  (`[report](docs/report.md#L12)`), `file:` links and file paths in inline
+  code (`src/chat/index.ts:40`). A line or range opens the file there, and a
+  folder reveals itself in the Explorer. A path that is not in a workspace
+  folder is searched by its tail. Several matches ask which one to open. When
+  the chat is an editor tab, the file opens in another editor group. Inline
+  code counts as a path only when it ends in a known file extension, so code
+  identifiers such as `Promise.all` stay plain text.
 
 ## Editing a sent message
 
@@ -230,8 +245,10 @@ Windows, Notification Center on macOS, `notify-send` on Linux). Set
 
 The `subagent` tool lets the model hand a self-contained task to a cheaper
 model from the bridge's subagent list. The task runs with the same tools, but
-without its own subagents. Its card shows the model, the task and the current
-step; expand it for the prompt, every step and the report.
+without its own subagents. The main agent's independent tool calls from the
+same model response can run while the subagent works. The model receives all
+results before its next response. The subagent card shows the model, the
+task and the current step. Expand it for the prompt, steps and report.
 
 With `keepOpen` the subagent stays open after its report, with its own
 conversation. The model checks the work and either closes it with
@@ -319,11 +336,11 @@ the changes panel says so.
 
 | Command | Where |
 | --- | --- |
-| AI Agent Bridge: New Chat | Chat view title |
-| AI Agent Bridge: Show Chats | Chat view title |
-| AI Agent Bridge: Open Chat in Editor | Chat view title |
-| AI Agent Bridge: Add Selection to Chat | Editor context menu |
-| AI Agent Bridge: Add File to Chat | Explorer context menu |
+| SubHarness: New Chat | Chat view title |
+| SubHarness: Show Chats | Chat view title |
+| SubHarness: Open Chat in Editor | Chat view title |
+| SubHarness: Add Selection to Chat | Editor context menu |
+| SubHarness: Add File to Chat | Explorer context menu |
 
 ## Where chats are stored
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates brand assets for AI Agent Bridge.
+"""Generates brand assets for SubHarness.
 
 Run from the repo root with the project venv:
     .venv/Scripts/python.exe scripts/generate-brand-assets.py
@@ -178,12 +178,12 @@ def draw_social_preview():
     text_x = 560
     text_w = w - text_x - 56
 
-    f_title = fit_font(d, "AI Agent Bridge", FONT_BOLD, text_w, 96)
+    f_title = fit_font(d, "SubHarness", FONT_BOLD, text_w, 96)
     f_sub = fit_font(d, "Local models, DeepSeek, Codex and Claude", FONT_REG, text_w, 44)
 
     title_y = 150
-    d.text((text_x, title_y), "AI Agent Bridge", font=f_title, fill=TEXT)
-    title_h = text_size(d, "AI Agent Bridge", f_title)[1]
+    d.text((text_x, title_y), "SubHarness", font=f_title, fill=TEXT)
+    title_h = text_size(d, "SubHarness", f_title)[1]
     sub_y = title_y + title_h + 28
     d.text((text_x, sub_y), "Local models, DeepSeek, Codex and Claude", font=f_sub, fill=MUTED)
     sub_h = text_size(d, "Local models, DeepSeek, Codex and Claude", f_sub)[1]
@@ -222,7 +222,7 @@ def draw_architecture():
     img = vertical_gradient((w, h), BG_TOP, BG_BOTTOM).convert("RGBA")
     d = ImageDraw.Draw(img)
 
-    d.text((48, 32), "AI Agent Bridge — request flow", font=ImageFont.truetype(FONT_BOLD, 40), fill=TEXT)
+    d.text((48, 32), "SubHarness — request flow", font=ImageFont.truetype(FONT_BOLD, 40), fill=TEXT)
 
     def arrow_right(color, x, cy):
         d.line([(x, cy), (x - 14, cy - 10)], fill=color, width=4)
@@ -271,7 +271,7 @@ def draw_architecture():
     rounded_panel(img, [cx0, cy0, cx0 + center_w, cy0 + center_h], 24, PANEL, TEAL, 4)
     f_box = ImageFont.truetype(FONT_BOLD, 30)
     f_small = ImageFont.truetype(FONT_REG, 22)
-    d.text((cx0 + 24, cy0 + 12), "AI Agent Bridge", font=f_box, fill=TEXT)
+    d.text((cx0 + 24, cy0 + 12), "SubHarness", font=f_box, fill=TEXT)
     center_sub = "routing · guardrails · cache"
     center_sub_font = fit_font(d, center_sub, FONT_REG, center_w - 48, 22, 18)
     d.text((cx0 + 24, cy0 + 46), center_sub, font=center_sub_font, fill=MUTED)

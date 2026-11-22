@@ -3,6 +3,7 @@ import { LIMIT_SIGNAL_OPTION, parseLimitSignal, type LimitSignal } from "../prov
 import { parsePromptCacheSignal, PROMPT_CACHE_OPTION } from "../providers/prompt-cache-signal";
 import { toLanguageModelMessages } from "./lm-messages";
 import { appendChatText, type ChatMessage, type ChatPart, type ChatPromptCache, type ChatStructuredPart, type ChatTextKind, type ChatToolImage, type ChatUsage, type ChatUsageTotals } from "./shared/protocol";
+import { SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
 
 export interface AgentTurnSink {
 	text(kind: ChatTextKind, text: string): void;
@@ -134,6 +135,9 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 	const completed: ChatUsageTotals = { requests: 0, promptTokens: 0, cachedTokens: 0, completionTokens: 0, cacheReported: 0, cachedPromptTokens: 0 };
 	let roundUsage: ChatUsage | undefined;
 	for (let round = 1; round <= maxRounds; round++) {
+		if (request.token.isCancellationRequested) {
+			throw new vscode.CancellationError();
+		}
 		roundUsage = undefined;
 		const roundCache: ChatPromptCache[] = [];
 		const calls: Array<{ callId: string; name: string; input: unknown }> = [];
@@ -211,10 +215,13 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 		for (const cache of roundCache) {
 			addPromptCache(completed, cache);
 		}
+		if (request.token.isCancellationRequested) {
+			throw new vscode.CancellationError();
+		}
 		if (calls.length === 0) {
 			return { rounds: round, stopReason: "done" };
 		}
-		for (const call of calls) {
+		const invoke = async (call: typeof calls[number]): Promise<void> => {
 			if (request.token.isCancellationRequested) {
 				throw new vscode.CancellationError();
 			}
@@ -236,6 +243,21 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 			};
 			request.sink.part(result);
 			parts.push(result);
+		};
+		let subagents = Promise.resolve();
+		try {
+			for (const call of calls) {
+				if (call.name === SUBAGENT_TOOL_NAME) {
+					// Keep delegated calls ordered while letting the main agent's tools run.
+					subagents = subagents.then(() => invoke(call));
+					void subagents.catch(() => undefined);
+				} else {
+					await invoke(call);
+				}
+			}
+		} finally {
+			// The provider needs every result before it can continue this tool round.
+			await subagents;
 		}
 		if (request.token.isCancellationRequested) {
 			throw new vscode.CancellationError();

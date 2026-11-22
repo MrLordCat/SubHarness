@@ -326,6 +326,32 @@ body.vscode-light {
 	text-decoration: underline;
 }
 
+.md .md-file-link {
+	color: var(--vscode-textLink-foreground);
+	cursor: pointer;
+	text-decoration: none;
+}
+
+.md .md-file-link:hover,
+.md .md-file-link:focus-visible {
+	color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+	text-decoration: underline;
+}
+
+.md-inline-code.md-file-ref {
+	color: var(--vscode-textLink-foreground);
+	cursor: pointer;
+}
+
+.md-inline-code.md-file-ref:hover {
+	text-decoration: underline;
+}
+
+.md-file-link:focus-visible,
+.md-inline-code.md-file-ref:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+}
+
 .md-inline-code,
 .md-code code,
 .tool-output,

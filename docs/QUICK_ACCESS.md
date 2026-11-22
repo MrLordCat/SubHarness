@@ -45,7 +45,7 @@ are hidden until they recover, while Coco keeps its reconnect controls.
 API profiles remain inspectable with their state. Model selection is available
 from Models by Provider; reasoning controls remain in the native model picker.
 
-The last root group, **AI Agent Bridge**, shows the installed version, the last
+The last root group, **SubHarness**, shows the installed version, the last
 update check with the latest stable release, Check for Updates, Install Update
 or Reload Window when an update applies, and the Automatic Updates mode.
 `ExtensionUpdater` owns the check state in global storage, so every window shows

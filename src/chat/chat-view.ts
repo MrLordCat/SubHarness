@@ -20,7 +20,7 @@ export function renderChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri
 	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src ${webview.cspSource}; img-src ${webview.cspSource} data:; font-src ${webview.cspSource};">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<link rel="stylesheet" href="${style}">
-	<title>AI Agent Bridge Chat</title>
+	<title>SubHarness Chat</title>
 </head>
 <body>
 	<div id="root"></div>
@@ -32,7 +32,7 @@ export function renderChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri
 export class ChatViewHost implements vscode.WebviewViewProvider, vscode.Disposable {
 	static readonly viewId = "llamacpp.chat";
 	static readonly panelViewType = "llamacpp.chatPanel";
-	static readonly panelTitle = "AI Agent Bridge Chat";
+	static readonly panelTitle = "SubHarness Chat";
 
 	private readonly _extensionUri: vscode.Uri;
 	private readonly _bridge: ChatWebviewBridge;

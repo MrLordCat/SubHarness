@@ -55,8 +55,8 @@ PATCH=$(echo "$VERSION" | cut -d. -f3)
 if [ "$PATCH" = "0" ]; then KIND="Stable release"; else KIND="Release"; fi
 
 # --- Описание релиза должно быть для этой версии (его проверяет и workflow) ---
-if ! head -n 1 docs/RELEASE_NOTES.md | grep -qx "# AI Agent Bridge ${VERSION}"; then
-  echo -e "${RED}ОШИБКА: docs/RELEASE_NOTES.md должен начинаться с '# AI Agent Bridge ${VERSION}'${NC}"
+if ! head -n 1 docs/RELEASE_NOTES.md | grep -qx "# SubHarness ${VERSION}"; then
+  echo -e "${RED}ОШИБКА: docs/RELEASE_NOTES.md должен начинаться с '# SubHarness ${VERSION}'${NC}"
   exit 1
 fi
 

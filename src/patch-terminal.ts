@@ -28,7 +28,7 @@ export class PatchTerminalSession implements vscode.Disposable {
 		private readonly host: PatchTerminalHost = vscode.window,
 		private readonly integrationTimeoutMs = 10_000
 	) {
-		this.terminal = host.createTerminal({ name: "AI Agent Bridge Patch", shellPath: "/bin/bash" });
+		this.terminal = host.createTerminal({ name: "SubHarness Patch", shellPath: "/bin/bash" });
 		this.subscriptions.push(
 			host.onDidCloseTerminal(terminal => {
 				if (terminal === this.terminal) { this.finish(false, false); }

@@ -332,6 +332,9 @@ function handleWebviewMessage(message: WebviewMessage): void {
 		case "addAttachments":
 			emitDroppedAttachments(message.uris);
 			break;
+		case "openFileReference":
+			console.info(`harness: open file ${message.target}`);
+			break;
 		case "openToolImage":
 			console.info(`harness: open image ${message.messageId} ${message.callId} ${message.index}`);
 			break;
@@ -1296,7 +1299,7 @@ function addToolCallGroup(parts: ChatPart[], index: number): void {
 function assistantMarkdown(index: number, random: () => number): string {
 	const samples = [
 		`### Answer ${index}\n\nThe layout keeps a height per message and rebuilds prefix sums lazily.\n\n- Virtualized list\n- One ResizeObserver\n  - Heights feed \`setHeight\`\n- Sticky bottom only within 40 px\n\n\`\`\`ts\nconst layout = new VirtualLayout(80);\nlayout.setCount(5000);\n\`\`\``,
-		"Here is a short summary with **strong text**, *emphasis*, `inline code` and a [safe link](https://example.com).\n\n> A blockquote line.\n\n---\n\nThat is all.",
+		"Here is a short summary with **strong text**, *emphasis*, `inline code`, `src/chat/webview/store.ts`, [markdown.tsx](src/chat/webview/markdown.tsx#L40) and a [safe link](https://example.com).\n\n> A blockquote line.\n\n---\n\nThat is all.",
 		"| Metric | Budget |\n| --- | ---: |\n| Typing latency | 16 ms |\n| Rendered messages | ~20 |\n| Estimates | 80 px |",
 		"1. First step\n2. Second step\n   - nested bullet\n   - another bullet\n3. Third step",
 	];

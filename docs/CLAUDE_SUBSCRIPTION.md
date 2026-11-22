@@ -13,7 +13,7 @@ does not read Claude credential files.
 
 ## Sign-in
 
-The Claude Code extension is not needed. `AI Agent Bridge: Sign In to Claude
+The Claude Code extension is not needed. `SubHarness: Sign In to Claude
 Subscription` runs the bundled runtime (`claude-agent-sdk-<platform>/claude`,
 or `llamacpp.claudeCliPath`) as `claude auth login --claudeai` in a terminal:
 it opens the browser and may ask for a code. When the command ends or the

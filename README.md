@@ -1,113 +1,90 @@
-<p align="center"><img src="assets/logo.png" alt="AI Agent Bridge logo" width="128"></p>
+<p align="center"><img src="assets/logo.png" alt="SubHarness logo" width="128"></p>
 
-# AI Agent Bridge for VS Code
+# SubHarness for VS Code
 
-Use local models, custom APIs, DeepSeek, Codex, Claude and Snowflake Coco in
-the normal VS Code Chat. Keep its file tools, terminal, approval prompts and
-model picker. Quick Access puts connections, model settings and diagnostics
-in one sidebar.
+Formerly **AI Agent Bridge**. The repository moved from
+`MrLordCat/ai-agent-bridge` to `MrLordCat/SubHarness`; old links redirect.
 
-[![GitHub release](https://img.shields.io/github/v/release/MrLordCat/ai-agent-bridge?label=release)](https://github.com/MrLordCat/ai-agent-bridge/releases/latest)
-[![License](https://img.shields.io/github/license/MrLordCat/ai-agent-bridge)](LICENSE)
-[![CI](https://github.com/MrLordCat/ai-agent-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/MrLordCat/ai-agent-bridge/actions/workflows/ci.yml)
+One agent chat in VS Code for your AI subscriptions and models: Codex with a
+ChatGPT account, Claude, Cursor, Snowflake Coco, DeepSeek, custom APIs and
+local llama.cpp servers. The chat runs its own tools with approval prompts,
+hands work to subagents on cheaper models and keeps one working context when
+you switch models. Quick Access puts connections, model settings and
+diagnostics in one sidebar.
 
-## Why patch Copilot?
+[![GitHub release](https://img.shields.io/github/v/release/MrLordCat/SubHarness?label=release)](https://github.com/MrLordCat/SubHarness/releases/latest)
+[![License](https://img.shields.io/github/license/MrLordCat/SubHarness)](LICENSE)
+[![CI](https://github.com/MrLordCat/SubHarness/actions/workflows/ci.yml/badge.svg)](https://github.com/MrLordCat/SubHarness/actions/workflows/ci.yml)
 
-Copilot supplies the Chat interface even when you select a model from this
-extension. Some versions give connected models fewer controls or impose limits
-that do not match the model. The patches change small parts of installed
-Copilot/VS Code files to fix those limitations.
+## The chat
 
-These are concrete examples on affected builds:
+The chat lives in the secondary side bar, next to the other agent chats: click
+its **SubHarness** icon there. The first start opens it once. **SubHarness:
+Open Chat in Editor** opens the same chat as an editor tab.
 
-| What you want to do | Without the relevant patch | What the patch changes |
-| --- | --- | --- |
-| Use little reasoning for a typo fix, more for a difficult bug | The native **Thinking Effort** control can be missing | Exposes the control and forwards your choice to the model |
-| Get a long code answer from a model that allows 32,768 output tokens | Copilot's wrapper reports a fixed limit of 8,192 tokens | Uses the model's advertised output limit; the model's own limits still apply |
-| Continue a long conversation on a model with a large context window | Copilot can use an old smaller budget and summarize before the extension needs to | Uses the model's advertised window and lets the extension manage when and how to shorten history |
-| Run tests that print thousands of log lines | Large tool results accumulate in saved chat history | Bounds saved tool output, while the live tool card keeps its result |
-| Run another command after a timed-out command has finished | VS Code can leave the old terminal in the background and create another tab | Reuses the idle terminal instead of accumulating tabs |
-| Use a connected model in the **Agents Window** on VS Code 1.131 | The reasoning picker is missing; some requests fail because VS Code returns the wrong response format | Adds the picker and fixes the response format; newer builds with native support skip this patch |
+- **Models:** the picker groups models by provider and shows each provider's
+  5-hour and weekly limits or its balance.
+- **Tools:** files, search and terminal, with approval prompts for dangerous
+  commands. **Keep/Undo** reviews every file a turn changed.
+- **Subagents:** the agent can hand bounded steps to cheaper models and keeps
+  working while they run.
+- **One working context:** switching models compacts the conversation instead
+  of losing it.
+- **Everyday work:** attachments, editing sent messages, queued messages while
+  the agent works, chat history, chats that keep running in the background,
+  and clickable file links in answers.
 
-**Do you need them?** They are recommended for these controls and long agent
-conversations. Basic model selection and chat can work without them. The
-context-usage counter also works without a patch. They do not add model
-intelligence, a subscription or access to paid models.
-
-Compatible patches apply automatically when the extension starts. Reload after
-the notification. Original files are backed up; unknown bundle layouts are
-reported instead of patched. A VS Code update may require applying them again.
-
-Quick Access → **Copilot Patches** has apply, status and restore actions.
-`llamacpp.autoPatchCopilot` controls the Copilot patch;
-`llamacpp.workbenchTerminalPatchEnabled` and
-`llamacpp.agentHostThinkingPatchEnabled` control the other two.
-Implementation details: [Patch v28](docs/COPILOT_PATCH.md).
+See [the chat guide](docs/CHAT.md).
 
 ## Install
 
-Requires **VS Code 1.131+**, GitHub Copilot Chat and Windows x64 or Linux x64.
+Requires **VS Code 1.131+** on Windows x64 or Linux x64.
 
-1. Download your platform's VSIX from [Releases](https://github.com/MrLordCat/ai-agent-bridge/releases/latest).
+1. Download your platform's VSIX from [Releases](https://github.com/MrLordCat/SubHarness/releases/latest).
 2. Open Extensions → **…** → **Install from VSIX…**, or use the CLI:
 
    ```sh
    # Windows x64
-   code --install-extension llama-vscode-chat-v1.21.0-win32-x64.vsix
+   code --install-extension llama-vscode-chat-v2.0.5-win32-x64.vsix
    # Linux x64
-   code --install-extension llama-vscode-chat-v1.21.0-linux-x64.vsix
+   code --install-extension llama-vscode-chat-v2.0.5-linux-x64.vsix
    ```
 
-3. Run **Developer: Reload Window**, then reload again if a patch notification asks.
+3. Run **Developer: Reload Window**.
 
 ### Updates
 
-From 1.20.0 the extension checks the latest GitHub release every 5 hours
-(30 minutes after a check that could not reach GitHub) and offers a newer
-version. Patch releases such as 1.20.2 are offered too. Manual checks ask
-GitHub at most once every 5 minutes. The **AI Agent Bridge** group in Quick Access shows
-the installed version and the time of the last check. It also has **Check for
-Updates**, **Install Update** and the **Automatic Updates** mode. The setting
-`llamacpp.autoUpdate` is `notify` (default), `install` (download, verify and
-install, then offer a reload) or `off` (manual checks only). The package is
-downloaded only from this repository's releases and is installed only when its
-SHA-256 digest matches the release. An older release never replaces a newer
-local build.
+The extension checks the latest GitHub release every 5 hours (30 minutes after
+a check that could not reach GitHub) and offers a newer version. Manual checks
+ask GitHub at most once every 5 minutes. The **SubHarness** group in Quick
+Access shows the installed version and the time of the last check. It also has
+**Check for Updates**, **Install Update** and the **Automatic Updates** mode.
+The setting `llamacpp.autoUpdate` is `notify` (default), `install` (download,
+verify and install, then offer a reload) or `off` (manual checks only). The
+package is downloaded only from this repository's releases and is installed
+only when its SHA-256 digest matches the release. An older release never
+replaces a newer local build.
 
-### Linux: system-owned VS Code
-
-If the application files are read-only, the extension offers:
-
-- **Prepare User VS Code (no root):** creates a writable copy in your home.
-  Extensions are shared, but the copy has separate settings and accounts.
-  Launch **AI Agent Bridge Code** or `~/.local/bin/code-ai-agent-bridge`.
-- **Apply patches with administrator rights:** authorize changes to the current
-  installation. If graphical authorization is unavailable, a terminal uses
-  `sudo` or `su`. Enter your user's password for sudo, or root's password for su.
-
-After a failed password entry, **Apply Patch** offers **Retry in Terminal** or
-**Close Attempt** to start again. Reload after success. In SSH, WSL or Dev
-Containers, prepare the desktop application on the computer displaying the window.
-
-[Installation and recovery details](docs/COPILOT_PATCH.md#apply-and-restore) ·
-[Manual Debian desktop in Docker](docs/DEBIAN_GUI.md)
+Versions before 2.0.5 do not recognize the new repository name: install 2.0.5
+once from [Releases](https://github.com/MrLordCat/SubHarness/releases/latest),
+then updates arrive as before.
 
 ## Connect a model
 
-Open **AI Agent Bridge: Open Sidebar**, enable the sources you need, configure
-one below, then run **AI Agent Bridge: Refresh Models**. Select its model in
-the normal Chat picker.
+Open **SubHarness: Open Sidebar**, enable the sources you need, configure
+one below, then run **SubHarness: Refresh Models**. Select its model in the
+chat's model picker.
 
 | Source | Setup |
 | --- | --- |
 | Local llama.cpp / compatible server | Start the server, then run **Set Local Server URL** |
-| Custom API, including OpenRouter and Cloudflare | Quick Access → **Providers Manager** → add a profile and API key |
+| Custom API, including OpenRouter, Cloudflare and Cursor | Quick Access → **Providers Manager** → add a profile and API key |
 | DeepSeek | Run **Configure DeepSeek** and enter the API key |
 | Codex with a ChatGPT account | Run **Sign In to Codex Subscription**; without the OpenAI extension or `codex` on PATH it offers to download the official Codex CLI |
 | Claude | The VSIX includes its platform runtime; run **Sign In to Claude Subscription** (the Claude Code extension is not needed) |
 | Snowflake Coco | Install the Snowflake extension, configure a CLI connection, then check Quick Access → **Coco** |
 
-Command names above use the **AI Agent Bridge:** prefix. Accounts, model access
+Command names above use the **SubHarness:** prefix. Accounts, model access
 and server availability are required separately. API keys are stored in VS Code
 SecretStorage; subscription sign-in is handled by the corresponding runtime.
 
@@ -125,7 +102,7 @@ the active one. The same group holds everything afterwards:
 - each account has **Sign In** (or **Sign In Again**) and **Sign Out** of its
   own; signing out of one keeps the other signed in;
 - selecting an account makes it the active one, and its models replace the
-  others in the chat model picker immediately;
+  others in the model picker immediately;
 - **Remove Account** takes an account out of the list; its `~/.codex-<id>`
   folder and login stay on disk, so adding the same id again restores them;
 - threads, the last used model and the usage windows are tracked per account,
@@ -149,20 +126,18 @@ working; only the picker follows the active account. The built-in account keeps
 the historical `codex::` model ids, so existing chats and settings are
 unchanged.
 
+### Snowflake Coco
+
 Coco uses the CLI's credentials, so it may require a separate browser sign-in.
 Its commands run in visible `Coco` terminals where you can type, interrupt or
 close them. Images and reasoning choices depend on the connected runtime.
-[Full Coco setup and behavior](docs/COCO.md).
+Coco keeps conversation sessions across requests and reloads and reports
+native token and cache usage. See [Coco setup and behavior](docs/COCO.md) and
+[Coco continuity and cache verification](docs/COCO_CONTINUITY.md).
 
-Coco keeps conversation sessions across requests and reloads, restores available
-Chat history when switching from Codex, and reports native token/cache usage.
-See [Coco continuity and cache verification](docs/COCO_CONTINUITY.md).
+## More features
 
-## Useful features
-
-- **Chat (preview):** the bridge's own chat view and editor tab, independent of Copilot Chat: its own tools with approvals for dangerous commands, attachments, editing sent messages, chat history with chats that keep running in the background, subagents on cheaper models, context compaction when you switch models, and Keep/Undo for changed files. See [the chat guide](docs/CHAT.md).
 - **Session Quality / Live Report:** inspect usage, cache, context and slow steps.
-- **Continue Latest Codex/Claude Session in New Chat:** resume work with a clean Chat transcript.
 - **Shared Memory:** save and retrieve project information across conversations.
 
 <details>
@@ -178,14 +153,14 @@ See [Coco continuity and cache verification](docs/COCO_CONTINUITY.md).
 
 ## Documentation
 
+- Chat: [the chat guide](docs/CHAT.md).
 - Providers: [APIs](docs/API_PROVIDERS.md), [Codex](docs/CODEX_SUBSCRIPTION.md),
   [Claude](docs/CLAUDE_SUBSCRIPTION.md), [Coco](docs/COCO.md).
-- Chat integration: [patches](docs/COPILOT_PATCH.md),
-  [Agents Window](docs/AGENTS_WINDOW_INTEGRATION.md), [bridge chat](docs/CHAT.md).
 - Long conversations: [tokens, reasoning and cache](docs/TOKENS_REASONING_CACHE.md),
   [memory](docs/MEMORY.md), [diagnostics](docs/RELIABILITY_DIAGNOSTICS.md).
 - Development: [architecture](docs/ARCHITECTURE.md), [agent tools](docs/AGENT_TOOLS_GUIDE.md),
-  [audit](docs/AUDIT.md), [Debian verification](docs/DEBIAN_VERIFICATION.md).
+  [audit](docs/AUDIT.md), [Debian verification](docs/DEBIAN_VERIFICATION.md),
+  [Debian desktop in Docker](docs/DEBIAN_GUI.md).
 - [Changelog](CHANGELOG.md) · [Release notes](docs/RELEASE_NOTES.md).
 
 ## Development
@@ -194,16 +169,16 @@ See [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md),
 [provider architecture](docs/PROVIDER_ARCHITECTURE.md), and
 [Quick Access](docs/QUICK_ACCESS.md) for the current maintenance contracts.
 
-**Stable release: 1.21.0. Current build: 2.0.2.**
+**Latest release: 2.0.5. Current build: 2.0.5.**
 
 ```sh
 npm ci
 npm run compile
 npm run check:metadata
 npm run lint
-npm test              # 1519 extension-host tests on VS Code 1.143.1 in the current 2.0.2 build
+npm test              # 1540 extension-host tests on VS Code 1.143.1 in the current 2.0.5 build
 npm run package       # builds the local VSIX
-code --install-extension ./llama-vscode-chat-2.0.2.vsix --force
+code --install-extension ./llama-vscode-chat-2.0.5.vsix --force
 ```
 
 The extension ID is `mrlordcat.llama-vscode-chat`; settings and commands retain

@@ -282,8 +282,8 @@ async function applyPatch(
 		}
 		if (changed) {
 			const message = workbenchSkipped
-				? "AI Agent Bridge patched native model controls. The VS Code workbench part was skipped; reload the window to activate what was applied."
-				: "AI Agent Bridge patched native model controls and bounded stored chat tool output. Reload the window to activate them.";
+				? "SubHarness patched native model controls. The VS Code workbench part was skipped; reload the window to activate what was applied."
+				: "SubHarness patched native model controls and bounded stored chat tool output. Reload the window to activate them.";
 			await offerReload(message, output);
 			return;
 		}
@@ -332,8 +332,8 @@ async function applyPatch(
 		await context.globalState.update(LAST_FAILURE_KEY, failureSignature);
 		const choice = await vscode.window.showWarningMessage(
 			permissionError(message)
-				? "AI Agent Bridge cannot write this VS Code installation. Choose a user-owned copy or authorize patching the system files."
-				: "AI Agent Bridge could not update the Copilot Chat patch for this VS Code build. The original bundle was not modified.",
+				? "SubHarness cannot write this VS Code installation. Choose a user-owned copy or authorize patching the system files."
+				: "SubHarness could not update the Copilot Chat patch for this VS Code build. The original bundle was not modified.",
 			...(permissionError(message) ? patchPermissionActions(process.platform, vscode.env.remoteName) : []),
 			"Show Log",
 			"Disable Auto-Patch"
@@ -436,7 +436,7 @@ async function restorePatch(context: vscode.ExtensionContext, output: vscode.Out
 }
 
 export function registerCopilotPatchIntegration(context: vscode.ExtensionContext): void {
-	const output = vscode.window.createOutputChannel("AI Agent Bridge Copilot Patch");
+	const output = vscode.window.createOutputChannel("SubHarness Copilot Patch");
 	registerUserVsCodeCommand(context, output);
 	context.subscriptions.push(
 		output,

@@ -1,7 +1,7 @@
 # Interactive Debian desktop in Docker
 
 This runs the Microsoft VS Code desktop application in Debian 12 with XFCE.
-noVNC displays the desktop in a browser. AI Agent Bridge is not preinstalled,
+noVNC displays the desktop in a browser. SubHarness is not preinstalled,
 so the VSIX installation and subsequent reloads can be tested manually.
 
 ## Start on Windows / Docker Desktop
@@ -37,7 +37,7 @@ credential folders are not mounted.
    `/packages/llama-vscode-chat-1.17.3-linux-x64.vsix`.
 3. Run **Developer: Reload Window**.
 4. Reload after the automatic patch notification.
-5. Check Quick Access and **AI Agent Bridge: Show Copilot Chat Patch Status**.
+5. Check Quick Access and **SubHarness: Show Copilot Chat Patch Status**.
 6. Configure the provider you want to test. Firefox is available for account
    sign-in and OAuth callbacks inside the container.
 
@@ -58,7 +58,7 @@ profile. Extensions are shared through `--extensions-dir`. This window
 reproduces the read-only application case.
 
 To test the extension's no-root migration command, run
-**AI Agent Bridge: Prepare User VS Code (Linux, no root)** from the system-owned
+**SubHarness: Prepare User VS Code (Linux, no root)** from the system-owned
 window. In this Docker fixture, open the resulting copy from a terminal with:
 
 ```sh
@@ -83,7 +83,7 @@ docker exec -it --user root ai-agent-bridge-debian-gui passwd root
 
 Type the password directly into that terminal. Then install
 `/packages/llama-vscode-chat-1.17.3-linux-x64.vsix` in the GUI, reload the
-system-owned VS Code window, and run **AI Agent Bridge: Apply Copilot Chat Patch**.
+system-owned VS Code window, and run **SubHarness: Apply Copilot Chat Patch**.
 Choose **Apply patches with administrator rights**, then **Run su in Terminal**.
 Enter the root password in the Debian terminal and reload after success.
 

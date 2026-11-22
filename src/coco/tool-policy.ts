@@ -24,7 +24,7 @@ export function cocoInternalRefusalNote(actions: readonly string[], tools: reado
 	const listed = actions.slice(0, 3).map(action => JSON.stringify(action.slice(0, 160))).join(", ");
 	const more = actions.length > 3 ? ` and ${actions.length - 3} more` : "";
 	const use = tools.length ? `the supplied client tools (${tools.join(", ")})` : "the supplied vscode_chat_ client tools";
-	return `[AI Agent Bridge] Your built-in action ${listed}${more} was refused automatically by the bridge, not by the user, and nothing ran. `
+	return `[SubHarness] Your built-in action ${listed}${more} was refused automatically by the bridge, not by the user, and nothing ran. `
 		+ `Built-in Cortex tools are disabled in VS Code Chat. Do that step with ${use} and continue the task. `
 		+ "Do not retry the built-in tool and do not ask the user about this refusal.";
 }

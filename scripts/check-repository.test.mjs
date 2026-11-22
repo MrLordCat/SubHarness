@@ -18,6 +18,6 @@ test('detects UTF-8 text that was re-read as Windows-1252', () => {
   assert.equal(findMojibake('{\n  "a": "Quick Access → Codex — été"\n}'), 0);
 });
 test('checks both the release tag and the release-notes version', () => {
-  assert.equal(validateRepositoryMetadata(manifest, lock, readme, { tag: 'v1.2.2', notes: '# AI Agent Bridge 1.2.2' }).length, 2);
-  assert.deepEqual(validateRepositoryMetadata(manifest, lock, readme, { tag: 'v1.2.3', notes: '# AI Agent Bridge 1.2.3\n\nChanges' }), []);
+  assert.equal(validateRepositoryMetadata(manifest, lock, readme, { tag: 'v1.2.2', notes: '# SubHarness 1.2.2' }).length, 2);
+  assert.deepEqual(validateRepositoryMetadata(manifest, lock, readme, { tag: 'v1.2.3', notes: '# SubHarness 1.2.3\n\nChanges' }), []);
 });

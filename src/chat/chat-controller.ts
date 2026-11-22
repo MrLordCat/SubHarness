@@ -83,6 +83,8 @@ export interface ChatControllerDeps {
 	saveExport?: (suggestedName: string, content: string) => Promise<string | undefined>;
 	/** Opens an image of a tool result in VS Code; key names the message, call and image uniquely. */
 	openImage?: (image: { mimeType: string; data: string; name?: string }, key: string) => Promise<void>;
+	/** Opens a file or folder a message links to or names in inline code. */
+	openFileReference?: (target: string) => Promise<void>;
 	/** System prompt and per-turn host context; without it requests carry only the history. */
 	prompt?: ChatPromptProvider;
 	/** Summarizes older turns before another model takes over a long chat. */
@@ -169,6 +171,9 @@ const MEMORY_ID_MAX_CHARS = 80;
 const NO_MODEL_NOTICE = "No model is available. Configure a provider first.";
 const INTERRUPTED_NOTICE = "This answer was interrupted: VS Code closed or reloaded while it was running.";
 const COMPACTING_DETAIL = "Compacting context…";
+const STOPPING_DETAIL = "Stopping…";
+/** Longest file reference a message may ask to open. */
+const FILE_REFERENCE_MAX_CHARS = 2048;
 const SEND_ATTACHMENT_LIMIT = 20;
 const ADD_ATTACHMENT_LIMIT = 50;
 /** Unsent composer content per chat id. */
@@ -508,6 +513,10 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			return typeof value.messageId === "string" && typeof value.callId === "string"
 				&& typeof value.index === "number" && Number.isInteger(value.index) && value.index >= 0
 				? { type: "openToolImage", messageId: value.messageId, callId: value.callId, index: value.index }
+				: undefined;
+		case "openFileReference":
+			return typeof value.target === "string" && value.target.length > 0 && value.target.length <= FILE_REFERENCE_MAX_CHARS
+				? { type: "openFileReference", target: value.target }
 				: undefined;
 		case "openAttachment": {
 			const attachment = asAttachment(value.attachment, true);
@@ -1146,6 +1155,13 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "openAttachment":
 				await this._deps.attachments?.open(message.attachment);
 				return;
+			case "openFileReference":
+				try {
+					await this._deps.openFileReference?.(message.target);
+				} catch (error) {
+					this._log("chat.file_reference.open_failed", { message: errorMessage(error) });
+				}
+				return;
 			case "editMessage":
 				await this._edit(message.messageId, message.text, message.undoChanges === true, message.attachments);
 				return;
@@ -1636,9 +1652,10 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		const claimed = new Set<string>();
 		let liveRun: Promise<void> | undefined;
 		let liveQueued = false;
+		let finalizing = false;
 		// One live refresh at a time; tool calls that finish during it queue a single follow-up.
 		const refreshLive = (): void => {
-			if (!tracker?.liveChangeSet || !begin) {
+			if (!tracker?.liveChangeSet || !begin || finalizing || running.cts.token.isCancellationRequested) {
 				return;
 			}
 			if (liveRun) {
@@ -1662,7 +1679,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 					} catch (error) {
 						this._log("chat.changes.live_failed", { message: errorMessage(error) });
 					}
-				} while (liveQueued);
+				} while (liveQueued && !finalizing && !running.cts.token.isCancellationRequested);
 			};
 			liveRun = run().finally(() => {
 				liveRun = undefined;
@@ -1691,6 +1708,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				})();
 			}
 			await begin;
+			if (token.isCancellationRequested) {
+				throw new vscode.CancellationError();
+			}
 			for (const file of source.writtenPaths?.(name, input) ?? []) {
 				claimed.add(file);
 			}
@@ -1752,22 +1772,18 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				shouldYield: () => runtime.queued.length > 0,
 			});
 		} catch (error) {
-			stopped = error instanceof vscode.CancellationError;
-			this._flushDelta(running);
-			const notice: ChatStructuredPart = error instanceof vscode.CancellationError
-				? { kind: "notice", level: "info", text: "Stopped." }
-				: { kind: "notice", level: "error", text: turnErrorText(error), retryable: true };
-			running.message.parts.push(notice);
-			this._emit(runtime, { type: "partAdded", messageId: running.message.id, part: viewPart(notice) });
+			stopped = error instanceof vscode.CancellationError || running.cts.token.isCancellationRequested;
+			if (!stopped) {
+				this._addPart(running, { kind: "notice", level: "error", text: turnErrorText(error), retryable: true });
+			}
 		} finally {
 			this._flushDelta(running);
 			this._persistFinishedParts(running);
-			void this._persistEnd(running);
+			// The final snapshot supersedes queued live refreshes.
+			finalizing = true;
+			liveQueued = false;
 			const snapshot = await begin;
-			// A live result must not land after the final list.
-			while (liveRun) {
-				await liveRun;
-			}
+			await liveRun;
 			if (tracker && snapshot) {
 				try {
 					await tracker.endTurn(runtime.meta.id, turn, snapshot, [...claimed]);
@@ -1782,6 +1798,10 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			stopped ||= running.cts.token.isCancellationRequested;
 			running.cts.dispose();
 			this._emit(runtime, { type: "run", run: { running: false } });
+			if (stopped) {
+				this._addPart(running, { kind: "notice", level: "info", text: "Stopped." });
+			}
+			void this._persistEnd(running);
 			// A queued message starts the next turn at once, so only the last turn of a run notifies.
 			if (!stopped && runtime.queued.length === 0) {
 				this._osNotify(runtime.meta.title, turnEndNotification(running.message.parts));
@@ -2224,6 +2244,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			return [];
 		}
 		const token = running.cts.token;
+		if (token.isCancellationRequested) {
+			throw new vscode.CancellationError();
+		}
 		this._emit(running.runtime, { type: "run", run: { running: true, detail: COMPACTING_DETAIL } });
 		const startedAt = Date.now();
 		try {
@@ -2367,6 +2390,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				running.timer = undefined;
 			}
 			running.cts.cancel();
+		}
+		if (running || runtime.preparing) {
+			this._emit(runtime, { type: "run", run: this._runState(runtime) });
 		}
 		if (runtime.queued.length > 0) {
 			const taken = runtime.queued;
@@ -2952,9 +2978,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		});
 	}
 
-	private _runState(): ChatRunState {
-		const runtime = this._active();
-		return { running: runtime?.running !== undefined || runtime?.preparing !== undefined };
+	private _runState(runtime = this._active()): ChatRunState {
+		const token = (runtime?.running?.cts ?? runtime?.preparing)?.token;
+		return token?.isCancellationRequested
+			? { running: true, stopping: true, detail: STOPPING_DETAIL }
+			: { running: token !== undefined };
 	}
 
 	private _active(): SessionRuntime | undefined {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ChatChangedFile, ChatChangeSet } from "../shared/protocol";
-import { ShadowGitRepo } from "./shadow-git";
+import { ShadowGitRepo, type ShadowGitSnapshot } from "./shadow-git";
 
 export interface TrackedFolder {
 	name: string;
@@ -17,8 +17,8 @@ export interface ChatChangeTrackerOptions {
 	log?: (event: string, data: Record<string, unknown>) => void;
 }
 
-/** Tree ids of every tracked folder before the turn's first writing tool ran. */
-export type TurnSnapshot = ReadonlyMap<string, string>;
+/** Snapshot of each tracked folder before the turn's first writing tool ran. */
+export type TurnSnapshot = ReadonlyMap<string, ShadowGitSnapshot>;
 
 interface FileChange {
 	root: string;
@@ -144,7 +144,7 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 
 	async beginTurn(): Promise<TurnSnapshot | undefined> {
 		return this._enqueueGit(async () => {
-			const snapshot = new Map<string, string>();
+			const snapshot = new Map<string, ShadowGitSnapshot>();
 			for (const folder of this._options.folders()) {
 				const repo = await this._repo(folder.fsPath);
 				if (!repo) {
@@ -357,8 +357,8 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 					continue;
 				}
 				try {
-					const after = await repo.snapshot();
-					if (after === before) {
+					const after = await repo.snapshot(before);
+					if (after.tree === before.tree) {
 						continue;
 					}
 					for (const change of await repo.diff(before, after)) {
