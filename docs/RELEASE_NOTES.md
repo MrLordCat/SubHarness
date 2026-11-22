@@ -4,9 +4,10 @@ The main agent now knows how to work with subagents in every project, not only
 in repositories that describe it in their own instructions.
 
 For the larger changes since 1.21.0 see the
-[2.0.5 release notes](https://github.com/MrLordCat/SubHarness/releases/tag/v2.0.5);
+[2.0.5 release notes](https://github.com/MrLordCat/SubHarness/blob/2aaade62a5422ee4ff4ae490441f3604424b1d0f/docs/RELEASE_NOTES.md);
 2.0.6 added one model picker group per Codex account, see the
-[2.0.6 release notes](https://github.com/MrLordCat/SubHarness/releases/tag/v2.0.6).
+[2.0.6 release notes](https://github.com/MrLordCat/SubHarness/blob/0263e7daa802514418e6fc673aa4e4084952e56e/docs/RELEASE_NOTES.md).
+Every change is listed in the [changelog](https://github.com/MrLordCat/SubHarness/blob/main/CHANGELOG.md).
 
 ## Subagent guide in the system prompt
 
