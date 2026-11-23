@@ -114,11 +114,35 @@ image in VS Code's image viewer. `send_to_terminal` with
 `interrupt: true` stops the running command with Ctrl+C. Relative paths in tool
 calls start from the first workspace folder.
 
+After `create_file`, `replace_string_in_file` and
+`multi_replace_string_in_file` the result lists up to 10 errors the edit
+introduced in the edited files, once the language servers have checked them
+(at most 1.5 s; plain text and Markdown without earlier problems are not
+waited for). `llamacpp.chat.diagnosticsAfterEdit` turns this off.
+
+`run_checks` runs the project's checks without a terminal and returns each
+check's status and duration, the mocha, TypeScript and ESLint failures, and
+the path of the full log. By default the checks are the package scripts
+`compile` (or `build`), `lint` and `test`; `.subharness/checks.json` replaces
+them. A check whose command matches a dangerous-command rule asks for
+approval first.
+
+```json
+{ "checks": [ { "name": "compile", "command": "npm run compile", "timeoutMs": 300000 } ] }
+```
+
 Each chat and each subagent has its own terminals, and reuses an idle one. A
 terminal whose sync command timed out and printed nothing for a minute is
 closed before a new one opens; each chat or subagent can have at most four.
 A subagent's idle terminals close when it finishes, or for an open subagent
-when it is closed.
+when it is closed. A command that stops at a prompt such as `(y/n)`,
+`password:` or `Press Enter` returns early with the state
+`waiting for input`; the model answers it or interrupts it with
+`send_to_terminal`. Progress bars and spinners redrawn with `\r` are reduced
+to their last state, and runs of repeated lines to one line with a count. A
+terminal ID is unknown once its terminal was closed or the window was
+reloaded; the error says why when it knows and lists the chat's live
+terminals.
 
 A turn has no limit on tool rounds: it runs until the model answers without a
 tool call or you press **Stop**. A subagent stops after 100 tool rounds.
@@ -254,9 +278,18 @@ extension to open this URI?** prompt; select **Do not ask me again**. Set
 The `subagent` tool lets the model hand a self-contained task to a cheaper
 model from the bridge's subagent list. The task runs with the same tools, but
 without its own subagents. The main agent's independent tool calls from the
-same model response can run while the subagent works. The model receives all
-results before its next response. The subagent card shows the model, the
-task and the current step. Expand it for the prompt, steps and report.
+same model response can run while the subagent works, with up to three
+foreground subagent calls in parallel. The model receives their results before
+its next response. The subagent card shows the model, the task and the current
+step. Expand it for the prompt, steps and report. Reports include a **Files
+changed by this subagent** block when tracked files changed.
+
+With `background: true`, `subagent` returns an id immediately so the main
+agent can continue; at most three background runs can work at once. Use
+`wait_subagents` to wait for and collect their reports. The turn remains
+running until all its background runs finish, and **Stop** cancels them along
+with the turn. Any reports not collected are sent together as an automatic
+follow-up message after the turn.
 
 While the tool is offered, the main agent's system prompt carries a short
 delegation guide: plan the task, delegate routine steps to the cheapest model

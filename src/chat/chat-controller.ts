@@ -1,8 +1,10 @@
+import { BackgroundSubagents } from "./background-subagents";
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
 import { ToolCallValidationError } from "../tools/tool-call-reliability";
 import { runAgentTurn, type AgentTurnSink, type ChatToolExecutor } from "./agent-loop";
 import { renderAttachments, type AttachmentContent } from "./attachments";
+import { interruptedAnswerDigest } from "./retry-digest";
 import type { ChatWebviewBridge } from "./chat-view";
 import { compactChatHistory, estimateTextTokens, planChatCompaction, previousModelId, type ChatCompactionLimits, type ChatSummarizer, type ChatSummaryWriter } from "./compaction";
 import { activeCompaction, systemMessage } from "./lm-messages";
@@ -11,8 +13,9 @@ import type { ChatMemoryStore } from "./memory-store";
 import { CHAT_MAX_REQUESTS, DEFAULT_CHAT_TITLE, titleFromParts, type ChatSessionStore, type StoredSubagent } from "./session-store";
 import { chatExportFileName, renderChatMarkdown } from "./chat-export";
 import { runChatSubagent } from "./subagent-runner";
+import { SubagentFiles } from "./subagent-files";
 import { ASK_QUESTIONS_TOOL_NAME, TODO_TOOL_NAME } from "./tools/interaction-tools";
-import { CLOSE_SUBAGENT_TOOL_NAME, SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
+import { CLOSE_SUBAGENT_TOOL_NAME, SUBAGENT_TOOL_NAME, WAIT_SUBAGENTS_TOOL_NAME } from "./tools/subagent-tool";
 import { LIST_TOOLS_TOOL_NAME, MAX_REQUESTED_TOOLS, REQUEST_TOOLS_TOOL_NAME, shortToolDescription, toolsArriveMidTurn } from "./tools/tool-access-tools";
 import { groupModels, modelProvider, thinkingOptions } from "./shared/model-groups";
 import {
@@ -248,6 +251,7 @@ interface SessionRuntime {
 	autoAttempt?: number;
 	/** Subagents kept open for follow-up tasks, by id; saved beside the chat log. */
 	subagents: Map<string, OpenSubagent>;
+	subagentPersistence?: Promise<void>;
 }
 
 interface OpenSubagent extends StoredSubagent {
@@ -664,10 +668,11 @@ export function turnEndNotification(parts: readonly ChatPart[]): string {
 const CONTINUATION_ERROR_MAX_CHARS = 1_000;
 
 /** What Retry sends the model: the failed answer stays in the history, so the model continues it instead of starting over. */
-export function continuationRequest(error?: string): string {
+export function continuationRequest(error?: string, digest?: string): string {
 	const reason = error ? ` with this error:\n${error}\n` : ". ";
 	return `The previous answer stopped before it finished${reason}The user pressed Retry: continue the same task from where it stopped. `
-		+ "Everything that answer already did is kept, file changes included. Check the current state where needed instead of repeating finished steps.";
+		+ "Everything that answer already did is kept, file changes included. Check the current state where needed instead of repeating finished steps."
+		+ (digest ? `\n\n${digest}` : "");
 }
 
 function emptyChangeSet(): ChatChangeSet {
@@ -1489,7 +1494,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		const error = notice?.kind === "notice" ? notice.text.slice(0, CONTINUATION_ERROR_MAX_CHARS) : undefined;
 		runtime.busy = true;
 		try {
-			await this._sendTurn(runtime, continuationRequest(error), undefined, undefined, error ? { error } : {}, modelId);
+			await this._sendTurn(runtime, continuationRequest(error, interruptedAnswerDigest(failed)), undefined, undefined, error ? { error } : {}, modelId);
 		} finally {
 			runtime.busy = false;
 			this._deliverQueued(runtime);
@@ -1653,6 +1658,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			},
 		};
 		const source = this._deps.tools;
+		const background = new BackgroundSubagents();
 		const tracker = this._deps.changes;
 		let begin: Promise<TurnSnapshot | undefined> | undefined;
 		const claimed = new Set<string>();
@@ -1721,13 +1727,26 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				claimed.add(file);
 			}
 			try {
-				return await source.invoke(name, input, token, {
+				const result = await source.invoke(name, input, token, {
 					callId,
 					terminalOwner,
 					approve: confirmation => this._requestApproval(running, name, callId, confirmation, token),
 					...(nested ? {} : {
-						runSubagent: (request: SubagentRequest, subagentToken: vscode.CancellationToken) =>
-							this._runSubagent(running, callId ?? randomUUID(), request, subagentTools, subagentToken),
+						runSubagent: (request: SubagentRequest, subagentToken: vscode.CancellationToken) => {
+							if (!request.background) {
+								return this._runSubagent(running, callId ?? randomUUID(), request, subagentTools, subagentToken);
+							}
+							const result = background.start(() => {
+								const prepared = this._subagentFor(runtime, request);
+								return {
+									id: prepared.entry?.id,
+									description: prepared.entry?.description ?? request.description,
+									run: () => this._runSubagent(running, callId ?? randomUUID(), request, subagentTools, running.cts.token, prepared),
+								};
+							}, running.cts.token);
+							return Promise.resolve(result);
+						},
+						waitSubagents: (ids, timeout, waitToken) => background.wait(ids, timeout, waitToken),
 						closeSubagent: (subagentId: string) => this._closeSubagent(running.runtime, subagentId),
 						askQuestions: (questions: ChatQuestion[], questionToken: vscode.CancellationToken) =>
 							this._askQuestions(running, callId, questions, questionToken),
@@ -1735,7 +1754,14 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 						requestTools: (names: string[], reason: string, requestToken: vscode.CancellationToken) =>
 							this._requestTools(running, callId, names, reason, requestToken),
 					}),
-				});
+				}).catch(error => ({ text: errorMessage(error), isError: true }));
+				if (!nested) {
+					const notes = background.takeFinishedNotes();
+					if (notes) {
+						result.text += `\n${notes}`;
+					}
+				}
+				return result;
 			} finally {
 				if (!readOnly) {
 					refreshLive();
@@ -1746,6 +1772,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			get tools() {
 				return source.tools.filter(tool => tool.name !== SUBAGENT_TOOL_NAME
 					&& tool.name !== CLOSE_SUBAGENT_TOOL_NAME
+					&& tool.name !== WAIT_SUBAGENTS_TOOL_NAME
 					&& tool.name !== TODO_TOOL_NAME
 					&& tool.name !== ASK_QUESTIONS_TOOL_NAME
 					&& tool.name !== LIST_TOOLS_TOOL_NAME
@@ -1784,6 +1811,16 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				this._addPart(running, { kind: "notice", level: "error", text: turnErrorText(error), retryable: true });
 			}
 		} finally {
+			// The answer is complete; show its tail while the turn waits for its background subagents.
+			this._flushDelta(running);
+			await background.settled();
+			if (!running.cts.token.isCancellationRequested) {
+				const reports = background.undelivered();
+				if (reports.length) {
+					runtime.queued.push({ id: randomUUID(), text: `Background subagent reports:\n\n${reports}` });
+					this._emit(runtime, { type: "queued", queued: [...runtime.queued] });
+				}
+			}
 			this._flushDelta(running);
 			this._persistFinishedParts(running);
 			// The final snapshot supersedes queued live refreshes.
@@ -1835,9 +1872,10 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		request: SubagentRequest,
 		toolsFor: (owner: { id: string; label: string }) => ChatToolExecutor,
 		token: vscode.CancellationToken,
+		prepared?: { entry?: OpenSubagent; model: vscode.LanguageModelChatInformation },
 	): Promise<string> {
 		const runtime = running.runtime;
-		const { entry, model } = this._subagentFor(runtime, request);
+		const { entry, model } = prepared ?? this._subagentFor(runtime, request);
 		const description = entry?.description ?? request.description;
 		const owner = {
 			id: entry ? this._subagentOwner(runtime.meta.id, entry.id) : `subagent:${callId}`,
@@ -1852,6 +1890,20 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			this._emitSubagents(runtime);
 		}
 		const withId = (run: ChatSubagentRun): ChatSubagentRun => entry ? { ...run, subagentId: entry.id } : run;
+		const files = new SubagentFiles();
+		const executor = toolsFor(owner);
+		const source = this._deps.tools;
+		const wrapped: ChatToolExecutor = {
+			get tools() { return executor.tools; },
+			invoke: async (name, input, toolToken, toolCallId) => {
+				// Terminal commands do not expose their written paths.
+				if (!source.isReadOnly?.(name)) {
+					await files.capture(source.writtenPaths?.(name, input) ?? []);
+				}
+				return executor.invoke(name, input, toolToken, toolCallId);
+			},
+		};
+		const fileReport = () => files.report(vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath) ?? []);
 		try {
 			const result = await runChatSubagent({
 				backend: this._deps.backend,
@@ -1859,7 +1911,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				request: { ...request, description },
 				callId,
 				conversationId: running.sessionId,
-				tools: toolsFor(owner),
+				tools: wrapped,
 				token,
 				system: await this._systemPrompt(),
 				hostContext: this._turnContext(),
@@ -1879,16 +1931,20 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 					this._addPart(running, { kind: "subagent", ...withId(run) });
 				},
 			});
+			const report = result.report + await fileReport();
 			if (!entry) {
-				return result.report;
+				return report;
 			}
-			entry.report = result.report.slice(0, SUBAGENT_REPORT_MAX_CHARS);
-			return `${result.report}\n\n[Subagent ${entry.id} is still open with its context. Send it a follow-up with subagent { subagentId: "${entry.id}", prompt }, or close it with close_subagent once its work is accepted.]`;
+			entry.report = report.slice(0, SUBAGENT_REPORT_MAX_CHARS);
+			return `${report}\n\n[Subagent ${entry.id} is still open with its context. Send it a follow-up with subagent { subagentId: "${entry.id}", prompt }, or close it with close_subagent once its work is accepted.]`;
 		} catch (error) {
-			if (!entry || error instanceof vscode.CancellationError || token.isCancellationRequested) {
+			const report = await fileReport();
+			if (error instanceof vscode.CancellationError || token.isCancellationRequested) {
+				if (error instanceof Error) { error.message += report; }
 				throw error;
 			}
-			throw new Error(`${errorMessage(error)} Subagent ${entry.id} is still open; send it a follow-up or close it with close_subagent.`, { cause: error });
+			const suffix = entry ? ` Subagent ${entry.id} is still open; send it a follow-up or close it with close_subagent.` : "";
+			throw new Error(`${errorMessage(error)}${suffix}${report}`, { cause: error });
 		} finally {
 			if (entry) {
 				entry.running = false;
@@ -1978,12 +2034,16 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	}
 
 	private async _persistSubagents(runtime: SessionRuntime): Promise<void> {
-		const stored: StoredSubagent[] = [...runtime.subagents.values()].map(({ running: _running, activity: _activity, ...entry }) => entry);
-		try {
-			await this._deps.store.saveSubagents(runtime.meta.id, stored);
-		} catch (error) {
-			this._log("chat.subagent.persist_failed", { message: errorMessage(error) });
-		}
+		const stored: StoredSubagent[] = [...runtime.subagents.values()].map(({ running: _running, activity: _activity, ...entry }) => ({ ...entry }));
+		const save = async (): Promise<void> => {
+			try {
+				await this._deps.store.saveSubagents(runtime.meta.id, stored);
+			} catch (error) {
+				this._log("chat.subagent.persist_failed", { message: errorMessage(error) });
+			}
+		};
+		runtime.subagentPersistence = (runtime.subagentPersistence ?? Promise.resolve()).then(save);
+		await runtime.subagentPersistence;
 	}
 
 	private _subagentViews(runtime: SessionRuntime): ChatOpenSubagent[] {

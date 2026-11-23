@@ -244,21 +244,34 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 			request.sink.part(result);
 			parts.push(result);
 		};
-		let subagents = Promise.resolve();
+		const resultsStart = parts.length;
+		const pending: Array<() => Promise<void>> = [];
+		const subagents: Promise<void>[] = [];
+		let active = 0;
+		const pump = (): void => {
+			while (active < 3 && pending.length > 0) {
+				active++;
+				void pending.shift()!().finally(() => { active--; pump(); });
+			}
+		};
 		try {
 			for (const call of calls) {
 				if (call.name === SUBAGENT_TOOL_NAME) {
-					// Keep delegated calls ordered while letting the main agent's tools run.
-					subagents = subagents.then(() => invoke(call));
-					void subagents.catch(() => undefined);
+					subagents.push(new Promise<void>(resolve => {
+						pending.push(async () => { try { await invoke(call); } catch { /* cancellation is checked below */ } finally { resolve(); } });
+					}));
+					pump();
 				} else {
 					await invoke(call);
 				}
 			}
 		} finally {
-			// The provider needs every result before it can continue this tool round.
-			await subagents;
+			await Promise.all(subagents);
 		}
+		const order = new Map(calls.map((call, index) => [call.callId, index]));
+		const resultParts = parts.splice(resultsStart);
+		resultParts.sort((a, b) => (a.kind === "toolResult" ? order.get(a.callId) ?? 0 : 0) - (b.kind === "toolResult" ? order.get(b.callId) ?? 0 : 0));
+		parts.push(...resultParts);
 		if (request.token.isCancellationRequested) {
 			throw new vscode.CancellationError();
 		}

@@ -1788,6 +1788,8 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			input = latestOnlyRecovery
 				? latestOnlyRecovery.input
 				: reused
+				// The warm session resumes at the last completed turn, so a failed answer's
+				// tool calls are not in it; the chat's Retry request carries a digest of them.
 				? createLatestUserMessage(messages)
 				: createInitialUserMessage(messages, coldInputChars);
 		} catch (error) {

@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.0.9 (stable release) - 2026-11-23
+
+- Added: several `subagent` calls in one model response run in parallel, up
+  to three at a time, instead of one after another. Their results go back to
+  the model in call order, so the prompt cache keeps a stable order.
+- Added: background subagents. `subagent` with `background: true` returns an
+  id at once and the main agent keeps working; the new `wait_subagents` tool
+  waits for and collects their reports (each report once). When a background
+  subagent finishes, the next tool result says so. The turn lasts until its
+  background subagents finish, so Keep/Undo, approvals and **Stop** cover
+  them; reports that were not collected arrive as one automatic message after
+  the answer. At most three background subagents run per turn.
+- Added: a subagent's report ends with **Files changed by this subagent**:
+  each file its tools wrote, with added and removed lines (new, deleted, or
+  "changed" for binary and very large files).
+- Added: the `run_checks` tool runs the project's checks without a terminal
+  and returns each check's status and duration, the mocha, TypeScript and
+  ESLint failures, and the path of the full log (the last 50 logs are kept).
+  The checks are the package scripts `compile`/`build`, `lint` and `test`, or
+  those in `.subharness/checks.json`. Checks whose command matches a
+  dangerous-command rule ask for approval; Stop and the timeout end the whole
+  process tree.
+- Added: after `create_file`, `replace_string_in_file` and
+  `multi_replace_string_in_file` the result lists up to 10 errors the edit
+  introduced, once the language servers have checked the file (at most
+  1.5 s). Setting `llamacpp.chat.diagnosticsAfterEdit` (on by default).
+- Added: a terminal command that stops at a prompt such as `(y/n)`,
+  `password:` or `Press Enter` returns early with the state
+  `waiting for input` instead of waiting for the timeout. Progress bars and
+  spinners redrawn with `\r` are reduced to their last state and repeated
+  lines to one line with a count, so the output cap keeps useful text.
+- Changed: an unknown terminal ID error says why the terminal is gone (killed,
+  closed by the user, replaced after a timeout, its owner ended, or a window
+  reload) and lists the caller's live terminals.
+- Fixed: after Retry the model did not know what the interrupted attempt had
+  done when the provider resumed its native session before that answer
+  (Claude resumes at its last completed turn). The continuation message now
+  carries a digest of the attempt from the chat log: the tool calls with their
+  key argument and first result line, the files it edited, the todo plan and
+  the end of its text.
+- Changed: the main agent's delegation guide describes parallel and
+  background subagents, the changed-files block, a review of non-trivial
+  changes by a cheap subagent, and `run_checks`.
+
 ## 2.0.8 (stable release) - 2026-11-23
 
 - Removed: the GitHub Copilot Chat integration. The extension's models no

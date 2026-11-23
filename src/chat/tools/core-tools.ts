@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { defaultEditDiagnosticsSource, reportEditErrors, snapshotDiagnostics, type EditDiagnosticsSource } from "./edit-diagnostics";
 import { CHAT_TOOL_GROUPS, MAX_IMAGE_BYTES, type ChatTool, type ChatToolConfirmation, type ChatToolOutput } from "./types";
 import {
 	displayPath,
@@ -580,8 +581,27 @@ export function findBundledRipgrep(appRoot: string = vscode.env.appRoot): string
 export function createCoreTools(options: {
 	roots?: WorkspaceRoots;
 	ripgrepPath?: () => string | undefined;
+	diagnostics?: EditDiagnosticsSource | false;
 } = {}): ChatTool[] {
 	const rootProvider = options.roots ?? vscodeWorkspaceRoots;
+	const diagnostics = (): EditDiagnosticsSource | undefined => {
+		if (options.diagnostics === false || !vscode.workspace.getConfiguration("llamacpp.chat").get<boolean>("diagnosticsAfterEdit", true)) {
+			return undefined;
+		}
+		return options.diagnostics ?? defaultEditDiagnosticsSource;
+	};
+	const capture = (file: string, source: EditDiagnosticsSource | undefined, snapshots: Map<string, readonly vscode.Diagnostic[]>): void => {
+		if (source && !snapshots.has(file)) {
+			try {
+				snapshots.set(file, snapshotDiagnostics(vscode.Uri.file(file), source));
+			} catch {
+				// Diagnostics are optional.
+			}
+		}
+	};
+	const report = (source: EditDiagnosticsSource | undefined, snapshots: Map<string, readonly vscode.Diagnostic[]>, token: vscode.CancellationToken): Promise<string> => {
+		return source ? reportEditErrors(snapshots, source, token, file => displayPath(file, roots())) : Promise.resolve("");
+	};
 	const roots = (): readonly string[] => rootProvider.roots().filter(root => root.length > 0);
 	const outsideWorkspace = (input: unknown, title: string): ChatToolConfirmation | undefined => {
 		try {
@@ -895,8 +915,11 @@ export function createCoreTools(options: {
 			const body = content.includes("\n") ? content.replace(/\r\n|\n/g, eol) : content;
 			await fsp.mkdir(path.dirname(file), { recursive: true });
 			checkCancellation(token);
+			const source = diagnostics();
+			const snapshots = new Map<string, readonly vscode.Diagnostic[]>();
+			capture(file, source, snapshots);
 			await fsp.writeFile(file, body, "utf8");
-			return `Created ${shown} (${countLines(body)} lines, ${eolName(eol)}).`;
+			return `Created ${shown} (${countLines(body)} lines, ${eolName(eol)}).` + await report(source, snapshots, token);
 		},
 	};
 
@@ -964,7 +987,11 @@ export function createCoreTools(options: {
 			const file = resolveToolPath(record.filePath, roots());
 			const oldRaw = stringField(record, "oldString");
 			const newRaw = stringField(record, "newString", true);
-			return replaceOnce(file, oldRaw, newRaw, token);
+			const source = diagnostics();
+			const snapshots = new Map<string, readonly vscode.Diagnostic[]>();
+			capture(file, source, snapshots);
+			const result = await replaceOnce(file, oldRaw, newRaw, token);
+			return result + await report(source, snapshots, token);
 		},
 	};
 
@@ -1062,6 +1089,9 @@ export function createCoreTools(options: {
 				throw new Error('"replacements" must have at most 50 items.');
 			}
 			const lines: string[] = [];
+			const source = diagnostics();
+			const snapshots = new Map<string, readonly vscode.Diagnostic[]>();
+			const successful = new Set<string>();
 			let applied = 0;
 			for (let index = 0; index < items.length; index++) {
 				checkCancellation(token);
@@ -1070,7 +1100,9 @@ export function createCoreTools(options: {
 					const file = resolveToolPath(entry.filePath, roots());
 					const oldRaw = stringField(entry, "oldString");
 					const newRaw = stringField(entry, "newString", true);
+					capture(file, source, snapshots);
 					const result = await replaceOnce(file, oldRaw, newRaw, token);
+					successful.add(file);
 					applied += 1;
 					lines.push(`${index + 1}. ${result}`);
 				} catch (error) {
@@ -1083,7 +1115,12 @@ export function createCoreTools(options: {
 			if (applied === 0) {
 				throw new Error(`None of the ${items.length} replacements applied:\n${lines.join("\n")}`);
 			}
-			return `Applied ${applied} of ${items.length} replacements:\n${lines.join("\n")}`;
+			for (const file of snapshots.keys()) {
+				if (!successful.has(file)) {
+					snapshots.delete(file);
+				}
+			}
+			return `Applied ${applied} of ${items.length} replacements:\n${lines.join("\n")}` + await report(source, snapshots, token);
 		},
 	};
 

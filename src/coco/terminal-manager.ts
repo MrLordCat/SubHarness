@@ -17,6 +17,7 @@ interface Command {
 	mode: "sync" | "async";
 	startedAt: number;
 	lastOutputAt?: number;
+	promptSuppressed?: boolean;
 	/** The sync wait ended while the command still ran; with no output for a while the terminal counts as hung. */
 	waitExpired?: boolean;
 	execution: vscode.TerminalShellExecution;
@@ -62,7 +63,7 @@ export interface CocoTerminalRunInput {
 export interface CocoTerminalSnapshot {
 	terminalId: string;
 	terminalName: string;
-	state: "ready" | "running" | "completed" | "closed";
+	state: "ready" | "running" | "waiting for input" | "completed" | "closed";
 	exitCode?: number;
 	output: string;
 	truncated: boolean;
@@ -70,6 +71,37 @@ export interface CocoTerminalSnapshot {
 }
 
 const OUTPUT_LIMIT = 128_000;
+
+/** Detect common interactive prompts without treating ordinary log labels as questions. */
+export function looksLikeInputPrompt(line: string): boolean {
+	return /(?:\[(?:y\/n|yes\/no)\]|\((?:y\/n|yes\/no|y)\)|password:|passphrase[^:]*:|press (?:enter|any key)|continue\?|are you sure\??)\s*$/i.test(line)
+		|| /^\s*\?\s+\S.*$/.test(line)
+		|| /^\s*enter\s+.+:\s*$/i.test(line);
+}
+
+/** Reduce terminal redraws and repeated consecutive lines for model output. */
+export function collapseProgress(text: string): string {
+	const sourceLines = text.split("\n");
+	const lines = sourceLines.map((line, index) => {
+		const crlf = index < sourceLines.length - 1 && line.endsWith("\r");
+		const parts = (crlf ? line.slice(0, -1) : line).split("\r");
+		const last = parts[parts.length - 1] || [...parts].reverse().find(part => part.length > 0) || "";
+		return last + (crlf ? "\r" : "");
+	});
+	const result: string[] = [];
+	for (let i = 0; i < lines.length;) {
+		let end = i + 1;
+		while (end < lines.length && lines[end] === lines[i]) { end++; }
+		const count = end - i;
+		if (count >= 3) {
+			result.push(lines[i], `… (repeated ${count} times)${lines[i].endsWith("\r") ? "\r" : ""}`);
+		} else {
+			result.push(...lines.slice(i, end));
+		}
+		i = end;
+	}
+	return result.join("\n");
+}
 
 /**
  * The model-supplied cwd becomes a `cd` the user never approved, so it must be
@@ -94,6 +126,7 @@ const bounded = (value: number | undefined, fallback: number, max: number): numb
 /** Owns real integrated terminals. Closing the tab closes its shell and settles the tool. */
 export class CocoTerminalManager implements vscode.Disposable {
 	private readonly sessions = new Map<string, Session>();
+	private readonly closedIds = new Map<string, { owner?: string; reason: string }>();
 	private readonly subscriptions: vscode.Disposable[];
 	private disposed = false;
 	private sequence = 0;
@@ -104,7 +137,7 @@ export class CocoTerminalManager implements vscode.Disposable {
 		private readonly onLog?: (event: string, data: Record<string, unknown>) => void,
 		private readonly terminalName = "Coco",
 		/** hungQuietMs: silence after a sync timeout that makes a terminal hung (60 s); maxPerOwner: open terminals per owner (4). */
-		private readonly options: { hungQuietMs?: number; maxPerOwner?: number; now?: () => number } = {},
+		private readonly options: { hungQuietMs?: number; maxPerOwner?: number; now?: () => number; promptQuietMs?: number } = {},
 	) {
 		this.subscriptions = [
 			host.onDidStartTerminalShellExecution(event => {
@@ -231,12 +264,17 @@ export class CocoTerminalManager implements vscode.Disposable {
 		// Subscribe immediately: read() does not replay earlier terminal output.
 		command.drain = this.capture(execution.read(), command);
 		const waitMs = input.mode === "async" ? 1_000 : bounded(input.timeoutMs, 120_000, 3_600_000);
-		await this.waitFor(command.done, waitMs);
-		if (command.state === "running" && command.mode === "sync") {
+		let waiting = false;
+		if (input.mode === "async") {
+			await this.waitFor(command.done, waitMs, token);
+		} else {
+			waiting = await this.waitForPrompt(command, waitMs, token);
+		}
+		if (!waiting && command.state === "running" && command.mode === "sync") {
 			command.waitExpired = true;
 		}
 		if (token.isCancellationRequested) { throw new vscode.CancellationError(); }
-		return this.snapshot(session, bounded(input.maxChars, 12_000, OUTPUT_LIMIT));
+		return this.snapshot(session, bounded(input.maxChars, 12_000, OUTPUT_LIMIT), waiting);
 	}
 
 	/** Runs `cd` in the reused terminal; false when the shell could not enter the directory. */
@@ -266,29 +304,35 @@ export class CocoTerminalManager implements vscode.Disposable {
 		return entered && !token.isCancellationRequested;
 	}
 
-	async read(terminalId: string, waitMs = 0, maxChars = 12_000, token?: vscode.CancellationToken): Promise<CocoTerminalSnapshot> {
-		const session = this.get(terminalId);
+	async read(terminalId: string, waitMs = 0, maxChars = 12_000, token?: vscode.CancellationToken, ownerId?: string): Promise<CocoTerminalSnapshot> {
+		const session = this.get(terminalId, ownerId);
 		if (token?.isCancellationRequested) { throw new vscode.CancellationError(); }
+		let waiting = false;
 		if (session.command) {
-			await this.waitFor(session.command.done, session.command.state === "running" ? bounded(waitMs, 0, 60_000) : 200, token);
+			if (session.command.state === "running") {
+				waiting = await this.waitForPrompt(session.command, bounded(waitMs, 0, 60_000), token);
+			} else {
+				await this.waitFor(session.command.done, 200, token);
+			}
 		}
-		return this.snapshot(session, bounded(maxChars, 12_000, OUTPUT_LIMIT));
+		return this.snapshot(session, bounded(maxChars, 12_000, OUTPUT_LIMIT), waiting);
 	}
 
-	send(terminalId: string, text: string, addNewLine = true): CocoTerminalSnapshot {
-		const session = this.get(terminalId);
+	send(terminalId: string, text: string, addNewLine = true, ownerId?: string): CocoTerminalSnapshot {
+		const session = this.get(terminalId, ownerId);
 		if (session.closed) { throw new Error("This terminal was closed."); }
 		if (!session.command || session.command.state !== "running") {
 			throw new Error("Use the run tool for a new command. Input is only accepted while a command is running.");
 		}
 		session.terminal.show(true);
 		session.terminal.sendText(text, addNewLine);
+		session.command.promptSuppressed = true;
 		return this.snapshot(session);
 	}
 
-	kill(terminalId: string): CocoTerminalSnapshot {
-		const session = this.get(terminalId);
-		this.close(session);
+	kill(terminalId: string, ownerId?: string): CocoTerminalSnapshot {
+		const session = this.get(terminalId, ownerId);
+		this.close(session, "closed by kill_terminal");
 		return this.snapshot(session);
 	}
 
@@ -321,7 +365,7 @@ export class CocoTerminalManager implements vscode.Disposable {
 		let count = 0;
 		for (const session of this.sessions.values()) {
 			if (session.owner === owner && (this.isIdle(session) || this.isHung(session))) {
-				this.close(session);
+				this.close(session, "closed because its owner ended");
 				count++;
 			}
 		}
@@ -334,7 +378,7 @@ export class CocoTerminalManager implements vscode.Disposable {
 		const hung = owned.filter(session => this.isHung(session)).sort((a, b) => this.quietMs(b)! - this.quietMs(a)!)[0];
 		if (hung) {
 			this.onLog?.("coco.terminal.replace_hung", { terminalId: hung.id, owner: input.owner, command: hung.command?.text.slice(0, 160), quietMs: this.quietMs(hung) });
-			this.close(hung);
+			this.close(hung, "replaced after timeout");
 		} else if (owned.length >= (this.options.maxPerOwner ?? 4)) {
 			this.onLog?.("coco.terminal.owner_limit", { owner: input.owner, count: owned.length });
 			const listing = owned.map(session => {
@@ -378,7 +422,7 @@ export class CocoTerminalManager implements vscode.Disposable {
 	 */
 	private select(input: CocoTerminalRunInput): { session: Session; created: boolean; reason: string } {
 		if (input.terminalId) {
-			return { session: this.get(input.terminalId), created: false, reason: "explicit-terminal-id" };
+			return { session: this.get(input.terminalId, input.owner), created: false, reason: "explicit-terminal-id" };
 		}
 		const idle = [...this.sessions.values()].reverse().filter(candidate => candidate.owner === input.owner && this.isIdle(candidate));
 		if (input.newTerminal) {
@@ -421,35 +465,48 @@ export class CocoTerminalManager implements vscode.Disposable {
 		return normalize(actual) === normalize(cwd);
 	}
 
-	private get(id: string): Session {
+	private get(id: string, ownerId?: string): Session {
 		const session = this.sessions.get(id);
-		if (!session) { throw new Error("Unknown Coco terminal ID. Use the ID returned by the run tool."); }
-		return session;
+		if (session) { return session; }
+		const closed = this.closedIds.get(id);
+		const reason = closed
+			? `It was ${closed.reason}.`
+			: "It was closed (kill_terminal, the user, or idle replacement) or the window was reloaded — terminals do not survive a reload.";
+		const live = [...this.sessions.values()].filter(candidate => !candidate.closed && !candidate.terminal.exitStatus && (ownerId === undefined || candidate.owner === ownerId));
+		const listing = live.map(candidate => {
+			const running = candidate.starting || candidate.busy || candidate.command?.state === "running";
+			return `${candidate.id} "${candidate.terminal.name}" (${running ? `running: ${(candidate.command?.text ?? "").slice(0, 80)}` : "idle"})`;
+		}).join(", ");
+		throw new Error(`Unknown terminal ID ${id}. ${reason} ${listing ? `Live terminals of this chat: ${listing}.` : "No terminals are open; run_in_terminal opens one."}`);
 	}
 
 	private find(terminal: vscode.Terminal): Session | undefined {
 		return [...this.sessions.values()].find(session => session.terminal === terminal);
 	}
 
-	private close(session: Session): void {
+	private close(session: Session, reason = "closed"): void {
 		if (session.closed) { return; }
-		this.markClosed(session);
+		this.markClosed(session, reason);
 		session.terminal.dispose();
 	}
 
-	private markClosed(session: Session): void {
+	private markClosed(session: Session, reason = "closed by the user"): void {
+		if (session.closed) { return; }
+		this.closedIds.set(session.id, { owner: session.owner, reason });
+		if (this.closedIds.size > 50) { this.closedIds.delete(this.closedIds.keys().next().value!); }
 		session.closed = true;
 		session.busy = undefined;
 		if (session.command?.state === "running") { session.command.state = "closed"; session.command.finish(); }
 	}
 
-	private snapshot(session: Session, maxChars = 12_000): CocoTerminalSnapshot {
+	private snapshot(session: Session, maxChars = 12_000, waiting = false): CocoTerminalSnapshot {
 		const command = session.command;
+		const output = collapseProgress(command?.output ?? "");
 		return {
 			terminalId: session.id, terminalName: session.terminal.name,
-			state: session.closed ? "closed" : command?.state ?? "ready",
-			exitCode: command?.exitCode, output: maxChars > 0 ? command?.output.slice(-maxChars) ?? "" : "",
-			truncated: Boolean(command?.truncated || (command && command.output.length > maxChars)),
+			state: session.closed ? "closed" : waiting && command?.state === "running" ? "waiting for input" : command?.state ?? "ready",
+			exitCode: command?.exitCode, output: maxChars > 0 ? output.slice(-maxChars) : "",
+			truncated: Boolean(command?.truncated || output.length > maxChars),
 			...(command?.outputError ? { outputError: command.outputError } : {}),
 		};
 	}
@@ -458,10 +515,14 @@ export class CocoTerminalManager implements vscode.Disposable {
 		try {
 			for await (const chunk of stream) {
 				command.lastOutputAt = this.now();
+				command.promptSuppressed = false;
 				command.output += stripVTControlCharacters(chunk);
 				if (command.output.length > OUTPUT_LIMIT) {
-					command.output = command.output.slice(-OUTPUT_LIMIT);
-					command.truncated = true;
+					command.output = collapseProgress(command.output);
+					if (command.output.length > OUTPUT_LIMIT) {
+						command.output = command.output.slice(-OUTPUT_LIMIT);
+						command.truncated = true;
+					}
 				}
 			}
 		} catch {
@@ -491,6 +552,35 @@ export class CocoTerminalManager implements vscode.Disposable {
 				token.onCancellationRequested(() => settle(undefined, new vscode.CancellationError())),
 			);
 			if (token.isCancellationRequested) { settle(undefined, new vscode.CancellationError()); }
+		});
+	}
+
+	private waitForPrompt(command: Command, ms: number, token?: vscode.CancellationToken): Promise<boolean> {
+		const deadline = Date.now() + ms;
+		const quietMs = Math.max(1, this.options.promptQuietMs ?? 2_000);
+		return new Promise((resolve, reject) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let settled = false;
+			const settle = (waiting: boolean, cancelled = false) => {
+				if (settled) { return; }
+				settled = true;
+				if (timer) { clearTimeout(timer); }
+				cancellation?.dispose();
+				if (cancelled) { reject(new vscode.CancellationError()); } else { resolve(waiting); }
+			};
+			const check = () => {
+				if (command.state === "running" && !command.promptSuppressed && command.lastOutputAt !== undefined
+					&& this.now() - command.lastOutputAt >= quietMs) {
+					const lastLine = collapseProgress(command.output).split(/\r?\n/).reverse().find(line => line.trim().length > 0);
+					if (lastLine && looksLikeInputPrompt(lastLine)) { settle(true); return; }
+				}
+				const remaining = deadline - Date.now();
+				if (remaining <= 0) { settle(false); return; }
+				timer = setTimeout(check, Math.min(remaining, Math.min(quietMs, 100)));
+			};
+			const cancellation = token?.onCancellationRequested(() => settle(false, true));
+			void command.done.then(() => settle(false));
+			if (token?.isCancellationRequested) { settle(false, true); } else { check(); }
 		});
 	}
 

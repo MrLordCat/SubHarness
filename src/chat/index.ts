@@ -26,10 +26,11 @@ import { ChatToolCatalog } from "./tools/catalog";
 import { availableSubagentModelProfiles } from "../subagent-guidance";
 import { createCoreTools } from "./tools/core-tools";
 import { createAskQuestionsTool, createTodoTool } from "./tools/interaction-tools";
-import { createCloseSubagentTool, createSubagentTool } from "./tools/subagent-tool";
+import { createCloseSubagentTool, createSubagentTool, createWaitSubagentsTool } from "./tools/subagent-tool";
 import { createSymbolTools } from "./tools/symbol-tools";
 import { configuredDangerousCommandRules } from "./tools/danger";
 import { createChatTerminalTools } from "./tools/terminal-tools";
+import { createCheckTool } from "./tools/check-tools";
 import { createToolAccessTools } from "./tools/tool-access-tools";
 import { createWebTools } from "./tools/web-tools";
 
@@ -181,10 +182,12 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 			...createToolAccessTools(),
 			...(deps.memory ? createMemoryTools(deps.memory) : []),
 			...createChatTerminalTools({ manager: terminals, rules: () => configuredDangerousCommandRules(reportInvalidRule) }),
+			createCheckTool({ logDir: path.join(storage, "chat-checks"), rules: () => configuredDangerousCommandRules(reportInvalidRule) }),
 			createSubagentTool({
 				// The bridge's subagent catalog: cheapest first, premium flagships and exhausted subscriptions left out.
 				models: () => availableSubagentModelProfiles().map(profile => ({ id: profile.id, label: profile.label, useWhen: profile.useWhen })),
 			}),
+			createWaitSubagentsTool({ models: () => availableSubagentModelProfiles().map(profile => ({ id: profile.id, label: profile.label, useWhen: profile.useWhen })) }),
 			createCloseSubagentTool({ models: () => availableSubagentModelProfiles().map(profile => ({ id: profile.id, label: profile.label, useWhen: profile.useWhen })) }),
 		],
 		state: context.globalState,

@@ -39,6 +39,7 @@ function terminalMaxChars(value: number | undefined, fallback: number): number {
 export function formatTerminalSnapshot(snapshot: CocoTerminalSnapshot, limit: number): string {
 	const state = snapshot.exitCode === undefined ? snapshot.state : `${snapshot.state}, exit code ${snapshot.exitCode}`;
 	const lines = [`Terminal: ${snapshot.terminalName} (terminalId: ${snapshot.terminalId})`, `State: ${state}`];
+	if (snapshot.state === "waiting for input") { lines.push("The command is waiting for input. Answer with send_to_terminal, or interrupt it with send_to_terminal { interrupt: true }."); }
 	if (snapshot.outputError) { lines.push(`Note: ${snapshot.outputError}`); }
 	if (!snapshot.output) {
 		lines.push("Output: (none)");
@@ -127,10 +128,10 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 				required: ["terminalId"],
 				additionalProperties: false,
 			},
-			invoke: async (input, token) => {
+			invoke: async (input, token, context) => {
 				const value = record(input);
 				const maxChars = terminalMaxChars(optionalNumber(value.maxChars), RUN_DEFAULT_MAX_CHARS);
-				const snapshot = await manager.read(requireString(value, "terminalId"), optionalNumber(value.waitMs), maxChars, token);
+				const snapshot = await manager.read(requireString(value, "terminalId"), optionalNumber(value.waitMs), maxChars, token, context?.terminalOwner?.id);
 				return formatTerminalSnapshot(snapshot, maxChars);
 			},
 		},
@@ -150,19 +151,19 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 				additionalProperties: false,
 			},
 			needsConfirmation: input => record(input).interrupt === true || isInterruptText(record(input).text) ? undefined : dangerous(record(input).text, undefined, rules(), "Send a dangerous command to a terminal"),
-			invoke: async (input, token) => {
+			invoke: async (input, token, context) => {
 				if (token.isCancellationRequested) {
 					throw new vscode.CancellationError();
 				}
 				const value = record(input);
 				const terminalId = requireString(value, "terminalId");
 				if (value.interrupt === true || isInterruptText(value.text)) {
-					return formatTerminalSnapshot(manager.send(terminalId, "\u0003", false), MANAGER_DEFAULT_MAX_CHARS);
+					return formatTerminalSnapshot(manager.send(terminalId, "\u0003", false, context?.terminalOwner?.id), MANAGER_DEFAULT_MAX_CHARS);
 				}
 				if (typeof value.text !== "string" || value.text.trim() === "") {
 					throw new Error("text must be a non-empty string; use interrupt: true to stop a command.");
 				}
-				return formatTerminalSnapshot(manager.send(terminalId, value.text, value.addNewLine !== false), MANAGER_DEFAULT_MAX_CHARS);
+				return formatTerminalSnapshot(manager.send(terminalId, value.text, value.addNewLine !== false, context?.terminalOwner?.id), MANAGER_DEFAULT_MAX_CHARS);
 			},
 		},
 		{
@@ -175,11 +176,11 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 				required: ["terminalId"],
 				additionalProperties: false,
 			},
-			invoke: async (input, token) => {
+			invoke: async (input, token, context) => {
 				if (token.isCancellationRequested) {
 					throw new vscode.CancellationError();
 				}
-				return formatTerminalSnapshot(manager.kill(requireString(record(input), "terminalId")), MANAGER_DEFAULT_MAX_CHARS);
+				return formatTerminalSnapshot(manager.kill(requireString(record(input), "terminalId"), context?.terminalOwner?.id), MANAGER_DEFAULT_MAX_CHARS);
 			},
 		},
 	];

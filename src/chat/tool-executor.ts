@@ -56,6 +56,7 @@ export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSour
 				callId: context?.callId,
 				runSubagent: context?.runSubagent,
 				closeSubagent: context?.closeSubagent,
+				waitSubagents: context?.waitSubagents,
 				askQuestions: context?.askQuestions,
 				listTools: context?.listTools,
 				requestTools: context?.requestTools,

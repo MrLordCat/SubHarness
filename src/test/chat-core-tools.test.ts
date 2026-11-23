@@ -14,7 +14,7 @@ suite("Chat core tools", () => {
 
 	setup(async () => {
 		tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "chat-core-tools-"));
-		tools = createCoreTools({ roots: { roots: () => [tmpDir] } });
+		tools = createCoreTools({ roots: { roots: () => [tmpDir] }, diagnostics: false });
 	});
 
 	teardown(async () => {

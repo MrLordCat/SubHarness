@@ -32,6 +32,7 @@ export interface SubagentRequest {
 	model?: SubagentModelOption;
 	/** The subagent stays open after its report for follow-up tasks. */
 	keepOpen?: boolean;
+	background?: boolean;
 	/** Continues this open subagent with prompt as its next task. */
 	subagentId?: string;
 }
@@ -56,6 +57,7 @@ export interface ChatToolInvokeContext {
 	runSubagent?(request: SubagentRequest, token: vscode.CancellationToken): Promise<string>;
 	/** Closes an open subagent of this chat and resolves with a short result; absent inside a subagent. */
 	closeSubagent?(subagentId: string): Promise<string>;
+	waitSubagents?(ids: string[] | undefined, timeoutMs: number, token: vscode.CancellationToken): Promise<string>;
 	/** Asks the user in the chat and resolves with the answers; undefined when skipped; absent inside a subagent. */
 	askQuestions?(questions: ChatQuestion[], token: vscode.CancellationToken): Promise<ChatQuestionAnswer[] | undefined>;
 	/** Every tool the chat can offer, with its on/off state; absent inside a subagent. */

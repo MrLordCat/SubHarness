@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/SubHarness.git"
 	},
-	"version": "2.0.8",
+	"version": "2.0.9",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -67,6 +67,11 @@
 		"configuration": {
 			"title": "SubHarness",
 			"properties": {
+				"llamacpp.chat.diagnosticsAfterEdit": {
+					"type": "boolean",
+					"default": true,
+					"description": "After the chat's edit tools change a file, wait briefly for diagnostics and report new errors in the result."
+				},
 				"llamacpp.chat.systemNotifications": {
 					"type": "boolean",
 					"default": true,

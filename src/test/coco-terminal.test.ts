@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { CocoTerminalManager, directoryForCd, type CocoTerminalHost } from "../coco/terminal-manager";
+import { CocoTerminalManager, collapseProgress, directoryForCd, looksLikeInputPrompt, type CocoTerminalHost } from "../coco/terminal-manager";
 import { selectCocoChatTools } from "../coco/terminal-tools";
 import { CocoTurnBridge } from "../coco/turn-bridge";
 
@@ -74,6 +74,25 @@ class TerminalHost implements CocoTerminalHost, vscode.Disposable {
 	dispose(): void { this.commands.forEach(command => command.finish()); this.change.dispose(); this.start.dispose(); this.end.dispose(); this.closed.dispose(); }
 }
 
+suite("Terminal output helpers", () => {
+	test("recognizes prompts conservatively", () => {
+		for (const line of ["Proceed (y/n) ", "Continue [Y/n]", "Confirm [y/N]", "Proceed (yes/no)", "Password:", "Enter passphrase for key:", "Press Enter", "press any key", "Continue? ", "Are you sure", "Select (y)", "? Choose an option", "Enter your name:"]) {
+			assert.ok(looksLikeInputPrompt(line), line);
+		}
+		for (const line of ["Compiling...", "Done:", "https://example.com/", "Errors:", "Enter:"]) {
+			assert.ok(!looksLikeInputPrompt(line), line);
+		}
+	});
+
+	test("collapses redraws and consecutive repeated lines", () => {
+		assert.strictEqual(collapseProgress("10%\r20%\r100%\n"), "100%\n");
+		assert.strictEqual(collapseProgress("one\r\ntwo\r\n"), "one\r\ntwo\r\n");
+		assert.strictEqual(collapseProgress("⠋ Loading\r⠙ Loading\r✔ Loaded\n"), "✔ Loaded\n");
+		assert.strictEqual(collapseProgress("one\r\r"), "one");
+		assert.strictEqual(collapseProgress("a\na\na\nb\nb\n"), "a\n… (repeated 3 times)\nb\nb\n");
+	});
+});
+
 suite("Coco interactive terminals", () => {
 	let host: TerminalHost, manager: CocoTerminalManager, source: vscode.CancellationTokenSource;
 	const temporaryDirectories: string[] = [];
@@ -86,6 +105,46 @@ suite("Coco interactive terminals", () => {
 	teardown(() => {
 		manager.dispose(); host.dispose(); source.dispose();
 		for (const directory of temporaryDirectories.splice(0)) { fs.rmSync(directory, { recursive: true, force: true }); }
+	});
+
+	test("detects a quiet prompt in sync and read waits while keeping the command busy", async () => {
+		manager.dispose();
+		manager = new CocoTerminalManager(host, 20, undefined, "Chat", { promptQuietMs: 50 });
+		const pending = manager.run({ command: "ask", timeoutMs: 2_000 }, source.token);
+		await host.next(1);
+		host.commands[0].push("Proceed [y/N] ");
+		const prompt = await pending;
+		assert.strictEqual(prompt.state, "waiting for input");
+		assert.match(prompt.output, /Proceed/);
+		await assert.rejects(manager.run({ command: "another", terminalId: prompt.terminalId }, source.token), /busy/);
+		manager.send(prompt.terminalId, "y");
+		assert.strictEqual((await manager.read(prompt.terminalId, 80)).state, "running");
+		host.commands[0].push("\nEnter a value:");
+		const read = await manager.read(prompt.terminalId, 1_000);
+		assert.strictEqual(read.state, "waiting for input");
+		host.complete(0);
+		assert.strictEqual((await manager.read(prompt.terminalId)).state, "completed");
+	});
+
+	test("unknown IDs show only the owner's live terminals and explain kills", async () => {
+		const a = await manager.run({ command: "alpha", owner: "a", timeoutMs: 0 }, source.token);
+		const b = await manager.run({ command: "beta", owner: "b", timeoutMs: 0 }, source.token);
+		await assert.rejects(manager.read("missing", 0, 100, undefined, "a"), error => {
+			const message = String(error);
+			assert.ok(message.includes(a.terminalId)); assert.ok(!message.includes(b.terminalId));
+			return true;
+		});
+		host.commands[0].push("final output");
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.strictEqual((await manager.read(b.terminalId, 0, 100, undefined, "a")).state, "running");
+		manager.kill(a.terminalId, "a");
+		const closed = await manager.read(a.terminalId, 0, 100, undefined, "a");
+		assert.strictEqual(closed.state, "closed");
+		assert.strictEqual(closed.output, "final output");
+		// Simulate the manager's pruning of an old closed session.
+		(manager as unknown as { sessions: Map<string, unknown> }).sessions.delete(a.terminalId);
+		await assert.rejects(manager.read(a.terminalId, 0, 100, undefined, "b"), /closed by kill_terminal/);
+		await assert.rejects(manager.read("missing", 0, 100, undefined, "none"), /No terminals are open; run_in_terminal opens one/);
 	});
 
 	test("terminal owners reuse only their own idle shells and use owner labels", async () => {
@@ -320,6 +379,16 @@ suite("Coco interactive terminals", () => {
 		assert.strictEqual(host.terminals.length, 2, "the user's active shell must be skipped without creating an unnecessary third shell");
 	});
 
+	test("collapses progress before applying the output cap", async () => {
+		const pending = manager.run({ command: "progress", maxChars: 128_000 }, source.token);
+		await host.next(1);
+		host.commands[0].push("Working\n".repeat(20_000) + "Done\n");
+		host.complete(0);
+		const result = await pending;
+		assert.strictEqual(result.output, "Working\n… (repeated 20000 times)\nDone\n");
+		assert.strictEqual(result.truncated, false);
+	});
+
 	test("returns only the requested number of output characters for a run", async () => {
 		const pending = manager.run({ command: "long output", maxChars: 100 }, source.token);
 		await new Promise<void>(resolve => setImmediate(resolve));
@@ -337,7 +406,7 @@ suite("Coco interactive terminals", () => {
 		const snapshot = await pending;
 		assert.strictEqual(snapshot.output.length, 12_000); assert.ok(snapshot.truncated); assert.ok(snapshot.output.endsWith("tail"));
 		assert.strictEqual((await manager.read(snapshot.terminalId, 0, 100)).output.length, 100);
-		await assert.rejects(manager.read("not-my-terminal"), /Unknown Coco terminal/);
+		await assert.rejects(manager.read("not-my-terminal"), /Unknown terminal ID not-my-terminal/);
 	});
 
 	test("keeps extension reference names callable and removes agent-host shell tools from ACP", () => {

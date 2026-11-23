@@ -5,6 +5,7 @@ export const SUBAGENT_TOOL_NAME = "subagent";
 
 /** Tool for releasing an open subagent. */
 export const CLOSE_SUBAGENT_TOOL_NAME = "close_subagent";
+export const WAIT_SUBAGENTS_TOOL_NAME = "wait_subagents";
 
 // Coco CLI caps tool descriptions at COCO_TOOL_DESCRIPTION_LIMIT characters; the model list comes on top.
 const DESCRIPTION_HEAD = [
@@ -49,7 +50,7 @@ export function parseSubagentInput(input: unknown, models: readonly SubagentMode
 	}
 	const subagentId = stringField(record, "subagentId");
 	if (subagentId) {
-		return { subagentId, prompt, description: stringField(record, "description") };
+		return { subagentId, prompt, description: stringField(record, "description"), ...(record.background === true ? { background: true } : {}) };
 	}
 	const wanted = stringField(record, "model");
 	const model = findModel(models, wanted);
@@ -57,7 +58,7 @@ export function parseSubagentInput(input: unknown, models: readonly SubagentMode
 		const names = models.map(option => `"${option.label}"`).join(", ");
 		throw new Error(`Unknown subagent model ${JSON.stringify(wanted)}. Use one of: ${names}.`);
 	}
-	return { description: stringField(record, "description") || prompt.split("\n")[0].slice(0, 60), prompt, model, ...(record.keepOpen === true ? { keepOpen: true } : {}) };
+	return { description: stringField(record, "description") || prompt.split("\n")[0].slice(0, 60), prompt, model, ...(record.keepOpen === true ? { keepOpen: true } : {}), ...(record.background === true ? { background: true } : {}) };
 }
 
 /** Creates the tool that closes an open subagent. */
@@ -81,6 +82,25 @@ export function createCloseSubagentTool(options: SubagentToolOptions): ChatTool 
 	};
 }
 
+/** Collects reports from background runs in this turn. */
+export function createWaitSubagentsTool(options: SubagentToolOptions): ChatTool {
+	return {
+		name: WAIT_SUBAGENTS_TOOL_NAME,
+		group: CHAT_TOOL_GROUPS.agents,
+		readOnly: true,
+		description: "Wait for background subagents and collect their reports once. Reports not collected arrive automatically after the answer.",
+		inputSchema: { type: "object", properties: { ids: { type: "array", items: { type: "string" }, description: "Background subagent ids; omit to wait for all." }, timeoutMs: { type: "number", minimum: 1000, maximum: 1800000, description: "Maximum wait (default 600000)." } } },
+		available: () => options.models().length > 0,
+		invoke: async (input, token, context) => {
+			if (!context?.waitSubagents) { throw new Error("Only the main agent can wait for subagents."); }
+			const value = typeof input === "object" && input !== null ? input as Record<string, unknown> : {};
+			if (value.ids !== undefined && (!Array.isArray(value.ids) || value.ids.some(id => typeof id !== "string"))) { throw new Error("ids must be an array of strings."); }
+			if (value.timeoutMs !== undefined && (typeof value.timeoutMs !== "number" || !Number.isFinite(value.timeoutMs) || value.timeoutMs < 1000 || value.timeoutMs > 1800000)) { throw new Error("timeoutMs must be between 1000 and 1800000."); }
+			return context.waitSubagents(value.ids as string[] | undefined, (value.timeoutMs as number | undefined) ?? 600000, token);
+		},
+	};
+}
+
 /** The subagent tool; the chat controller supplies runSubagent, so the tool cannot run anywhere else. */
 export function createSubagentTool(options: SubagentToolOptions): ChatTool {
 	return {
@@ -97,6 +117,7 @@ export function createSubagentTool(options: SubagentToolOptions): ChatTool {
 				description: { type: "string", description: "A short (3-6 words) label for the subtask, shown to the user." },
 				prompt: { type: "string", description: "The complete task for the subagent." },
 				model: { type: "string", description: "One of the model names listed in this tool's description." },
+				background: { type: "boolean", description: "Start the subagent and return at once; collect its report with wait_subagents. Use for independent work while you continue." },
 				keepOpen: { type: "boolean", description: "Keep the subagent open after its report, with its context, so you can send it follow-up tasks with subagentId. Close it with close_subagent once its work is accepted." },
 				subagentId: { type: "string", description: "Id of an open subagent to continue with prompt as its next task; it keeps its model and context." },
 			},

@@ -202,6 +202,81 @@ suite("chat message conversion", () => {
 });
 
 suite("chat agent loop", () => {
+	test("keeps ordinary tools sequential while subagents run", async () => {
+		const fake = fakeBackend([progress => {
+			for (const [id, name] of [["s", "subagent"], ["a", "read"], ["b", "read"]]) {
+				progress.report(new vscode.LanguageModelToolCallPart(id, name, {}));
+			}
+		}, () => undefined]);
+		const events: string[] = [];
+		let release!: () => void;
+		const gate = new Promise<void>(resolve => { release = resolve; });
+		const turn = runAgentTurn({ backend: fake.provider, model, history: [], conversationId: "ordered", turn: 1, sink: recorder().sink, token: none,
+			tools: tools(async (_name, _input, _token, id) => {
+				events.push(`start ${id}`);
+				if (id === "s") { await gate; } else { await Promise.resolve(); }
+				events.push(`end ${id}`);
+				return { text: "", isError: false };
+			}) });
+		await new Promise(resolve => setTimeout(resolve, 0));
+		try { assert.deepStrictEqual(events, ["start s", "start a", "end a", "start b", "end b"]); }
+		finally { release(); }
+		await turn;
+	});
+
+	test("cancellation reaches all running subagents", async () => {
+		const cts = new vscode.CancellationTokenSource();
+		const fake = fakeBackend([progress => {
+			for (const id of ["a", "b", "c", "d"]) { progress.report(new vscode.LanguageModelToolCallPart(id, "subagent", {})); }
+		}]);
+		const started: string[] = [], stopped: string[] = [];
+		const turn = runAgentTurn({ backend: fake.provider, model, history: [], conversationId: "cancel", turn: 1, sink: recorder().sink, token: cts.token,
+			tools: tools(async (_name, _input, token, id) => {
+				started.push(id!);
+				await new Promise<void>(resolve => token.onCancellationRequested(() => { stopped.push(id!); resolve(); }));
+				return { text: "", isError: false };
+			}) });
+		await new Promise(resolve => setTimeout(resolve, 0));
+		cts.cancel();
+		await assert.rejects(turn, vscode.CancellationError);
+		assert.deepStrictEqual(started, ["a", "b", "c"]);
+		assert.deepStrictEqual(stopped, started);
+		cts.dispose();
+	});
+	test("runs three subagents at a time and returns results in call order", async () => {
+		const fake = fakeBackend([
+			progress => {
+				for (const id of ["a", "b", "c", "d"]) {
+					progress.report(new vscode.LanguageModelToolCallPart(id, "subagent", {}));
+				}
+			},
+			() => undefined,
+		]);
+		const started: string[] = [];
+		const release = new Map<string, () => void>();
+		const { sink, parts } = recorder();
+		const turn = runAgentTurn({
+			backend: fake.provider, model, history: [], conversationId: "parallel", turn: 1, sink, token: none,
+			tools: tools(async (_name, _input, _token, callId) => {
+				const id = callId!;
+				started.push(id);
+				await new Promise<void>(resolve => release.set(id, resolve));
+				return { text: id, isError: false };
+			}),
+		});
+		await new Promise(resolve => setTimeout(resolve, 0));
+		assert.deepStrictEqual(started, ["a", "b", "c"]);
+		release.get("c")!();
+		await new Promise(resolve => setTimeout(resolve, 0));
+		assert.deepStrictEqual(started, ["a", "b", "c", "d"]);
+		release.get("d")!();
+		release.get("b")!();
+		release.get("a")!();
+		await turn;
+		assert.deepStrictEqual(parts.filter(part => part.kind === "toolResult").map(part => part.callId), ["c", "d", "b", "a"]);
+		const results = fake.requests[1].messages.flatMap(message => message.content).filter(part => part instanceof vscode.LanguageModelToolResultPart);
+		assert.deepStrictEqual(results.map(part => part.callId), ["a", "b", "c", "d"]);
+	});
 	test("runs tool rounds, forwards sink events and parses usage", async () => {
 		const fake = fakeBackend([
 			progress => {

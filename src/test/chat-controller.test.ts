@@ -6,6 +6,7 @@ import * as vscode from "vscode";
 import { renderAttachments, type AttachmentContent } from "../chat/attachments";
 import type { ChatChangeTrackerLike, TurnSnapshot } from "../chat/changes/change-tracker";
 import { ChatController, continuationRequest, type ChatAccountSource, type ChatAttachmentsDeps, type ChatControllerDeps, type ChatQuotaSource } from "../chat/chat-controller";
+import { interruptedAnswerDigest } from "../chat/retry-digest";
 import { createChatSummarizer, type ChatCompactionPlan } from "../chat/compaction";
 import { compactionSummaryText } from "../chat/lm-messages";
 import type { ChatMemoryContext, ChatMemorySource } from "../chat/memory-context";
@@ -34,7 +35,7 @@ import {
 } from "../chat/shared/protocol";
 import { createChatToolSource, DENIED_TOOL_RESULT, type ChatToolSource } from "../chat/tool-executor";
 import { ASK_QUESTIONS_TOOL_NAME, createAskQuestionsTool, createTodoTool, TODO_TOOL_NAME } from "../chat/tools/interaction-tools";
-import { createCloseSubagentTool, createSubagentTool, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
+import { createCloseSubagentTool, createSubagentTool, createWaitSubagentsTool, SUBAGENT_TOOL_NAME, WAIT_SUBAGENTS_TOOL_NAME } from "../chat/tools/subagent-tool";
 import { createToolAccessTools, LIST_TOOLS_TOOL_NAME, REQUEST_TOOLS_TOOL_NAME } from "../chat/tools/tool-access-tools";
 import type { ChatTool } from "../chat/tools/types";
 import { promptCacheSignalPart } from "../providers/prompt-cache-signal";
@@ -3396,6 +3397,155 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(backend.requests[1].messages.map(messageText), ["First question", longReply, "Second question"]);
 	});
 
+	test("background subagent keeps the turn open and sends an automatic report", async () => {
+		const gate = deferred();
+		const options = { models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] };
+		const source = createChatToolSource({ enabledTools: () => [createSubagentTool(options), createWaitSubagentsTool(options)], groups: () => [], setEnabled: async () => undefined });
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("bg", SUBAGENT_TOOL_NAME, { prompt: "Task", model: "Smart (Claude)", background: true })),
+			async progress => { await gate.promise; progress.report(new vscode.LanguageModelTextPart("Background report")); },
+			progress => progress.report(new vscode.LanguageModelTextPart("Main done")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Follow-up done")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		try {
+			await waitFor(() => backend.requests.length >= 3, "main continues");
+			assert.ok(current.webview.ofType("partAdded").some(({ part }) => part.kind === "toolResult" && part.callId === "bg" && /Started background subagent bg-/.test(part.text)));
+			assert.strictEqual(current.webview.ofType("run").filter(message => !message.run.running).length, 0);
+		} finally { gate.resolve(); }
+		await waitFor(() => backend.requests.length >= 4, "automatic follow-up");
+		assert.ok(backend.requests[3].messages.some(message => messageText(message).includes("Background subagent reports:") && messageText(message).includes("Background report")));
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "follow-up ends");
+	});
+
+	test("wait_subagents delivers a background report only once", async () => {
+		const gate = deferred();
+		const options = { models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] };
+		const source = createChatToolSource({ enabledTools: () => [createSubagentTool(options), createWaitSubagentsTool(options)], groups: () => [], setEnabled: async () => undefined });
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("bg", SUBAGENT_TOOL_NAME, { prompt: "Task", model: "Smart (Claude)", background: true })),
+			async progress => { await gate.promise; progress.report(new vscode.LanguageModelTextPart("Background report")); },
+			progress => progress.report(new vscode.LanguageModelToolCallPart("wait", WAIT_SUBAGENTS_TOOL_NAME, {})),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("again", WAIT_SUBAGENTS_TOOL_NAME, {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		try { await waitFor(() => backend.requests.length >= 3, "wait starts"); } finally { gate.resolve(); }
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn ends");
+		const results = current.webview.ofType("partAdded").map(message => message.part).filter(part => part.kind === "toolResult");
+		assert.ok(results.some(part => part.callId === "wait" && part.text.includes("Background report")));
+		assert.ok(results.some(part => part.callId === "again" && part.text.includes("No background")));
+		assert.strictEqual(backend.requests.length, 5);
+	});
+
+	test("background wait times out and a later result announces completion once", async function () {
+		this.timeout(10000);
+		const gate = deferred();
+		const options = { models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] };
+		const probe: ChatTool = { name: "probe", description: "Probe", group: "files", inputSchema: { type: "object" }, readOnly: true, invoke: async () => "probe" };
+		const source = createChatToolSource({ enabledTools: () => [createSubagentTool(options), createWaitSubagentsTool(options), probe], groups: () => [], setEnabled: async () => undefined });
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("bg", SUBAGENT_TOOL_NAME, { prompt: "Task", model: "Smart (Claude)", background: true })),
+			async progress => { await gate.promise; progress.report(new vscode.LanguageModelTextPart("Background report")); },
+			progress => progress.report(new vscode.LanguageModelToolCallPart("timeout", WAIT_SUBAGENTS_TOOL_NAME, { timeoutMs: 1000 })),
+			async progress => { gate.resolve(); await new Promise(resolve => setTimeout(resolve, 200)); progress.report(new vscode.LanguageModelToolCallPart("probe1", "probe", {})); },
+			progress => progress.report(new vscode.LanguageModelToolCallPart("probe2", "probe", {})),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("wait", WAIT_SUBAGENTS_TOOL_NAME, {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		try {
+			await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn ends");
+			const results = current.webview.ofType("partAdded").map(message => message.part).filter(part => part.kind === "toolResult");
+			assert.ok(results.some(part => part.callId === "timeout" && /Still running: bg-/.test(part.text)));
+			assert.ok(results.some(part => part.callId === "probe1" && part.text.includes("finished; collect its report")));
+			assert.ok(results.some(part => part.callId === "probe2" && !part.text.includes("finished; collect its report")));
+			assert.ok(results.some(part => part.callId === "wait" && part.text.includes("Background report")));
+		} finally { gate.resolve(); }
+	});
+
+	test("Stop cancels a background run without sending its report", async () => {
+		let cancelled = false;
+		const options = { models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] };
+		const source = createChatToolSource({ enabledTools: () => [createSubagentTool(options)], groups: () => [], setEnabled: async () => undefined });
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("bg", SUBAGENT_TOOL_NAME, { prompt: "Task", model: "Smart (Claude)", background: true })),
+			async (_progress, token) => new Promise<void>(resolve => { token.onCancellationRequested(() => { cancelled = true; resolve(); }); }),
+			progress => progress.report(new vscode.LanguageModelTextPart("Main done")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		await waitFor(() => backend.requests.length === 3, "main ends while background runs");
+		current.webview.receive({ type: "stop" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn stops");
+		assert.ok(cancelled);
+		assert.strictEqual(backend.requests.length, 3);
+		assert.ok(current.webview.ofType("queued").every(message => message.queued.length === 0));
+	});
+
+	test("limits background subagents to three and names the running tasks", async () => {
+		const gate = deferred();
+		const options = { models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] };
+		const source = createChatToolSource({ enabledTools: () => [createSubagentTool(options), createWaitSubagentsTool(options)], groups: () => [], setEnabled: async () => undefined });
+		const backend = new FakeBackend([
+			progress => { for (let i = 0; i < 4; i++) { progress.report(new vscode.LanguageModelToolCallPart(`bg${i}`, SUBAGENT_TOOL_NAME, { prompt: `Task ${i}`, description: `Task ${i}`, model: "Smart (Claude)", background: true })); } },
+			...Array.from({ length: 3 }, () => async (progress: vscode.Progress<vscode.LanguageModelResponsePart>) => { await gate.promise; progress.report(new vscode.LanguageModelTextPart("Report")); }),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("wait", WAIT_SUBAGENTS_TOOL_NAME, {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		try {
+			await waitFor(() => current.webview.ofType("partAdded").some(({ part }) => part.kind === "toolResult" && part.callId === "bg3"), "fourth result");
+			const result = current.webview.ofType("partAdded").map(message => message.part).find(part => part.kind === "toolResult" && part.callId === "bg3");
+			assert.ok(result?.kind === "toolResult" && result.isError);
+			for (let i = 0; i < 3; i++) { assert.ok(result.text.includes(`Task ${i}`)); }
+			assert.strictEqual((result.text.match(/bg-[a-f0-9]+/g) ?? []).length, 3);
+		} finally { gate.resolve(); }
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn ends");
+	});
+
+	test("records background writes before ending the turn", async () => {
+		const gate = deferred();
+		const calls: string[] = [];
+		class RecordingTracker extends FakeTracker {
+			override async endTurn(sessionId: string, turn: number, begin: TurnSnapshot, claimed?: readonly string[]): Promise<void> {
+				calls.push(`claimed:${claimed?.join(",")}`);
+				await super.endTurn(sessionId, turn, begin);
+			}
+		}
+		const options = { models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] };
+		const writtenFile = path.join(root, "background.txt");
+		const write: ChatTool = { name: "write_probe", description: "Write", group: "files", inputSchema: { type: "object" }, writes: () => [writtenFile], invoke: async () => { await gate.promise; await fs.writeFile(writtenFile, "background write"); calls.push("write"); return "written"; } };
+		const source = createChatToolSource({ enabledTools: () => [createSubagentTool(options), createWaitSubagentsTool(options), write], groups: () => [], setEnabled: async () => undefined });
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("bg", SUBAGENT_TOOL_NAME, { prompt: "Write", model: "Smart (Claude)", background: true })),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("write", "write_probe", {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Main done")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Report")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Follow-up")),
+		]);
+		const current = createHarness(root, backend, source, new RecordingTracker(calls));
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		try {
+			await waitFor(() => backend.requests.length >= 3, "main ends");
+			assert.ok(!calls.some(call => call.startsWith("end:")));
+		} finally { gate.resolve(); }
+		await waitFor(() => calls.some(call => call.startsWith("end:")), "change recording");
+		assert.strictEqual(await fs.readFile(writtenFile, "utf8"), "background write");
+		assert.ok(calls.includes(`claimed:${writtenFile}`));
+		assert.ok(calls.indexOf("write") < calls.findIndex(call => call.startsWith("end:")));
+	});
+
 	test("open subagent persists its report and can be continued", async () => {
 		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
 		const source = createChatToolSource({ enabledTools: () => [subagent], groups: () => [], setEnabled: async () => undefined });
@@ -3405,7 +3555,10 @@ suite("chat controller", () => {
 			progress => progress.report(new vscode.LanguageModelToolCallPart("open", SUBAGENT_TOOL_NAME, { description: "Check", prompt: "First task", model: "Smart (Claude)", keepOpen: true })),
 			progress => progress.report(new vscode.LanguageModelTextPart("First answer")),
 			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
-			progress => progress.report(new vscode.LanguageModelToolCallPart("follow", SUBAGENT_TOOL_NAME, { subagentId: id, prompt: "Second task" })),
+			progress => {
+				progress.report(new vscode.LanguageModelToolCallPart("follow", SUBAGENT_TOOL_NAME, { subagentId: id, prompt: "Second task" }));
+				progress.report(new vscode.LanguageModelToolCallPart("follow-again", SUBAGENT_TOOL_NAME, { subagentId: id, prompt: "Concurrent task" }));
+			},
 			async progress => { await gate.promise; progress.report(new vscode.LanguageModelTextPart("Second answer")); },
 			progress => progress.report(new vscode.LanguageModelTextPart("Done again")),
 		]);
@@ -3433,6 +3586,7 @@ suite("chat controller", () => {
 			gate.resolve();
 		}
 		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "second turn");
+		assert.ok(current.webview.ofType("partAdded").some(message => message.part.kind === "toolResult" && message.part.callId === "follow-again" && message.part.isError && message.part.text.includes("still working")));
 		assert.strictEqual((await current.store.loadSubagents(sessionId))[0].history.length, 4);
 		await current.store.flush();
 		current.controller.dispose();
@@ -3561,6 +3715,55 @@ suite("chat controller", () => {
 		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
 		assert.deepStrictEqual(results(), ["probe", "delegate"]);
 		assert.strictEqual(backend.requests.length, 3);
+	});
+
+	test("persists both open subagents after parallel runs finish", async () => {
+		const first = deferred(), second = deferred();
+		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
+		const source = createChatToolSource({ enabledTools: () => [subagent], groups: () => [], setEnabled: async () => undefined });
+		const backend = new FakeBackend([
+			progress => {
+				progress.report(new vscode.LanguageModelToolCallPart("one", SUBAGENT_TOOL_NAME, { description: "One", prompt: "One", model: "Smart (Claude)", keepOpen: true }));
+				progress.report(new vscode.LanguageModelToolCallPart("two", SUBAGENT_TOOL_NAME, { description: "Two", prompt: "Two", model: "Smart (Claude)", keepOpen: true }));
+			},
+			async progress => { await first.promise; progress.report(new vscode.LanguageModelTextPart("First report")); },
+			async progress => { await second.promise; progress.report(new vscode.LanguageModelTextPart("Second report")); },
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		try { await waitFor(() => backend.requests.length === 3, "parallel subagents"); }
+		finally { second.resolve(); first.resolve(); }
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		const id = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(id);
+		const stored = await current.store.loadSubagents(id);
+		assert.deepStrictEqual(stored.map(agent => agent.report).sort(), ["First report", "Second report"]);
+		assert.ok(stored.every(agent => agent.history.length === 2));
+	});
+
+	test("includes files written by a subagent in its report", async () => {
+		const file = path.join(root, "written.txt");
+		await fs.writeFile(file, "old\n");
+		const writer: ChatTool = { name: "writer", description: "Write", inputSchema: { type: "object" }, group: "files",
+			writes: () => [file], invoke: async () => { await fs.writeFile(file, "new\nextra\n"); return "written"; } };
+		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
+		const source = createChatToolSource({ enabledTools: () => [subagent, writer], groups: () => [], setEnabled: async () => undefined });
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("delegate", SUBAGENT_TOOL_NAME, { prompt: "Write", model: "Smart (Claude)" })),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("write", "writer", {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Report")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, source);
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		const result = current.webview.ofType("partAdded").find(message => message.part.kind === "toolResult" && message.part.callId === "delegate");
+		assert.ok(result && result.part.kind === "toolResult");
+		assert.ok(result.part.text.includes("Files changed by this subagent:"));
+		assert.ok(result.part.text.includes("written.txt (+2, −1)"));
 	});
 
 	test("runs a subagent and gives the parent only its report", async () => {
@@ -3958,6 +4161,56 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(notices.at(-1), { kind: "notice", level: "info", text: "Stopped." });
 	});
 
+	test("interrupted answer digest includes results, plan and text and respects caps", () => {
+		const message: ChatMessage = { id: "a", role: "assistant", turn: 1, createdAt: 0, parts: [
+			{ kind: "toolCall", callId: "a", name: "read_file", input: { filePath: "src/a.ts", startLine: 1, endLine: 200 } },
+			{ kind: "toolResult", callId: "a", text: "ok\nsecond line" },
+			{ kind: "toolCall", callId: "b", name: "run_in_terminal", input: { command: "npm test" } },
+			{ kind: "toolResult", callId: "b", text: "failed\nmore", isError: true },
+			{ kind: "toolCall", callId: "c", name: "read_file", input: {} },
+			{ kind: "toolCall", callId: "d", name: TODO_TOOL_NAME, input: { todoList: [{ id: 1, title: "one", status: "completed" }, { id: 2, title: "two", status: "in-progress" }, { id: 3, title: "three", status: "not-started" }] } },
+			{ kind: "toolResult", callId: "d", text: "Todo list updated." },
+			{ kind: "subagent", callId: "e", description: "inspect", modelId: "m", modelName: "M", status: "done", steps: [], startedAt: 0 },
+			{ kind: "toolCall", callId: "f", name: "multi_replace_string_in_file", input: { explanation: "x", replacements: [{ filePath: "src/b.ts", oldString: "a", newString: "b" }, { filePath: "src/c.ts", oldString: "a", newString: "b" }] } },
+			{ kind: "toolResult", callId: "f", text: "Edited 2 files." },
+			{ kind: "toolCall", callId: "g", name: "create_file", input: { filePath: "src/new.ts", content: "x" } },
+			{ kind: "toolResult", callId: "g", text: "Created src/new.ts" },
+			{ kind: "toolCall", callId: "h", name: "replace_string_in_file", input: { filePath: "src/failed.ts", oldString: "a", newString: "b" } },
+			{ kind: "toolResult", callId: "h", text: "oldString not found", isError: true },
+			{ kind: "toolCall", callId: "i", name: "fetch_webpage", input: { urls: ["https://example.com"], query: "docs" } },
+			{ kind: "toolCall", callId: "j", name: "custom_tool", input: { count: 3, label: "short label" } },
+			{ kind: "text", text: "a".repeat(100) + "z".repeat(700) },
+		] };
+		const digest = interruptedAnswerDigest(message)!;
+		assert.ok(digest.startsWith("What the interrupted answer already did (from the chat log):\nTools:\n1. read_file src/a.ts (lines 1-200) → ok\n"));
+		assert.match(digest, /\n2\. run_in_terminal `npm test` → error: failed\n/);
+		assert.match(digest, /\n3\. read_file → \(no result: interrupted\)\n/);
+		assert.match(digest, /subagent "inspect" → done/);
+		assert.match(digest, /multi_replace_string_in_file src\/b\.ts, src\/c\.ts → Edited 2 files\./);
+		assert.match(digest, /fetch_webpage docs → \(no result: interrupted\)/);
+		assert.match(digest, /custom_tool short label → /);
+		assert.match(digest, /\nFiles changed: src\/b\.ts, src\/c\.ts, src\/new\.ts \(new\)\n/, "failed edits are not listed");
+		assert.match(digest, /\nPlan: \[x\] one; \[~\] two; \[ \] three\n/);
+		assert.ok(digest.endsWith(`\nLast text: ${"z".repeat(600)}`));
+		assert.strictEqual(interruptedAnswerDigest({ ...message, parts: [] }), undefined);
+		assert.strictEqual(interruptedAnswerDigest({ ...message, parts: [{ kind: "text", text: "  " }] }), undefined);
+		assert.strictEqual(interruptedAnswerDigest({ ...message, parts: [{ kind: "text", text: "Only text." }] }), "What the interrupted answer already did (from the chat log):\nLast text: Only text.");
+
+		message.parts = Array.from({ length: 50 }, (_, index) => ({ kind: "toolCall" as const, callId: String(index), name: "read_file", input: { path: `f${index}.ts` } }));
+		const capped = interruptedAnswerDigest(message)!;
+		assert.match(capped, /\nTools:\n10 earlier calls omitted\n11\. read_file f10\.ts/);
+		assert.match(capped, /\n50\. read_file f49\.ts → \(no result: interrupted\)$/);
+
+		message.parts = [
+			...Array.from({ length: 40 }, (_, index) => ({ kind: "toolCall" as const, callId: String(index), name: "read_file", input: { path: `${index}-${"x".repeat(190)}` } })),
+			{ kind: "text", text: "tail" },
+		];
+		const long = interruptedAnswerDigest(message)!;
+		assert.ok(long.length <= 6000, `digest is ${long.length} characters`);
+		assert.match(long, /earlier calls omitted/);
+		assert.match(long, /39-x+ → \(no result: interrupted\)\nLast text: tail$/, "the latest calls and the text stay");
+	});
+
 	test("retryTurn continues the failed answer and keeps its work, changes and rendered attachments", async () => {
 		const calls: string[] = [];
 		const tracker = new FakeTracker(calls);
@@ -3988,7 +4241,9 @@ suite("chat controller", () => {
 		assert.ok(continued.some(message => messageText(message) === `${block}\n<userRequest>\nExplain\n</userRequest>`), "the original request stays");
 		assert.ok(continued.some(message => message.content.some(part => part instanceof vscode.LanguageModelToolCallPart && part.callId === "call-w")),
 			"the model sees the tool round of the failed answer");
-		assert.strictEqual(messageText(continued.at(-1)!), continuationRequest("provider failed"));
+		assert.match(messageText(continued.at(-1)!), /What the interrupted answer already did \(from the chat log\):\nTools:\n1\. writer/);
+		assert.ok(messageText(continued.at(-1)!).startsWith(`${continuationRequest("provider failed")}\n\nWhat the interrupted answer`), "the request wording stays and the digest follows it");
+		assert.ok(!continuationRequest("provider failed").includes("What the interrupted answer"), "no digest without one");
 		assert.match(continuationRequest("provider failed"), /with this error:\nprovider failed\n.*continue the same task from where it stopped/s);
 		assert.strictEqual(fake.reads.length, 1, "the attachments are not read again");
 		const marker = current.webview.ofType("messageAdded").map(message => message.message).filter(message => message.role === "user").at(-1);
@@ -4001,7 +4256,7 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(loaded.messages.map(message => message.role), ["user", "assistant", "user", "assistant"]);
 		assert.deepStrictEqual(loaded.messages[1].parts.at(-1), { kind: "notice", level: "error", text: "provider failed", retryable: true });
 		assert.deepStrictEqual(loaded.messages[2].continuation, { error: "provider failed" });
-		assert.deepStrictEqual(loaded.messages[2].parts, [{ kind: "text", text: continuationRequest("provider failed") }]);
+		assert.deepStrictEqual(loaded.messages[2].parts, [{ kind: "text", text: messageText(continued.at(-1)!) }]);
 		assert.deepStrictEqual(loaded.messages[3].parts, [{ kind: "text", text: "Recovered." }]);
 		assert.strictEqual(loaded.interruptedMessageId, undefined);
 	});

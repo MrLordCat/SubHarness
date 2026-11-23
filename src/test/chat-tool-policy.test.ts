@@ -220,6 +220,29 @@ suite("chat tool policy", () => {
 		assert.deepStrictEqual(calls[1], ["read", "term-1", undefined, 30_000]);
 	});
 
+	test("terminal tools pass the owner and expose the input prompt hint", async () => {
+		const owners: Array<string | undefined> = [];
+		const snapshot: CocoTerminalSnapshot = {
+			terminalId: "term", terminalName: "Chat", state: "waiting for input", output: "Continue? ", truncated: false,
+		};
+		const tools = new Map(createChatTerminalTools({
+			manager: {
+				run: async input => { owners.push(input.owner); return snapshot; },
+				read: async (_id, _wait, _max, _token, owner) => { owners.push(owner); return snapshot; },
+				send: (_id, _text, _newLine, owner) => { owners.push(owner); return snapshot; },
+				kill: (_id, owner) => { owners.push(owner); return snapshot; },
+			},
+			rules: () => RULES, isTrusted: () => true,
+		}).map(tool => [tool.name, tool]));
+		const context = { terminalOwner: { id: "owner-a", label: "Chat" } };
+		const result = await tools.get("run_in_terminal")!.invoke({ command: "ask", terminalId: "term" }, token(), context);
+		assert.match(await text(Promise.resolve(result)), /waiting for input[\s\S]*Answer with send_to_terminal[\s\S]*Continue\?/);
+		await tools.get("read_terminal")!.invoke({ terminalId: "term" }, token(), context);
+		await tools.get("send_to_terminal")!.invoke({ terminalId: "term", text: "y" }, token(), context);
+		await tools.get("kill_terminal")!.invoke({ terminalId: "term" }, token(), context);
+		assert.deepStrictEqual(owners, ["owner-a", "owner-a", "owner-a", "owner-a"]);
+	});
+
 	test("terminal results mark truncated and empty output and name the limit used", async () => {
 		const calls: TerminalCall[] = [];
 		const truncated: CocoTerminalSnapshot = {
