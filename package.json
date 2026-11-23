@@ -1703,21 +1703,21 @@
 	},
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",
-		"@stylistic/eslint-plugin": "^5.10.0",
+		"@stylistic/eslint-plugin": "^6.0.1",
 		"@types/mocha": "^10.0.6",
 		"@types/node": "^26",
-		"@types/vscode": "^1.125.0",
+		"@types/vscode": "^1.146.0",
 		"@vscode/dts": "^0.4.1",
 		"@vscode/test-cli": "^0.0.15",
 		"@vscode/test-electron": "^3.1.0",
-		"@vscode/vsce": "4.0.0",
+		"@vscode/vsce": "4.1.1",
 		"esbuild": "^0.28.2",
-		"eslint": "^10.8.1",
+		"eslint": "^10.15.0",
 		"marked": "^18.2.1",
 		"preact": "^11.2.0",
-		"prettier": "^3.9.6",
+		"prettier": "^3.10.1",
 		"typescript": "^5.9.3",
-		"typescript-eslint": "^8.67.0"
+		"typescript-eslint": "^8.73.0"
 	},
 	"overrides": {
 		"diff": "8.0.3",
