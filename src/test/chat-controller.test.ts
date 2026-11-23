@@ -85,7 +85,7 @@ const INTERRUPTED_TEXT = "This answer was interrupted: VS Code closed or reloade
 type Round = (progress: vscode.Progress<vscode.LanguageModelResponsePart>, token: vscode.CancellationToken) => void | Promise<void>;
 
 class FakeBackend implements Pick<vscode.LanguageModelChatProvider, "provideLanguageModelChatResponse" | "provideLanguageModelChatInformation"> {
-	readonly requests: Array<{ messages: readonly vscode.LanguageModelChatRequestMessage[]; options: vscode.ProvideLanguageModelChatResponseOptions }> = [];
+	readonly requests: Array<{ modelId: string; messages: readonly vscode.LanguageModelChatRequestMessage[]; options: vscode.ProvideLanguageModelChatResponseOptions }> = [];
 	modelInfoRequests = 0;
 	private readonly _rounds: Round[];
 	private readonly _models: vscode.LanguageModelChatInformation[];
@@ -101,13 +101,13 @@ class FakeBackend implements Pick<vscode.LanguageModelChatProvider, "provideLang
 	}
 
 	async provideLanguageModelChatResponse(
-		_model: vscode.LanguageModelChatInformation,
+		model: vscode.LanguageModelChatInformation,
 		messages: readonly vscode.LanguageModelChatRequestMessage[],
 		options: vscode.ProvideLanguageModelChatResponseOptions,
 		progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 		token: vscode.CancellationToken,
 	): Promise<void> {
-		this.requests.push({ messages, options });
+		this.requests.push({ modelId: model.id, messages, options });
 		const round = this._rounds.shift();
 		if (!round) {
 			throw new Error("unexpected extra round");
@@ -558,7 +558,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "osNotify" | "manageToolApprovals" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState" | "saveExport" | "openImage" | "openFileReference" | "terminals" | "now" | "setTimer" | "maxRequests">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "osNotify" | "manageToolApprovals" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState" | "saveExport" | "openImage" | "openFileReference" | "terminals" | "now" | "setTimer" | "maxRequests" | "subagentStandIn">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -3599,6 +3599,42 @@ suite("chat controller", () => {
 		assert.ok(reloaded.webview.ofType("init").some(message => message.subagents?.some(agent => agent.id === id)));
 	});
 
+	test("an open subagent moves to the same model of another subscription when its own is used up", async () => {
+		const subagent = createSubagentTool({ models: () => [{ id: "codex::fast", label: "Fast (Codex)", useWhen: "tests" }] });
+		const source = createChatToolSource({ enabledTools: () => [subagent], groups: () => [], setEnabled: async () => undefined });
+		const second = { ...MODELS[0], id: "codex::work::fast", name: "Fast (Codex 2)" };
+		let id = "";
+		let usedUp = false;
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("open", SUBAGENT_TOOL_NAME, { description: "Check", prompt: "First task", model: "Fast (Codex)", keepOpen: true })),
+			progress => progress.report(new vscode.LanguageModelTextPart("First answer")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("follow", SUBAGENT_TOOL_NAME, { subagentId: id, prompt: "Second task" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("Second answer")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done again")),
+		], [...MODELS, second]);
+		const current = createHarness(root, backend, source, undefined, {
+			subagentStandIn: modelId => usedUp && modelId === "codex::fast" ? second.id : undefined,
+		});
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 1, "first turn");
+		id = current.webview.ofType("subagents").find(message => message.subagents.some(agent => agent.status === "idle"))!.subagents[0].id;
+		assert.strictEqual(backend.requests[1].modelId, "codex::fast");
+
+		usedUp = true;
+		current.webview.receive({ type: "send", text: "Continue" });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "second turn");
+		const continued = backend.requests[4];
+		assert.strictEqual(continued.modelId, second.id);
+		assert.ok(continued.messages.some(message => messageText(message).includes("First answer")), "the subagent keeps its conversation");
+		const sessionId = current.state.get<string>(ACTIVE_SESSION_KEY);
+		assert.ok(sessionId);
+		const [saved] = await current.store.loadSubagents(sessionId);
+		assert.strictEqual(saved.modelId, second.id);
+		assert.strictEqual(saved.modelName, "Fast (Codex 2)");
+	});
+
 	for (const method of ["tool", "webview"] as const) {
 		test(`open subagent closes through ${method}`, async () => {
 			const options = { models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] };
@@ -3837,6 +3873,34 @@ suite("chat controller", () => {
 		const persisted = await new ChatSessionStore(root).load(sessionId);
 		const assistant = persisted.find(message => message.role === "assistant");
 		assert.ok(assistant?.parts.some(part => part.kind === "subagent" && part.callId === "call-sub" && part.status === "done"));
+	});
+
+	test("gives a subagent memory for its own task and turns off the provider's memory block", async () => {
+		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
+		const source = createChatToolSource({
+			enabledTools: () => [subagent],
+			groups: () => [{ id: "agents", label: "Subagents", tools: [{ name: subagent.name, description: subagent.description, enabled: true }] }],
+			setEnabled: async () => undefined,
+		});
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-sub", SUBAGENT_TOOL_NAME, { description: "Check", prompt: "Inspect a.txt", model: "Smart (Claude)" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("REPORT")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const memory = new FakeMemory();
+		const block = "<memory>\n- [m1] Fact\n</memory>";
+		memory.current = { text: block, revisions: [{ id: "m1", revision: "r1" }] };
+		const current = createHarness(root, backend, source, undefined, { memory });
+		harness = current;
+		current.webview.receive({ type: "send", text: "Please inspect" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+
+		assert.strictEqual(backend.requests.length, 3);
+		assert.deepStrictEqual(memory.calls.map(call => call.query), ["Please inspect", "Inspect a.txt"]);
+		assert.deepStrictEqual(memory.calls[1].known, new Map(), "a new subagent has seen no memory yet");
+		const subagentRequest = backend.requests[1];
+		assert.ok(subagentRequest.messages.some(message => messageText(message).includes(`${block}\n<userRequest>\nInspect a.txt\n</userRequest>`)));
+		assert.strictEqual(subagentRequest.options.modelOptions?._aabSkipSharedMemory, true);
 	});
 
 	test("an unknown subagent model gives an error result and the turn continues", async () => {

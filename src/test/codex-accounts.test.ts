@@ -44,6 +44,7 @@ suite("Codex accounts", () => {
 	test("account numbers follow valid settings order", () => {
 		const accounts = resolveCodexAccounts([{ id: "work" }, { id: "work" }, { id: "bad id" }, { id: "personal" }], home);
 		assert.deepStrictEqual(accounts.map(account => account.providerLabel), ["Codex 1", "Codex 2", "Codex 3"]);
+		assert.deepStrictEqual(accounts.map(account => account.order), [0, 1, 2], "subagents try the accounts in this order after the active one");
 	});
 
 	test("a named account gets its own home and model prefix", () => {

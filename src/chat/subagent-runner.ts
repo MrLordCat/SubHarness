@@ -3,6 +3,7 @@ import { runAgentTurn, type AgentTurnSink, type ChatToolExecutor } from "./agent
 import { appendChatText, type ChatMessage, type ChatSubagentRun, type ChatSubagentStep } from "./shared/protocol";
 import { estimateChatMessageTokens } from "./compaction";
 import { shortenToolResults } from "./lm-messages";
+import type { ChatMemoryContext } from "./memory-context";
 import type { SubagentRequest } from "./tools/types";
 
 export const SUBAGENT_INSTRUCTIONS = `<subagent>
@@ -38,6 +39,8 @@ export interface SubagentRunOptions {
 	/** The parent's system prompt; the subagent instructions are added to it. */
 	system?: string;
 	hostContext?: string;
+	/** Memory for this task. It goes into the task message once, so every tool round sends the same prompt prefix. */
+	memory?: ChatMemoryContext;
 	/** Live state, at most every UPDATE_INTERVAL_MS. */
 	onUpdate(run: ChatSubagentRun): void;
 	/** Final state, also after a failure or Stop. */
@@ -128,6 +131,7 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<Suba
 		createdAt: run.startedAt,
 		parts: [{ kind: "text", text: request.prompt }],
 		...(options.hostContext ? { hostContext: options.hostContext } : {}),
+		...(options.memory ? { memoryContext: options.memory.text, memoryRevisions: options.memory.revisions.map(revision => ({ ...revision })) } : {}),
 	};
 	const answer: ChatMessage = { id: `subagent-answer-${options.callId}`, role: "assistant", turn, createdAt: Date.now(), modelId: model.id, parts: [] };
 	// Until the task reaches the model, a failure leaves the subagent's conversation as it was.
@@ -197,7 +201,9 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<Suba
 			// A delegated task nobody watches step by step keeps a bound; the chat turn itself has none.
 			maxRounds: SUBAGENT_MAX_ROUNDS,
 			// The composite then keeps the run off the parent's conversation, journal and native session.
-			modelOptions: { _subagentInvocationId: options.invocationId ?? `chat-subagent-${options.callId}`, _aabStrictTools: true },
+			// Without that conversation the provider cannot freeze its memory block, and a block picked
+			// again every round lands right after the task and breaks the prompt cache.
+			modelOptions: { _subagentInvocationId: options.invocationId ?? `chat-subagent-${options.callId}`, _aabSkipSharedMemory: true, _aabStrictTools: true },
 		});
 		const text = report.trim();
 		if (!text && notices.length > 0) {

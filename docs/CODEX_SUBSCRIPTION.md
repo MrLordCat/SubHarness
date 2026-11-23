@@ -7,7 +7,10 @@ This is a model-provider integration, not a separate `@codex` participant.
 Selecting a discovered Codex model in the normal picker, including a model with
 the native `xhigh` effort option, is the intended entry point. When multiple
 accounts are configured, SubHarness lists each in a numbered Codex group with
-its own limits; the active account supplies subagents and status commands.
+its own limits; the active account runs the status commands. Subagents list
+each Codex model once and start on the active account, or on the next account
+in list order while the active one's 5-hour or weekly limit is used up; an
+open subagent moves the same way with its conversation.
 
 ## What Subscription Access Means
 

@@ -46,9 +46,9 @@ Requires **VS Code 1.131+** on Windows x64 or Linux x64.
 
    ```sh
    # Windows x64
-   code --install-extension llama-vscode-chat-v2.0.10-win32-x64.vsix
+   code --install-extension llama-vscode-chat-v2.0.11-win32-x64.vsix
    # Linux x64
-   code --install-extension llama-vscode-chat-v2.0.10-linux-x64.vsix
+   code --install-extension llama-vscode-chat-v2.0.11-linux-x64.vsix
    ```
 
 3. Run **Developer: Reload Window**.
@@ -102,8 +102,8 @@ the active one. The same group holds everything afterwards:
 
 - each account has **Sign In** (or **Sign In Again**) and **Sign Out** of its
   own; signing out of one keeps the other signed in;
-- selecting an account makes it active for subagents, Quick Access and Codex
-  status commands;
+- selecting an account makes it active for Quick Access and Codex status
+  commands, and a Codex subagent tries it first;
 - **Remove Account** takes an account out of the list; its `~/.codex-<id>`
   folder and login stay on disk, so adding the same id again restores them;
 - threads, the last used model and the usage windows are tracked per account,
@@ -125,6 +125,13 @@ Codex 1 is the built-in `~/.codex` account, followed by Codex 2, Codex 3 and
 so on in account-list order. Each group shows its own 5-hour and weekly limits,
 and the quota chip follows the selected model's account. The built-in account
 keeps the historical `codex::` model ids.
+
+Subagents list each Codex model once, for example `GPT-6-Luna (Codex)`, and
+pick the subscription when they start: the active account first, then the
+others in account-list order, skipping an account whose 5-hour or weekly limit
+is used up. An open subagent whose account runs out moves to the same model
+of another account with its conversation. The subagent card names the account
+it ran on (`GPT-6-Luna (Codex 2)`).
 
 ### Snowflake Coco
 
@@ -169,16 +176,16 @@ See [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md),
 [provider architecture](docs/PROVIDER_ARCHITECTURE.md), and
 [Quick Access](docs/QUICK_ACCESS.md) for the current maintenance contracts.
 
-**Latest release: 2.0.10. Current build: 2.0.10.**
+**Latest release: 2.0.11. Current build: 2.0.11.**
 
 ```sh
 npm ci
 npm run compile
 npm run check:metadata
 npm run lint
-npm test              # 1484 extension-host tests on VS Code 1.143.1 in the current 2.0.10 build
+npm test              # 1491 extension-host tests on VS Code 1.143.1 in the current 2.0.11 build
 npm run package       # builds the local VSIX
-code --install-extension ./llama-vscode-chat-2.0.10.vsix --force
+code --install-extension ./llama-vscode-chat-2.0.11.vsix --force
 ```
 
 The extension ID is `mrlordcat.llama-vscode-chat`; settings and commands retain

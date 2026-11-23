@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/SubHarness.git"
 	},
-	"version": "2.0.10",
+	"version": "2.0.11",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -260,7 +260,7 @@
 				"llamacpp.codexActiveAccount": {
 					"type": "string",
 					"default": "",
-					"description": "Id of the Codex account that subagents, Quick Access and the Codex status commands use. Empty means the built-in account (~/.codex). The chat model picker lists every account's models, grouped as Codex 1, Codex 2… Switch it from Quick Access -> Codex -> ChatGPT Accounts."
+					"description": "Id of the Codex account that Quick Access and the Codex status commands use and that a Codex subagent tries first. When its 5-hour or weekly limit is used up, the subagent runs the same model on the next account with room, in the order Codex 1, Codex 2… Empty means the built-in account (~/.codex). The chat model picker lists every account's models, grouped as Codex 1, Codex 2… Switch it from Quick Access -> Codex -> ChatGPT Accounts."
 				},
 				"llamacpp.sharedContextLength": {
 					"type": "integer",

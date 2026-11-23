@@ -1,11 +1,13 @@
 import * as assert from "assert";
 
 import {
+	availableSubagentModelProfiles,
 	codexSubagentRole,
 	codexSubagentUseWhen,
 	getSubagentModelProfiles,
 	setSubagentModelProfiles,
 	subagentProviderForSource,
+	subagentStandIn,
 } from "../subagent-guidance";
 
 suite("subagent model guidance", () => {
@@ -85,6 +87,55 @@ suite("subagent model guidance", () => {
 			["gpt-6-luna (Codex) B", "gpt-6.1-terra (Codex) B"]
 		);
 		setSubagentModelProfiles("codex", []);
+	});
+
+	test("lists a model of two accounts once and lets the second stand in while the first is used up", () => {
+		const luna = (account: string, availability: "available" | "unavailable") => ({
+			id: account ? `codex::${account}::gpt-6-luna` : "codex::gpt-6-luna",
+			label: "GPT-6-Luna (Codex)",
+			provider: "codex" as const,
+			useWhen: "x",
+			availability,
+		});
+		const codexIds = () => availableSubagentModelProfiles().filter(profile => profile.provider === "codex").map(profile => profile.id);
+		try {
+			setSubagentModelProfiles("codex", [luna("", "available")], "", 0);
+			setSubagentModelProfiles("codex", [luna("work", "available")], "work", 2);
+			assert.deepStrictEqual(codexIds(), ["codex::gpt-6-luna"], "one entry, on the account tried first");
+			assert.strictEqual(subagentStandIn("codex::gpt-6-luna"), undefined, "an available model keeps its account");
+
+			setSubagentModelProfiles("codex", [luna("", "unavailable")], "", 0);
+			assert.deepStrictEqual(codexIds(), ["codex::work::gpt-6-luna"], "the second subscription stands in");
+			assert.strictEqual(subagentStandIn("codex::gpt-6-luna"), "codex::work::gpt-6-luna");
+
+			setSubagentModelProfiles("codex", [luna("work", "unavailable")], "work", 2);
+			assert.deepStrictEqual(codexIds(), [], "no Codex subagent while both are used up");
+			assert.strictEqual(subagentStandIn("codex::gpt-6-luna"), undefined);
+		} finally {
+			setSubagentModelProfiles("codex", []);
+		}
+	});
+
+	test("an open subagent of an account that dropped its catalog moves to the same model of another", () => {
+		try {
+			setSubagentModelProfiles("codex", [{ id: "codex::work::gpt-6-luna", label: "GPT-6-Luna (Codex)", provider: "codex", useWhen: "x" }], "work", 1);
+			assert.strictEqual(subagentStandIn("codex::gpt-6-luna"), "codex::work::gpt-6-luna");
+			assert.strictEqual(subagentStandIn("codex::gpt-6.1-terra"), undefined, "no Terra on the other account");
+			assert.strictEqual(subagentStandIn("claude::smart"), undefined, "other providers keep their model");
+		} finally {
+			setSubagentModelProfiles("codex", []);
+		}
+	});
+
+	test("tries the account with the lower priority first, whatever its id", () => {
+		const luna = (account: string) => ({ id: `codex::${account}::gpt-6-luna`, label: "GPT-6-Luna (Codex)", provider: "codex" as const, useWhen: "x" });
+		try {
+			setSubagentModelProfiles("codex", [luna("a")], "a", 2);
+			setSubagentModelProfiles("codex", [luna("b")], "b", 0);
+			assert.deepStrictEqual(getSubagentModelProfiles().filter(profile => profile.provider === "codex").map(profile => profile.id), ["codex::b::gpt-6-luna"]);
+		} finally {
+			setSubagentModelProfiles("codex", []);
+		}
 	});
 
 	test("unscoped empty Codex catalog clears every scope", () => {

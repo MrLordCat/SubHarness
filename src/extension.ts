@@ -1447,7 +1447,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 		}
 		const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 		await config.update("codexActiveAccount", account.id, vscode.ConfigurationTarget.Global);
-		// Re-announce catalogs so subagent profiles follow the active account.
+		// Re-announce catalogs so subagents try the active account first.
 		refreshAllCodexCatalogs();
 		quickActionsProvider.refresh();
 		const provider = codexProviders.get(account.id);
@@ -1528,7 +1528,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 			entries.push({ id: accountId, label: label.trim() || accountId });
 			await vscode.workspace.getConfiguration(CONFIG_SECTION)
 				.update("codexAccounts", entries, vscode.ConfigurationTarget.Global);
-			// The new subscription becomes the active one for subagents and status commands.
+			// The new subscription becomes the active one: subagents try it first, status commands use it.
 			await vscode.workspace.getConfiguration(CONFIG_SECTION)
 				.update("codexActiveAccount", accountId, vscode.ConfigurationTarget.Global);
 			// Providers are created at activation, so the sign-in runs after the reload.

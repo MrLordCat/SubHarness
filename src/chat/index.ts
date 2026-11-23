@@ -23,7 +23,7 @@ import { ChatPromptSource } from "./prompt/instructions";
 import { ChatSessionStore } from "./session-store";
 import { createChatToolSource } from "./tool-executor";
 import { ChatToolCatalog } from "./tools/catalog";
-import { availableSubagentModelProfiles } from "../subagent-guidance";
+import { availableSubagentModelProfiles, subagentStandIn } from "../subagent-guidance";
 import { createCoreTools } from "./tools/core-tools";
 import { createAskQuestionsTool, createTodoTool } from "./tools/interaction-tools";
 import { createCloseSubagentTool, createSubagentTool, createWaitSubagentsTool } from "./tools/subagent-tool";
@@ -267,6 +267,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		attachments,
 		memory,
 		memoryStore,
+		subagentStandIn,
 		abandonConversation: async id => { await deps.composite.abandonConversation?.(id); },
 		confirm: async (message, action) => (await vscode.window.showWarningMessage(message, { modal: true }, action)) === action,
 		notify: async (message, action) => {

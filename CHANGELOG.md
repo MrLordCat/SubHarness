@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.0.11 (stable release) - 2026-11-23
+
+- Fixed: a subagent on DeepSeek missed the prompt cache after its system
+  prompt and task on every tool round; requests to deepseek-flash kept about
+  8–9k cached tokens of a 15–45k prompt. A subagent runs without the parent's
+  conversation id, so the provider picked the shared memory block again every
+  round, and its query included the latest tool results: the same entries
+  came back in a different order right after the task. The one round with an
+  unchanged order hit 99%. A subagent now gets memory once in its task
+  message, like a chat message, and the provider adds no block of its own;
+  the same run now caches 92–98% from its second round.
+- Fixed: the provider's memory query uses only the user's messages, not tool
+  results, so a run without a conversation id keeps the same memory block
+  across tool rounds.
+- Changed: with two or more ChatGPT accounts, Codex subagents are no longer
+  bound to the active account. Every signed-in account offers its Luna and
+  Terra, and the subagent list shows each model once (`GPT-6-Luna (Codex)`).
+  A subagent starts on the active account, or on the next account in list
+  order (Codex 1, Codex 2…) while the active one's 5-hour or weekly limit is
+  used up; a limit a request just hit counts at once, before the next usage
+  report. A signed-out account offers no subagents. Before, a used-up active
+  account took every Codex model out of the subagent list although the other
+  subscription had room.
+- Changed: an open subagent whose account runs out or signs out moves to the
+  same model of another account on its next task and keeps its conversation
+  (the log shows `chat.subagent.moved`).
+
 ## 2.0.10 (stable release) - 2026-11-23
 
 - Fixed: HTTP providers (DeepSeek, OpenAI-compatible, local) received the

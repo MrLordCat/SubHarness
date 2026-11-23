@@ -4537,8 +4537,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 } else if (reuseFrozenToolContext) {
                     sharedMemoryContext = frozen ?? undefined;
                 } else {
+                    // Query the genuine user messages only: the "tool" conversion keeps tool
+                    // results out of the user role. Results change every round, and a query
+                    // built from them reorders the block. Without a scope nothing freezes it,
+                    // so that would break the cache right after the task on every round.
                     sharedMemoryContext = await this.sharedMemory.buildPromptContext(
-                        buildMemoryQuery(inspectionMessages),
+                        buildMemoryQuery(loopInspectionMessages),
                         sharedMemoryMaxTokens,
                         {
                             workspaceId: getCurrentWorkspaceScopeId(),

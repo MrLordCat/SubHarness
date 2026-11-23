@@ -1,6 +1,7 @@
 import * as assert from "node:assert";
 import * as vscode from "vscode";
 import type { ChatToolExecutor } from "../chat/agent-loop";
+import type { ChatMemoryContext } from "../chat/memory-context";
 import type { ChatMessage, ChatSubagentRun, ChatSubagentStep } from "../chat/shared/protocol";
 import { fitSubagentHistory, runChatSubagent, SUBAGENT_INSTRUCTIONS } from "../chat/subagent-runner";
 import { createChatToolSource } from "../chat/tool-executor";
@@ -94,6 +95,7 @@ function subagentRun(backend: FakeBackend, options: {
 	tools?: ChatToolExecutor;
 	request?: SubagentRequest;
 	history?: ChatMessage[];
+	memory?: ChatMemoryContext;
 	onHistory?: (history: ChatMessage[]) => void;
 	onFinish: (run: ChatSubagentRun) => void;
 }): Promise<string> {
@@ -108,6 +110,7 @@ function subagentRun(backend: FakeBackend, options: {
 		onUpdate: () => undefined,
 		onFinish: options.onFinish,
 		history: options.history,
+		memory: options.memory,
 		onHistory: options.onHistory,
 	}).then(result => result.report);
 }
@@ -299,6 +302,7 @@ suite("chat subagent", () => {
 		assert.strictEqual(first.messages[1].role, vscode.LanguageModelChatMessageRole.User);
 		assert.strictEqual(messageText(first.messages[1]), "Inspect a.txt");
 		assert.strictEqual(first.options.modelOptions?._subagentInvocationId, "chat-subagent-call-sub");
+		assert.strictEqual(first.options.modelOptions?._aabSkipSharedMemory, true);
 
 		assert.strictEqual(finishes.length, 1);
 		const run = finishes[0];
@@ -313,6 +317,28 @@ suite("chat subagent", () => {
 			'tool:read:{"path":"a.txt"}:error',
 			"text:REPORT",
 		]);
+	});
+
+	test("puts memory into the task once and keeps the task text the same every round", async () => {
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-read", "read", { path: "a.txt" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("REPORT")),
+		]);
+		let history: ChatMessage[] = [];
+		const block = "<memory>\n- [m1] Fact\n</memory>";
+		await subagentRun(backend, {
+			memory: { text: block, revisions: [{ id: "m1", revision: "r1" }] },
+			onHistory: value => { history = value; },
+			onFinish: () => undefined,
+		});
+
+		assert.strictEqual(backend.requests.length, 2);
+		const taskText = messageText(backend.requests[0].messages[1]);
+		assert.strictEqual(taskText, `${block}\n<userRequest>\nInspect a.txt\n</userRequest>`);
+		assert.strictEqual(messageText(backend.requests[1].messages[1]), taskText, "a tool round must not change the task, or the cache breaks right after it");
+		assert.ok(backend.requests.every(request => request.options.modelOptions?._aabSkipSharedMemory === true));
+		assert.strictEqual(history[0].memoryContext, block);
+		assert.deepStrictEqual(history[0].memoryRevisions, [{ id: "m1", revision: "r1" }]);
 	});
 
 	test("tool steps keep the formatted input and the start of the output", async () => {

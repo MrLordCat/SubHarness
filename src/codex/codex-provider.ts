@@ -910,10 +910,12 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			this.clearRepeatedFailure("codex.status", "codex.status.recovered");
 			if (!account.account) {
 				this.accountCache = undefined;
+				this.clearSubagentCatalog();
 				return this.setStatus({ state: "signedOut", summary: "Sign in required" });
 			}
 			if (account.account.type !== "chatgpt") {
 				this.accountCache = undefined;
+				this.clearSubagentCatalog();
 				return this.setStatus({ state: "wrongAuth", summary: "API auth blocked" });
 			}
 			this.cacheSubscriptionAccount(account.account);
@@ -925,6 +927,10 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				this.lastRateLimitSnapshot = this.selectRateLimit(limits);
 				this.syncLimitGate(this.lastRateLimitSnapshot);
 				usage = formatCodexRateLimit(this.lastRateLimitSnapshot);
+				if (this.models.size > 0) {
+					// A subagent picks the account by these windows; a reset brings it back.
+					this.publishSubagentProfiles();
+				}
 				const reached = this.isCodexRateLimitReached();
 				if (reached !== this.lastRateLimitReached) {
 					this.lastRateLimitReached = reached;
@@ -1007,6 +1013,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		await this.client.request("account/logout", undefined);
 		this.accountCache = undefined;
 		this.models.clear();
+		this.clearSubagentCatalog();
 		this.setStatus({ state: "signedOut", summary: "Sign in required" });
 		this.modelChanges.fire();
 	}
@@ -1828,6 +1835,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 					const limit = detectLimitError(normalized, "codex");
 					if (limit) {
 						this.limitGate.note("codex", limit);
+						this.publishSubagentProfiles();
 						this.logSink?.log("codex.chat.limit_reached", {
 							threadId,
 							stage: "turn-request",
@@ -1897,6 +1905,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				if (limit) {
 					// Waiting is the only useful action: remember the reset and answer with one line.
 					this.limitGate.note("codex", limit);
+					this.publishSubagentProfiles();
 					this.logSink?.log("codex.chat.limit_reached", {
 						threadId,
 						window: limit.window,
@@ -2917,6 +2926,35 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		setSubagentModelProfiles("codex", [], this.account.id);
 	}
 
+	/**
+	 * Every signed-in account offers its Luna and Terra under one label, "GPT-6-Luna (Codex)", so a
+	 * subagent is not bound to one subscription: the active account is tried first, the others
+	 * follow in account order, and an account whose limit is used up drops out until it resets.
+	 */
+	private publishSubagentProfiles(): void {
+		if (this.needsSignIn) {
+			// An account without a login must not take the shared label from one that can run.
+			this.clearSubagentCatalog();
+			return;
+		}
+		// The gate covers a limit a request just hit, before the next usage report says so.
+		const limited = this.isCodexRateLimitReached() || this.limitGate.blocked("codex") !== undefined;
+		const active = this.account.id === resolveActiveCodexAccountSetting(this.getConfig());
+		setSubagentModelProfiles("codex", [...this.models.values()].map(model => ({
+			// The id is this account's picker model, so the chat runs the subagent on this account.
+			id: encodeCodexAccountModelId(this.account.id, model.id),
+			label: `${model.displayName} (Codex)`,
+			provider: "codex",
+			defaultEffort: "high",
+			availability: limited ? "unavailable" : "available",
+			availabilityReason: limited
+				? `${codexProviderLabel(this.account)}: ChatGPT subscription limit reached (${this.codexUsageLimitPercent ?? "unknown"}%)`
+				: "Model is present in the current ChatGPT subscription catalog",
+			availabilityCheckedAt: Date.now(),
+			useWhen: codexSubagentUseWhen(model.id),
+		})), this.account.id, active ? 0 : 1 + (this.account.order ?? 0));
+	}
+
 	private mapKnownModels(): vscode.LanguageModelChatInformation[] {
 		const config = this.getConfig();
 		const sharedLimit = Math.max(CODEX_WORKING_CONTEXT_MIN, resolveSharedContextLimit(config));
@@ -2928,24 +2966,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		);
 		const models = [...this.models.values()];
 		const providerLabel = codexProviderLabel(this.account);
-		const rateLimitReached = this.isCodexRateLimitReached();
-		if (this.account.id === resolveActiveCodexAccountSetting(config)) {
-			setSubagentModelProfiles("codex", models.map(model => ({
-				// The subagent id and label must match the picker model.
-				id: encodeCodexAccountModelId(this.account.id, model.id),
-				label: `${model.displayName} (${providerLabel})`,
-				provider: "codex",
-				defaultEffort: "high",
-				availability: rateLimitReached ? "unavailable" : "available",
-				availabilityReason: rateLimitReached
-					? `ChatGPT subscription rate limit reached (${this.codexUsageLimitPercent ?? "unknown"}%)`
-					: "Model is present in the current ChatGPT subscription catalog",
-				availabilityCheckedAt: Date.now(),
-				useWhen: codexSubagentUseWhen(model.id),
-			})), this.account.id);
-		} else {
-			this.clearSubagentCatalog();
-		}
+		this.publishSubagentProfiles();
 		return models.map(model => mapCodexModelInformation(
 			model,
 			Math.min(this.resolveModelContextWindow(model.id, config), sharedLimit),

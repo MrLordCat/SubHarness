@@ -118,6 +118,8 @@ export interface ChatControllerDeps {
 	memory?: ChatMemorySource;
 	/** The shared memory list the panel reads and edits. */
 	memoryStore?: ChatMemoryStore;
+	/** The same model on another subscription when the one an open subagent runs on is used up. */
+	subagentStandIn?(modelId: string): string | undefined;
 }
 
 export interface ChatAttachmentsDeps {
@@ -1905,6 +1907,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		};
 		const fileReport = () => files.report(vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath) ?? []);
 		try {
+			const memory = await this._memoryContext(request.prompt, entry?.history ?? []);
 			const result = await runChatSubagent({
 				backend: this._deps.backend,
 				model,
@@ -1915,6 +1918,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				token,
 				system: await this._systemPrompt(),
 				hostContext: this._turnContext(),
+				...(memory ? { memory } : {}),
 				...(entry ? { history: entry.history, invocationId: `chat-subagent-${runtime.meta.id}-${entry.id}` } : {}),
 				onHistory: value => {
 					history = value;
@@ -1972,6 +1976,14 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			}
 			if (entry.running) {
 				throw new Error(`Subagent ${entry.id} is still working on a task; wait for its report.`);
+			}
+			// Its history is ours, so it carries over to another subscription of the same model.
+			const standIn = this._deps.subagentStandIn?.(entry.modelId);
+			const moved = standIn ? this._models.find(candidate => candidate.id === standIn) : undefined;
+			if (moved) {
+				this._log("chat.subagent.moved", { from: entry.modelId, to: moved.id });
+				entry.modelId = moved.id;
+				entry.modelName = moved.name;
 			}
 			const model = this._models.find(candidate => candidate.id === entry.modelId);
 			if (!model) {

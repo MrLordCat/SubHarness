@@ -73,7 +73,7 @@ import {
 	parseCodexErrorNotification,
 } from "../codex/turn-bridge";
 import type { LlamaLogSink } from "../logger";
-import { getSubagentModelProfiles, setSubagentModelProfiles } from "../subagent-guidance";
+import { availableSubagentModelProfiles, getSubagentModelProfiles, setSubagentModelProfiles } from "../subagent-guidance";
 
 const model: CodexModel = {
 	id: "gpt-test",
@@ -1933,26 +1933,61 @@ suite("Codex subscription provider", () => {
 		restored.dispose();
 	});
 
-	test("only the active Codex account publishes subagent profiles", () => {
-		const provider = new CodexChatModelProvider("test", undefined, undefined, undefined, { id: "work", label: "Work", providerLabel: "Codex 2" });
-		const internals = provider as unknown as { models: Map<string, CodexModel>; mapKnownModels(): vscode.LanguageModelChatInformation[]; getConfig(): vscode.WorkspaceConfiguration };
-		const originalConfig = internals.getConfig.bind(provider);
+	test("Codex accounts offer one subagent per model: the active account first, a used-up one steps aside", () => {
+		interface Internals {
+			models: Map<string, CodexModel>;
+			mapKnownModels(): vscode.LanguageModelChatInformation[];
+			getConfig(): vscode.WorkspaceConfiguration;
+			lastRateLimitSnapshot: unknown;
+			limitGate: { note(provider: "codex", match: { provider: "codex"; reason: string }): void };
+			setStatus(status: { state: "signedOut"; summary: string }): void;
+		}
 		let active = "";
-		internals.getConfig = () => {
-			const config = originalConfig();
-			return { ...config, get: (key: string, fallback: unknown) => key === "codexActiveAccount" ? active : config.get(key, fallback) } as vscode.WorkspaceConfiguration;
+		const setUp = (provider: CodexChatModelProvider): Internals => {
+			const internals = provider as unknown as Internals;
+			const originalConfig = internals.getConfig.bind(provider);
+			internals.getConfig = () => {
+				const config = originalConfig();
+				return { ...config, get: (key: string, fallback: unknown) => key === "codexActiveAccount" ? active : config.get(key, fallback) } as vscode.WorkspaceConfiguration;
+			};
+			internals.models.set("gpt-6-luna", { ...model, id: "gpt-6-luna", model: "gpt-6-luna", displayName: "GPT-6 Luna" });
+			return internals;
 		};
-		internals.models.set("gpt-6-luna", { ...model, id: "gpt-6-luna", model: "gpt-6-luna", displayName: "GPT-6 Luna" });
+		const firstProvider = new CodexChatModelProvider("test", undefined, undefined, undefined, { id: "", label: "Default", providerLabel: "Codex 1", order: 0 });
+		const secondProvider = new CodexChatModelProvider("test", undefined, undefined, undefined, { id: "work", label: "Work", providerLabel: "Codex 2", order: 1 });
+		const first = setUp(firstProvider);
+		const second = setUp(secondProvider);
+		const offered = () => availableSubagentModelProfiles().filter(profile => profile.provider === "codex").map(profile => `${profile.id} | ${profile.label}`);
 		try {
 			setSubagentModelProfiles("codex", []);
-			assert.strictEqual(internals.mapKnownModels()[0].name, "GPT-6 Luna (Codex 2)");
-			assert.deepStrictEqual(getSubagentModelProfiles().filter(profile => profile.provider === "codex"), []);
+			assert.strictEqual(second.mapKnownModels()[0].name, "GPT-6 Luna (Codex 2)", "the picker still names the account");
+			first.mapKnownModels();
+			assert.deepStrictEqual(offered(), ["codex::gpt-6-luna | GPT-6 Luna (Codex)"], "one entry for both accounts");
+
 			active = "work";
-			internals.mapKnownModels();
-			assert.deepStrictEqual(getSubagentModelProfiles().filter(profile => profile.provider === "codex").map(profile => profile.label), ["GPT-6 Luna (Codex 2)"]);
+			first.mapKnownModels();
+			second.mapKnownModels();
+			assert.deepStrictEqual(offered(), ["codex::work::gpt-6-luna | GPT-6 Luna (Codex)"], "the active account is tried first");
+
+			second.lastRateLimitSnapshot = { primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: null }, secondary: null };
+			second.mapKnownModels();
+			assert.deepStrictEqual(offered(), ["codex::gpt-6-luna | GPT-6 Luna (Codex)"], "a used-up account steps aside");
+
+			// A signed-out active account must not take the shared label from the one that can run.
+			second.lastRateLimitSnapshot = { primary: { usedPercent: 10, windowDurationMins: 300, resetsAt: null }, secondary: null };
+			second.setStatus({ state: "signedOut", summary: "Sign in required" });
+			second.mapKnownModels();
+			assert.deepStrictEqual(offered(), ["codex::gpt-6-luna | GPT-6 Luna (Codex)"], "a signed-out account steps aside");
+			assert.ok(!getSubagentModelProfiles().some(profile => profile.id.startsWith("codex::work::")), "and drops its subagents");
+
+			// A limit a request just hit counts before the next usage report.
+			first.limitGate.note("codex", { provider: "codex", reason: "usage limit" });
+			first.mapKnownModels();
+			assert.deepStrictEqual(offered(), [], "no Codex subagent while both are used up");
 		} finally {
 			setSubagentModelProfiles("codex", []);
-			provider.dispose();
+			firstProvider.dispose();
+			secondProvider.dispose();
 		}
 	});
 

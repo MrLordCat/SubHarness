@@ -29,7 +29,13 @@ export function subagentProviderForSource(source: Pick<ChatModelSource, "protoco
 	return "api";
 }
 
-const catalogs = new Map<SubagentProvider, Map<string, SubagentModelProfile[]>>();
+/** One provider scope, a Codex account for example; scopes with a lower priority are tried first. */
+interface ScopedCatalog {
+	priority: number;
+	profiles: SubagentModelProfile[];
+}
+
+const catalogs = new Map<SubagentProvider, Map<string, ScopedCatalog>>();
 
 /** Codex subagent roles: Luna, the fast affordable model, takes small steps; Terra takes larger ones. */
 export type CodexSubagentRole = "luna" | "terra";
@@ -91,12 +97,15 @@ function newestCodexSubagents(profiles: readonly SubagentModelProfile[]): Subage
 
 /**
  * Codex passes its account id so two ChatGPT accounts keep their own subagents;
- * without a scope the call replaces every scope of the provider.
+ * without a scope the call replaces every scope of the provider. Accounts list
+ * the same models under the same labels, and the priority decides which
+ * account a subagent tries first.
  */
 export function setSubagentModelProfiles(
 	provider: SubagentProvider,
 	profiles: readonly SubagentModelProfile[],
-	scope?: string
+	scope?: string,
+	priority = 0
 ): void {
 	const eligible = provider === "codex" ? newestCodexSubagents(profiles) : profiles;
 	const unique = new Map(eligible.map(profile => [profile.id, profile]));
@@ -114,7 +123,7 @@ export function setSubagentModelProfiles(
 		if (sorted.length === 0) {
 			catalogs.delete(provider);
 		} else {
-			catalogs.set(provider, new Map([["", sorted]]));
+			catalogs.set(provider, new Map([["", { priority, profiles: sorted }]]));
 		}
 		return;
 	}
@@ -131,31 +140,32 @@ export function setSubagentModelProfiles(
 		scopes = new Map();
 		catalogs.set(provider, scopes);
 	}
-	scopes.set(scope, sorted);
+	scopes.set(scope, { priority, profiles: sorted });
 }
 
 export function getSubagentModelProfiles(): SubagentModelProfile[] {
-	// API catalogs can expose the same display name more than once (for example
-	// two Cursor ids named "Auto"); a subagent is selected by label, so keep the
-	// first one instead of advertising a duplicate that can never be chosen.
-	const seenLabels = new Set<string>();
+	// A subagent is selected by label, so each label is listed once. API catalogs can expose the
+	// same display name twice (two Cursor ids named "Auto"): the first one stays. Codex accounts
+	// share the labels of their models: the account tried first stays unless its limit is used up
+	// and a later account's is not, so a second subscription stands in for the first.
+	const indexByLabel = new Map<string, number>();
 	const profiles: SubagentModelProfile[] = [];
 	for (const provider of SUBAGENT_PROVIDER_ORDER) {
-		const scopes = catalogs.get(provider);
-		const orderedScopes = scopes
-			? [...scopes.keys()].sort((left, right) => {
-				if (left === "") { return right === "" ? 0 : -1; }
-				if (right === "") { return 1; }
-				return left.localeCompare(right);
-			})
-			: [];
-		for (const scope of orderedScopes) {
-			for (const profile of scopes!.get(scope) ?? []) {
-				if (seenLabels.has(profile.label)) {
-					continue;
+		const scopes = [...(catalogs.get(provider)?.entries() ?? [])].sort(([left, a], [right, b]) => {
+			if (a.priority !== b.priority) { return a.priority - b.priority; }
+			if (left === "") { return right === "" ? 0 : -1; }
+			if (right === "") { return 1; }
+			return left.localeCompare(right);
+		});
+		for (const [, catalog] of scopes) {
+			for (const profile of catalog.profiles) {
+				const index = indexByLabel.get(profile.label);
+				if (index === undefined) {
+					indexByLabel.set(profile.label, profiles.length);
+					profiles.push(profile);
+				} else if (profiles[index].availability === "unavailable" && profile.availability !== "unavailable") {
+					profiles[index] = profile;
 				}
-				seenLabels.add(profile.label);
-				profiles.push(profile);
 			}
 		}
 	}
@@ -165,6 +175,27 @@ export function getSubagentModelProfiles(): SubagentModelProfile[] {
 /** Profiles a subagent may start with now; exhausted subscriptions are left out. */
 export function availableSubagentModelProfiles(): SubagentModelProfile[] {
 	return getSubagentModelProfiles().filter(profile => profile.availability !== "unavailable");
+}
+
+/**
+ * The model an open subagent moves to when the subscription of its own model is used up or
+ * gone: the available model listed under the same label, that is the same Codex model of
+ * another account. Undefined while the own model is available or nothing can stand in.
+ */
+export function subagentStandIn(modelId: string): string | undefined {
+	const own = [...catalogs.values()]
+		.flatMap(scopes => [...scopes.values()].flatMap(catalog => catalog.profiles))
+		.find(profile => profile.id === modelId);
+	if (own) {
+		return own.availability === "unavailable"
+			? availableSubagentModelProfiles().find(profile => profile.label === own.label && profile.id !== modelId)?.id
+			: undefined;
+	}
+	// The account dropped its catalog (signed out, turned off): the same Codex model of another account.
+	const slug = bareModelId(modelId);
+	return modelId.startsWith("codex::") && codexSubagentRole(slug)
+		? availableSubagentModelProfiles().find(profile => profile.provider === "codex" && bareModelId(profile.id) === slug)?.id
+		: undefined;
 }
 
 

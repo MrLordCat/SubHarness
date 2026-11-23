@@ -29,6 +29,8 @@ export interface CodexAccountIdentity {
 	id: string;
 	label: string;
 	providerLabel?: string;
+	/** Position in the account list: 0 for the built-in account, then the order of `llamacpp.codexAccounts`. */
+	order?: number;
 	codexHome?: string;
 	cliPath?: string;
 }
@@ -90,7 +92,7 @@ export function resolveCodexAccounts(raw: unknown, homeDir = os.homedir()): Code
 			: undefined;
 		accounts.push({ id, label, codexHome: home, ...(cliPath ? { cliPath } : {}) });
 	}
-	return accounts.map((account, index) => ({ ...account, providerLabel: accounts.length === 1 ? "Codex" : `Codex ${index + 1}` }));
+	return accounts.map((account, index) => ({ ...account, order: index, providerLabel: accounts.length === 1 ? "Codex" : `Codex ${index + 1}` }));
 }
 
 export function resolveActiveCodexAccountId(

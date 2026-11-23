@@ -2411,6 +2411,114 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.ok(contents.every(content => !content.includes("Shared durable memory")));
         });
 
+        test("keeps the memory block of a scopeless run the same across tool rounds", async () => {
+            const queries: string[] = [];
+            const memoryProvider = {
+                buildPromptContext: async (query: string) => {
+                    queries.push(query);
+                    const text = `memory picked for: ${query}`;
+                    return { text, entryCount: 1, entryIds: ["memory-1"], estimatedTokens: Math.ceil(text.length / 4), expiredEntryCount: 0 };
+                },
+            };
+            const isolatedProvider = new LlamaCppChatModelProvider(
+                new MockSecretStorage(),
+                "test-user-agent",
+                undefined,
+                memoryProvider
+            );
+            const providerAny = isolatedProvider as unknown as {
+                getModelSources: () => Promise<Array<{
+                    key: string;
+                    label: string;
+                    serverUrl: string;
+                    familyOverride?: string;
+                    contextLengthFallback?: number;
+                }>>;
+                getRuntimeContextLengthWithCache: () => Promise<number | undefined>;
+                acquireChatRequestSlot: (
+                    requestId: string,
+                    queueTimeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<{ release: () => void; waitMs: number }>;
+                sendChatCompletion: (
+                    serverUrl: string,
+                    headers: Record<string, string>,
+                    requestBody: Record<string, unknown>,
+                    timeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<Response>;
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+            const sent: Array<Record<string, unknown>> = [];
+            providerAny.getModelSources = async () => [{
+                key: "local",
+                label: "Local",
+                serverUrl: "http://localhost:8000",
+                familyOverride: "qwen",
+                contextLengthFallback: 65536,
+            }];
+            providerAny.getRuntimeContextLengthWithCache = async () => 65536;
+            providerAny.acquireChatRequestSlot = async () => ({ release: () => undefined, waitMs: 0 });
+            providerAny.sendChatCompletion = async (_serverUrl, _headers, requestBody) => {
+                sent.push(JSON.parse(JSON.stringify(requestBody)) as Record<string, unknown>);
+                return new Response(new ReadableStream<Uint8Array>({
+                    start(controller) { controller.close(); },
+                }), { status: 200 });
+            };
+            providerAny.processStreamingResponse = async (_responseBody, progress) => {
+                progress.report(new vscode.LanguageModelTextPart("done"));
+            };
+
+            const model = {
+                id: "local::qwen3-local",
+                name: "qwen3-local (Local)",
+                family: "qwen",
+                version: "1",
+                maxInputTokens: 60000,
+                maxOutputTokens: 4096,
+                capabilities: {},
+            } as unknown as vscode.LanguageModelChatInformation;
+            // A subagent run: the composite drops the parent's conversation id, so there is no scope.
+            const options = {
+                modelOptions: { _subagentInvocationId: "sub-1" },
+                tools: [{
+                    name: "read_file",
+                    description: "Read a file",
+                    inputSchema: { type: "object", properties: {} },
+                }],
+                toolMode: vscode.LanguageModelChatToolMode.Auto,
+            } satisfies vscode.ProvideLanguageModelChatResponseOptions;
+            const call = new vscode.LanguageModelToolCallPart("call-scopeless", "read_file", {});
+            const result = new vscode.LanguageModelToolResultPart(
+                "call-scopeless",
+                [new vscode.LanguageModelTextPart("tool output that changes every round")]
+            );
+            const task = [vscode.LanguageModelChatMessage.User("inspect the file")];
+            const toolRound: vscode.LanguageModelChatMessage[] = [
+                ...task,
+                { role: vscode.LanguageModelChatMessageRole.Assistant, content: [call], name: undefined },
+                { role: vscode.LanguageModelChatMessageRole.User, content: [result], name: undefined },
+            ];
+            const progress = { report: () => undefined };
+            const cancellation = new vscode.CancellationTokenSource().token;
+            await isolatedProvider.provideLanguageModelChatResponse(model, task, options, progress, cancellation);
+            await isolatedProvider.provideLanguageModelChatResponse(model, toolRound, options, progress, cancellation);
+
+            assert.strictEqual(sent.length, 2);
+            assert.ok(queries.every(query => !query.includes("tool output")), "tool results must stay out of the memory query");
+            assert.strictEqual(queries[1], queries[0]);
+            const memoryBlock = (body: Record<string, unknown>): string | undefined =>
+                (body.messages as Array<{ content?: unknown }>)
+                    .map(message => String(message.content ?? ""))
+                    .find(content => content.includes("Shared durable memory"));
+            assert.ok(memoryBlock(sent[0]));
+            assert.strictEqual(memoryBlock(sent[1]), memoryBlock(sent[0]), "the block after the task must not change between rounds");
+        });
+
         test("builds an exclusive ordered prompt breakdown with memory and message subsections", () => {
             const providerAny = provider as unknown as {
                 buildPromptSegments: (
