@@ -86,7 +86,9 @@ that prefix in several ways:
   between complete assistant/tool transactions; an assistant tool call always
   stays paired with its retained tool results.
 - Auto-compaction uses `compactionTargetRatio` (25–90%) as the retained message
-  budget relative to the current message context. It chooses the earliest safe
+  budget relative to the smaller of the current message context and the soft
+  input target, so a history far over budget lands under it in one pass, also
+  on an overflow retry. It chooses the earliest safe
   transaction boundary that fits, so normal results land close to the target
   instead of collapsing to a tiny tail when one user turn contains hundreds of
   tool messages. Fixed tool-schema and reply-reserve tokens remain outside this

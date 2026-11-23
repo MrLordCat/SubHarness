@@ -81,8 +81,8 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 		}
 		const selected = this.registry.resolve(model.id);
 		this.registry.observeRequest(selected, token, options.modelOptions?._conversationId);
-		// Every adapter receives the same authoritative semantic history. Native
-		// providers select their own continuation boundary AFTER this restoration.
+		// The chat sends its full history, already compacted. The journal only records the
+		// transcript and the last serving model: restoring messages from it would undo that compaction.
 		const usesHistory = Boolean(this.history);
 		let history: Awaited<ReturnType<ConversationHistory["begin"]>> | undefined;
 		try { history = await this.history?.begin(options.modelOptions?._conversationId, messages); }
@@ -120,7 +120,7 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 		};
 		try { await selected.provider.provideLanguageModelChatResponse(
 			model,
-			usesHistory ? history?.messages ?? messages : messages,
+			messages,
 			responseOptions,
 			{ report },
 			token

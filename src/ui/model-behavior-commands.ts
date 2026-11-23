@@ -153,7 +153,7 @@ async function pickCompactionTargetRatio(current: number): Promise<number | unde
 		})),
 		{
 			title: "SubHarness Compaction Target",
-			placeHolder: "Select how much of the current message context to retain",
+			placeHolder: "Select how much of the message context (at most the soft input target) to retain",
 			ignoreFocusOut: true,
 		}
 	);
@@ -194,7 +194,7 @@ export function registerModelBehaviorCommands(refresh: () => void): vscode.Dispo
 			await config.update("compactionTargetRatio", next, vscode.ConfigurationTarget.Global);
 			refresh();
 			vscode.window.showInformationMessage(
-				`SubHarness compaction target: ${Math.round(next * 100)}% of current context retained`
+				`SubHarness compaction target: ${Math.round(next * 100)}% of the context retained`
 			);
 		}),
 		vscode.commands.registerCommand("llamacpp.setThinkingMode", async () => {

@@ -106,7 +106,7 @@ suite("context budget", () => {
 			softInputTarget: 101171,
 			forceInputTarget: 1_000_000,
 			overflowRetry: false,
-		}), { kind: "auto", target: 82500, reason: "auto" });
+		}), { kind: "auto", target: 75878, reason: "auto" });
 
 		assert.deepStrictEqual(selectContextCompaction({
 			messageTokens: 101000,
@@ -125,7 +125,7 @@ suite("context budget", () => {
 			forceInputTarget: 252_000,
 			overflowRetry: false,
 			targetRatio: 0.5,
-		}), { kind: "auto", target: 130_000, reason: "force" });
+		}), { kind: "auto", target: 117_500, reason: "force" });
 
 		assert.deepStrictEqual(selectContextCompaction({
 			messageTokens: 240_000,
@@ -145,7 +145,7 @@ suite("context budget", () => {
 			forceInputTarget: 1_000_000,
 			overflowRetry: false,
 			targetRatio: 0.25,
-		}), { kind: "auto", target: 27500, reason: "auto" });
+		}), { kind: "auto", target: 25292, reason: "auto" });
 
 		assert.deepStrictEqual(selectContextCompaction({
 			messageTokens: 110000,
@@ -154,7 +154,7 @@ suite("context budget", () => {
 			forceInputTarget: 1_000_000,
 			overflowRetry: false,
 			targetRatio: 0.5,
-		}), { kind: "auto", target: 55000, reason: "auto" });
+		}), { kind: "auto", target: 50585, reason: "auto" });
 
 		assert.deepStrictEqual(selectContextCompaction({
 			messageTokens: 101000,
@@ -174,7 +174,7 @@ suite("context budget", () => {
 			forceInputTarget: 1_000_000,
 			overflowRetry: false,
 			targetRatio: 0.1,
-		}), { kind: "auto", target: 250, reason: "auto" });
+		}), { kind: "auto", target: 225, reason: "auto" });
 		assert.deepStrictEqual(selectContextCompaction({
 			messageTokens: 1000,
 			autoCompact: true,
@@ -182,13 +182,13 @@ suite("context budget", () => {
 			forceInputTarget: 1_000_000,
 			overflowRetry: false,
 			targetRatio: 1,
-		}), { kind: "auto", target: 900, reason: "auto" });
+		}), { kind: "auto", target: 810, reason: "auto" });
 	});
 
 	test("auto-compaction lands below the trigger to avoid micro-compactions", () => {
 		// Compacting to exactly the soft target re-triggers on the next turn.
-		// The 0.75 ratio keeps 75% of the current size (~25% reduction), which
-		// leaves headroom so a single compaction lasts for many turns.
+		// The 0.75 ratio keeps 75% of the soft target (~25% headroom), so a
+		// single compaction lasts for many turns.
 		const decision = selectContextCompaction({
 			messageTokens: 450000,
 			autoCompact: true,
@@ -198,7 +198,7 @@ suite("context budget", () => {
 		});
 		assert.strictEqual(decision.kind, "auto");
 		if (decision.kind === "auto") {
-			assert.strictEqual(decision.target, 337500);
+			assert.strictEqual(decision.target, 301575);
 			assert.ok(decision.target < 402100, "target must stay below the trigger");
 		}
 	});
@@ -211,5 +211,15 @@ suite("context budget", () => {
 			forceInputTarget: 1_000_000,
 			overflowRetry: true,
 		}), { kind: "auto", target: 75750, reason: "overflow" });
+	});
+
+	test("a history far over budget lands under the budget in one pass, also on overflow", () => {
+		// DeepSeek, 2026-11-23: 1.73M tokens went to 1.3M, then 0.9M, then 0.68M
+		// against a 432k soft target, because each pass kept 75% of its own input.
+		const budget = { autoCompact: true, softInputTarget: 432_794, forceInputTarget: 451_584 };
+		assert.deepStrictEqual(selectContextCompaction({ ...budget, messageTokens: 1_728_560, overflowRetry: false }),
+			{ kind: "auto", target: 324_595, reason: "force" });
+		assert.deepStrictEqual(selectContextCompaction({ ...budget, messageTokens: 906_564, overflowRetry: true }),
+			{ kind: "auto", target: 324_595, reason: "overflow" });
 	});
 });

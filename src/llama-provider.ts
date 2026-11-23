@@ -567,6 +567,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     private diagUserPartsLoggedRequestId: string | undefined;
     private lastToolExecutionErrorDetails: Array<{ name?: string; command?: string; head?: string }> = [];
     private readonly conversationMessageSnapshots = new BoundedMap<string, ConversationMessageSnapshot>(4);
+    /** Chats whose server rejected tool-role results; later requests start in user mode so the user-format snapshot still aligns. */
+    private readonly userToolResultScopes = new Set<string>();
     /** Conversation scopes already served since this provider instance started. */
     private readonly scopesSeenSinceStartup = new Set<string>();
     private readonly chatRequestQueue: SerialRequestQueue;
@@ -2144,6 +2146,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             (lower.includes("role") && lower.includes("tool")) ||
             (lower.includes("invalid") && lower.includes("tool_call_id"))
         );
+    }
+
+    /** First 500 characters of an HTTP error body, whitespace collapsed, for the log. */
+    private errorExcerpt(text: string): string | undefined {
+        const collapsed = (text || "").replace(/\s+/g, " ").trim();
+        return collapsed ? (collapsed.length > 500 ? `${collapsed.slice(0, 500)}…` : collapsed) : undefined;
     }
 
     /**
@@ -4612,7 +4620,15 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             );
         };
 
-        const initialToolResultMode: ToolResultMode = toolResultModeConfig === "user" ? "user" : "tool";
+        const rememberedUserMode = toolResultModeConfig === "auto"
+            && conversationScope !== undefined
+            && this.userToolResultScopes.has(conversationScope);
+        const initialToolResultMode: ToolResultMode = toolResultModeConfig === "user" || rememberedUserMode
+            ? "user"
+            : "tool";
+        if (rememberedUserMode) {
+            this.log("chat.tool_result_mode.remembered", { requestId, mode: "user" });
+        }
         let activeToolResultMode: ToolResultMode = initialToolResultMode;
 
         // apiDirect mode already caps tools inside convertTools via apiDirectMaxTools.
@@ -5435,6 +5451,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     attemptNo,
                     status: response.status,
                     statusText: response.statusText,
+                    errorExcerpt: this.errorExcerpt(errText),
                 });
                 if (this.isContextOverflowError(response.status, errText)) {
                     const overflowCompaction = selectContextCompaction({
@@ -5563,6 +5580,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     status: response.status,
                     statusText: response.statusText,
                     retriedAfterOverflow,
+                    errorExcerpt: this.errorExcerpt(errorText),
                 });
                 return {
                     ok: false,
@@ -5648,7 +5666,18 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                         to: "user",
                         status: attempt.status,
                         statusText: attempt.statusText,
+                        errorExcerpt: this.errorExcerpt(attempt.errorText),
                     });
+                    if (conversationScope) {
+                        this.userToolResultScopes.delete(conversationScope);
+                        this.userToolResultScopes.add(conversationScope);
+                        if (this.userToolResultScopes.size > 256) {
+                            const oldest = this.userToolResultScopes.values().next().value;
+                            if (oldest !== undefined) {
+                                this.userToolResultScopes.delete(oldest);
+                            }
+                        }
+                    }
                     activeToolResultMode = "user";
                     usedMessages = convertForMode(activeToolResultMode);
                     attempt = await attemptRequest(usedMessages);

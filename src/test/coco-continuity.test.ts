@@ -413,7 +413,7 @@ suite("Coco lossless handoff contracts", () => {
 		assert.ok(JSON.stringify(updatedInstructions).includes("UPDATED PROJECT RULE"));
 		assert.ok(JSON.stringify(updatedInstructions).includes("OLD important finding"));
 	});
-	test("Codex → Coco restores omitted history from the workspace journal, including after reload", async () => {
+	test("Codex → Coco sends the Chat's own messages and links the journal transcript, including after reload", async () => {
 		const f = await fixture();
 		try {
 			const makeComposite = () => new CompositeChatModelProvider({ history: new ConversationHistory(f.root), providers: [
@@ -426,8 +426,12 @@ suite("Coco lossless handoff contracts", () => {
 			first.dispose();
 			const restored = makeComposite();
 			await restored.provideLanguageModelChatResponse(model, [user("Investigate"), assistant("CODEX_FINDING"), user("Continue in Coco")], options(), { report: () => undefined }, none);
-			assert.match(f.prompts.at(-1)!, /EARLY REQUIREMENT/); assert.match(f.prompts.at(-1)!, /OLD FACT/); assert.match(f.prompts.at(-1)!, /CODEX_FINDING/);
+			// The Chat compacted the early turns away; the journal must not bring them back into the prompt.
+			assert.doesNotMatch(f.prompts.at(-1)!, /EARLY REQUIREMENT/); assert.doesNotMatch(f.prompts.at(-1)!, /OLD FACT/); assert.match(f.prompts.at(-1)!, /CODEX_FINDING/);
 			assert.match(f.prompts.at(-1)!, /Complete visible Chat transcript \(JSON Lines\)/);
+			const journals = (await fs.readdir(f.root)).filter(name => name.endsWith(".json"));
+			const saved = await Promise.all(journals.map(name => fs.readFile(path.join(f.root, name), "utf8")));
+			assert.ok(saved.some(text => text.includes("EARLY REQUIREMENT") && text.includes("CODEX_FINDING")), "the linked transcript keeps the whole visible chat");
 			restored.dispose();
 		} finally { await f.dispose(); }
 	});

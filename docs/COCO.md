@@ -1,7 +1,8 @@
 # Snowflake Coco
 
-Since 1.18.14, all adapters receive the common conversation journal; Codex,
-Coco and Cursor prepare handoffs using one token-budget planner. The old
+Since 2.0.10, all adapters receive the SubHarness chat's own, already compacted
+history; the common conversation journal is the full transcript prompts link
+to. Codex, Coco and Cursor prepare handoffs using one token-budget planner. The old
 million-character Coco cutoff is gone. See [shared context](SHARED_CONTEXT.md)
 for settings, native continuation, archive/image preservation and long-run errors.
 

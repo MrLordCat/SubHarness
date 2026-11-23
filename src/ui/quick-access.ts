@@ -1149,7 +1149,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 				}),
 				new QuickAccessItem("modelBehavior.compactionTarget", "Compaction Target", {
 					description: `${Math.round(compactionTargetRatio * 100)}% retained`,
-					tooltip: "Share of the current message context retained by proactive and overflow compaction. 25% is extreme compression and works best with DeepSeek AI summaries.",
+					tooltip: "Share of the message context, at most the soft input target, retained by proactive and overflow compaction. 25% is extreme compression and works best with DeepSeek AI summaries.",
 					icon: new vscode.ThemeIcon("fold-down"),
 					command: command("llamacpp.setCompactionTargetRatio", "Set Compaction Target"),
 				}),

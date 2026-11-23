@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/SubHarness.git"
 	},
-	"version": "2.0.9",
+	"version": "2.0.10",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -537,7 +537,7 @@
 					"default": 0.75,
 					"minimum": 0.25,
 					"maximum": 0.9,
-					"description": "Share of the current message context retained when proactive or overflow compaction runs. Set 0.25 to retain about 25% and free roughly 75%; extreme targets work best with DeepSeek AI summaries and may keep less raw recent history."
+					"description": "Share of the message context retained when proactive or overflow compaction runs, measured against the smaller of the current context and the soft input target. Set 0.25 to retain about 25% and free roughly 75%; extreme targets work best with DeepSeek AI summaries and may keep less raw recent history."
 				},
 				"llamacpp.deepSeekCompactionSummary": {
 					"type": "boolean",

@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.0.10 (stable release) - 2026-11-23
+
+- Fixed: HTTP providers (DeepSeek, OpenAI-compatible, local) received the
+  whole saved chat instead of the chat's compacted history. The common journal
+  restored messages the chat had compacted away, a leftover from the Copilot
+  Chat integration removed in 2.0.8: a chat compacted to 107k tokens on a
+  switch to DeepSeek arrived as 1.7M. Every provider now gets the chat's own
+  messages; the journal remains the transcript prompts link to and still
+  records which model answered last.
+- Fixed: a compaction kept 75% of its input even far over the budget, so one
+  request made up to three summaries (1.7M → 1.3M → 0.9M → 0.68M) and an
+  overflow retry sent 713k tokens against a 475k budget. Proactive and
+  overflow compaction now keep the configured share of the smaller of the
+  current size and the soft input target.
+- Fixed: after a server rejected tool-role results, every later request of
+  the chat repeated the rejected attempt before falling back to user-style
+  results, and the snapshot saved in user format never matched again, so the
+  history was compacted and missed the prompt cache on every request. The
+  fallback is now remembered for the chat until the window reloads.
+- Changed: `chat.request.error`, `chat.request.final_error` and
+  `chat.tool_result_mode.fallback` log the first 500 characters of the
+  server's error text.
+
 ## 2.0.9 (stable release) - 2026-11-23
 
 - Added: several `subagent` calls in one model response run in parallel, up

@@ -563,6 +563,140 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.strictEqual(usage.total_tokens, usage.prompt_tokens + usage.completion_tokens);
         });
 
+        test("remembers user-style tool results after a tool-role rejection", async () => {
+            const providerAny = provider as unknown as {
+                getModelSources: () => Promise<Array<{
+                    key: string;
+                    label: string;
+                    serverUrl: string;
+                    apiKey?: string;
+                    familyOverride?: string;
+                    contextLengthOverride?: number;
+                }>>;
+                getRuntimeContextLengthWithCache: () => Promise<number | undefined>;
+                acquireChatRequestSlot: (
+                    requestId: string,
+                    queueTimeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<{ release: () => void; waitMs: number }>;
+                sendChatCompletion: (
+                    serverUrl: string,
+                    headers: Record<string, string>,
+                    requestBody: Record<string, unknown>,
+                    timeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<Response>;
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+            const originalGetModelSources = providerAny.getModelSources;
+            const originalGetRuntimeContextLengthWithCache = providerAny.getRuntimeContextLengthWithCache;
+            const originalAcquireChatRequestSlot = providerAny.acquireChatRequestSlot;
+            const originalSendChatCompletion = providerAny.sendChatCompletion;
+            const originalProcessStreamingResponse = providerAny.processStreamingResponse;
+            const sentBodies: Array<Record<string, unknown>> = [];
+            const emptyStream = () => new Response(
+                new ReadableStream<Uint8Array>({
+                    start(controller) {
+                        controller.close();
+                    },
+                }),
+                { status: 200 }
+            );
+            const messages = [
+                vscode.LanguageModelChatMessage.User("read it"),
+                {
+                    role: vscode.LanguageModelChatMessageRole.Assistant,
+                    content: [new vscode.LanguageModelToolCallPart("call-1", "read_file", { path: "a.ts" })],
+                    name: undefined,
+                },
+                vscode.LanguageModelChatMessage.User([
+                    new vscode.LanguageModelToolResultPart("call-1", [new vscode.LanguageModelTextPart("file text")]),
+                ]),
+            ] as vscode.LanguageModelChatMessage[];
+            const nextMessages = [
+                ...messages,
+                vscode.LanguageModelChatMessage.Assistant("done"),
+                vscode.LanguageModelChatMessage.User("next"),
+            ];
+            const model = {
+                id: "deepseek::deepseek-chat",
+                name: "deepseek-chat (DeepSeek)",
+                family: "deepseek",
+                version: "1",
+                maxInputTokens: 1_000_000,
+                maxOutputTokens: 70_000,
+                capabilities: {},
+            } as unknown as vscode.LanguageModelChatInformation;
+            const options = {
+                modelOptions: { _conversationId: "remember-mode-chat" },
+                tools: [],
+                toolMode: vscode.LanguageModelChatToolMode.Auto,
+            };
+            const rolesOf = (body: Record<string, unknown>): string[] =>
+                (body.messages as Array<{ role?: string }>).map(message => message.role ?? "");
+
+            try {
+                providerAny.getModelSources = async () => [{
+                    key: "deepseek",
+                    label: "DeepSeek",
+                    serverUrl: "https://api.deepseek.com",
+                    apiKey: "sk-test",
+                    familyOverride: "deepseek",
+                    contextLengthOverride: 1048576,
+                }];
+                providerAny.getRuntimeContextLengthWithCache = async () => 1048576;
+                providerAny.acquireChatRequestSlot = async () => ({ release: () => undefined, waitMs: 0 });
+                providerAny.sendChatCompletion = async (_serverUrl, _headers, requestBody) => {
+                    sentBodies.push(JSON.parse(JSON.stringify(requestBody)) as Record<string, unknown>);
+                    if (sentBodies.length === 1) {
+                        return new Response(
+                            JSON.stringify({
+                                error: {
+                                    message: "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'",
+                                },
+                            }),
+                            { status: 400, statusText: "Bad Request" }
+                        );
+                    }
+                    return emptyStream();
+                };
+                providerAny.processStreamingResponse = async (_responseBody, progress) => {
+                    progress.report(new vscode.LanguageModelTextPart("done"));
+                };
+
+                await provider.provideLanguageModelChatResponse(
+                    model,
+                    messages,
+                    options,
+                    { report: () => undefined },
+                    new vscode.CancellationTokenSource().token
+                );
+                assert.strictEqual(sentBodies.length, 2, "expected a tool-mode attempt and a user-mode fallback");
+                await provider.provideLanguageModelChatResponse(
+                    model,
+                    nextMessages,
+                    options,
+                    { report: () => undefined },
+                    new vscode.CancellationTokenSource().token
+                );
+            } finally {
+                providerAny.getModelSources = originalGetModelSources;
+                providerAny.getRuntimeContextLengthWithCache = originalGetRuntimeContextLengthWithCache;
+                providerAny.acquireChatRequestSlot = originalAcquireChatRequestSlot;
+                providerAny.sendChatCompletion = originalSendChatCompletion;
+                providerAny.processStreamingResponse = originalProcessStreamingResponse;
+            }
+
+            assert.ok(rolesOf(sentBodies[0]).includes("tool"), "the first attempt must send a tool-role result");
+            assert.ok(!rolesOf(sentBodies[1]).includes("tool"), "the fallback must send user-style tool results");
+            assert.strictEqual(sentBodies.length, 3, "the next request must not repeat the rejected tool-mode attempt");
+            assert.ok(!rolesOf(sentBodies[2]).includes("tool"), "the next request must start in the remembered user mode");
+        });
+
         test("provideTokenCount calculation for text", async () => {
             const count = await provider.provideTokenCount(
                 {} as vscode.LanguageModelChatInformation,

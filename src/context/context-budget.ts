@@ -40,13 +40,15 @@ interface ContextCompactionDecisionInput {
 /**
  * Chooses whether to compact for a request. A single soft scheme is used in
  * every case: proactively when the context passes the soft target, and
- * unconditionally on a confirmed overflow retry. Both use the configured
- * target ratio, so proactive and overflow compaction have identical behavior.
+ * unconditionally on a confirmed overflow retry. Both keep the configured
+ * share of the smaller of the current size and the soft target: a history far
+ * over budget lands under the budget in one pass, not at 75% of its own size.
  */
 export function selectContextCompaction(
 	input: ContextCompactionDecisionInput
 ): ContextCompactionDecision {
-	const target = Math.max(1, Math.floor(input.messageTokens * normalizeCompactionTargetRatio(input.targetRatio)));
+	const basis = Math.min(input.messageTokens, Math.max(1, input.softInputTarget));
+	const target = Math.max(1, Math.floor(basis * normalizeCompactionTargetRatio(input.targetRatio)));
 	if (input.overflowRetry) {
 		return { kind: "auto", target, reason: "overflow" };
 	}
@@ -60,7 +62,8 @@ export function selectContextCompaction(
 }
 
 /**
- * How much of the current message context a compaction should retain. The
+ * How much of the current message context, capped at the soft target, a
+ * compaction should retain. The
  * default keeps 75% (a 25% reduction), while users can select an extreme 25%
  * target (a 75% reduction). Ratios outside the supported range are clamped so a malformed
  * setting cannot erase nearly all history or leave no useful headroom.

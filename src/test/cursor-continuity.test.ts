@@ -253,7 +253,7 @@ suite("Cursor conversation continuity", () => {
 			assert.strictEqual(f.created.length, 1); assert.strictEqual(f.sent.length, 2);
 		} finally { await f.dispose(); }
 	});
-	test("recovers retained-away Codex messages from the shared journal after reload", async () => {
+	test("sends the Chat's own messages after a Codex turn and links the shared journal after reload", async () => {
 		const f = await fixture();
 		try {
 			const makeComposite = () => new CompositeChatModelProvider({ history: new ConversationHistory(path.join(f.root, "journal")), providers: [
@@ -267,8 +267,11 @@ suite("Cursor conversation continuity", () => {
 			await first.provideLanguageModelChatResponse(model, [user("EARLY_REQUIREMENT"), assistant("OLD_FACT"), user("Investigate")], options, { report: () => undefined }, none); first.dispose();
 			const restored = makeComposite();
 			await restored.provideLanguageModelChatResponse({ ...model, id: "api-cursor::test-model" }, [user("Investigate"), assistant("CODEX_FINDING"), user("Continue in Cursor")], options, { report: () => undefined }, none);
-			assert.match(f.sent[0].input.text, /EARLY_REQUIREMENT/); assert.match(f.sent[0].input.text, /OLD_FACT/); assert.match(f.sent[0].input.text, /CODEX_FINDING/);
-			assert.match(f.sent[0].input.text, /Complete visible Chat transcript/); restored.dispose();
+			assert.doesNotMatch(f.sent[0].input.text, /EARLY_REQUIREMENT/); assert.doesNotMatch(f.sent[0].input.text, /OLD_FACT/); assert.match(f.sent[0].input.text, /CODEX_FINDING/);
+			assert.match(f.sent[0].input.text, /Complete visible Chat transcript/);
+			const folder = path.join(f.root, "journal"), journals = (await fs.readdir(folder)).filter(name => name.endsWith(".json"));
+			const saved = await Promise.all(journals.map(name => fs.readFile(path.join(folder, name), "utf8")));
+			assert.ok(saved.some(text => text.includes("EARLY_REQUIREMENT")), "the linked transcript keeps the whole visible chat"); restored.dispose();
 		} finally { await f.dispose(); }
 	});
 	test("a native host conversation ID restores the legacy large-chat checkpoint and resumes tools without a cold replay", async () => {

@@ -1,65 +1,47 @@
-# SubHarness 2.0.9
+# SubHarness 2.0.10
 
-Agents in the SubHarness chat work faster: the main agent can run several
-subagents in parallel or in the background, every subagent report lists the
-files it changed, project checks run through one tool with a short summary,
-and edit results show the errors an edit introduced. Retry now tells the model
-what the interrupted attempt already did.
+A long chat on DeepSeek or another HTTP provider stays within its context
+budget and hits the prompt cache again. Before this fix the provider received
+the whole saved chat instead of the chat's compacted history, compacted it
+again on every request and missed the cache each time.
 
-Earlier notes: [2.0.8](https://github.com/MrLordCat/SubHarness/blob/f32974ca423e04fc1ea7ee5b6ec2c3085e92f252/docs/RELEASE_NOTES.md),
+Earlier notes: [2.0.9](https://github.com/MrLordCat/SubHarness/blob/45c7d70994819938282a405b537762bceb05cac2/docs/RELEASE_NOTES.md),
+[2.0.8](https://github.com/MrLordCat/SubHarness/blob/f32974ca423e04fc1ea7ee5b6ec2c3085e92f252/docs/RELEASE_NOTES.md),
 [2.0.7](https://github.com/MrLordCat/SubHarness/blob/33675edc3537267930e58d6799931e6090269b2d/docs/RELEASE_NOTES.md),
 [2.0.5, everything since 1.21.0](https://github.com/MrLordCat/SubHarness/blob/2aaade62a5422ee4ff4ae490441f3604424b1d0f/docs/RELEASE_NOTES.md).
 Every change is listed in the [changelog](https://github.com/MrLordCat/SubHarness/blob/main/CHANGELOG.md).
 
 ## Upgrade notes
 
-- 2.0.5 and later offer 2.0.9 at their next update check; Quick Access →
+- 2.0.5 and later offer 2.0.10 at their next update check; Quick Access →
   **SubHarness** → **Install Update** installs it right away. Versions before
   2.0.5 need one manual install from
   https://github.com/MrLordCat/SubHarness/releases/latest
-  (`llama-vscode-chat-v2.0.9-win32-x64.vsix` or
-  `llama-vscode-chat-v2.0.9-linux-x64.vsix`), then **Developer: Reload
+  (`llama-vscode-chat-v2.0.10-win32-x64.vsix` or
+  `llama-vscode-chat-v2.0.10-linux-x64.vsix`), then **Developer: Reload
   Window**.
-- The main agent's system prompt has a longer delegation guide, so the first
-  request of a chat with the `subagent` tool misses the prompt cache once.
-- New setting `llamacpp.chat.diagnosticsAfterEdit` (on by default).
+- The first request of a long chat after the update sends a smaller,
+  different history, so it misses the prompt cache once.
 
-## Parallel and background subagents
+## Fixes
 
-- Several `subagent` calls in one response run in parallel, up to three at a
-  time.
-- With `background: true` a subagent starts and the call returns at once; the
-  main agent keeps working and collects the report with the new
-  `wait_subagents` tool. The turn lasts until its background subagents finish,
-  so Keep/Undo, approvals and **Stop** cover them. Reports that were not
-  collected arrive as one automatic message after the answer.
-- A report ends with **Files changed by this subagent**: each file its tools
-  wrote, with added and removed lines.
-
-## Checks and diagnostics
-
-- `run_checks` runs the package scripts `compile`/`build`, `lint` and `test`
-  (or the checks in `.subharness/checks.json`) without a terminal and returns
-  each check's status, the mocha, TypeScript and ESLint failures, and the path
-  of the full log. Checks matching a dangerous-command rule ask for approval.
-- After `create_file`, `replace_string_in_file` and
-  `multi_replace_string_in_file` the result lists up to 10 errors the edit
-  introduced.
-
-## Terminals
-
-- A command waiting at a prompt such as `(y/n)`, `password:` or `Press Enter`
-  returns early with the state `waiting for input` instead of hanging until
-  the timeout.
-- Progress bars and spinners are reduced to their last state, and repeated
-  lines to one line with a count.
-- An unknown terminal ID error says why the terminal is gone and lists the
-  live terminals.
-
-## Retry
-
-After an interrupted answer, Retry adds a digest of the attempt to the
-continuation message: its tool calls with the key argument and first result
-line, the edited files, the todo plan and the end of its text. Claude resumes
-its session at the last completed turn, so before this fix it did not see the
-interrupted attempt's work at all.
+- **The chat's compaction reaches the provider.** The common journal restored
+  messages the chat had compacted away. It is a leftover from the Copilot Chat
+  integration removed in 2.0.8. A chat compacted to 107k tokens on a switch to
+  DeepSeek arrived as 1.7M. Every provider now receives the chat's own
+  messages. The journal remains the transcript that prompts link to, and still
+  records which model answered last.
+- **One compaction lands under the budget.** A compaction kept 75% of its
+  input even far over the budget. One request then made up to three DeepSeek
+  summaries (1.7M → 1.3M → 0.9M → 0.68M), and an overflow retry sent 713k
+  tokens against a 475k budget. Proactive and overflow compaction now keep
+  the configured share (75% by default) of the smaller of the current size
+  and the soft input target.
+- **The tool-result fallback is remembered.** When a server rejects tool-role
+  results, the request falls back to user-style results. Every later request
+  of that chat repeated the rejected attempt. Its saved snapshot, in user
+  format, no longer matched, so the history was compacted again on every
+  request. The fallback now holds for the chat until the window reloads.
+- **The log shows why a request failed.** `chat.request.error`,
+  `chat.request.final_error` and `chat.tool_result_mode.fallback` include the
+  first 500 characters of the server's error text.

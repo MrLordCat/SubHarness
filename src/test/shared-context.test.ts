@@ -45,7 +45,7 @@ suite("Shared provider context", () => {
 		const plan = prepareSharedHandoff([user("EARLY_RULE"), assistant("BEGIN_FINDING\n" + "x".repeat(3000000) + "\nEND_FINDING"), user("CURRENT")], 12000);
 		assert.ok(plan.wasCompacted); assert.ok(plan.tokenEstimateAfter <= 12000); assert.match(text(plan.compacted), /CURRENT/);
 	});
-	test("every provider receives the complete common history after retained-window switches and reload", async () => {
+	test("every provider receives the Chat's own messages after switches and reload; the journal keeps the whole chat", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "shared-context-"));
 		const captures = new Map<string, readonly vscode.LanguageModelChatRequestMessage[]>();
 		const ids = ["codex", "coco", "http", "claude", "local"];
@@ -61,12 +61,15 @@ suite("Shared provider context", () => {
 			for (let index = 1; index < ids.length; index++) {
 				composite.dispose(); composite = make();
 				const id = ids[index], task = `TASK_${id}`;
-				await composite.provideLanguageModelChatResponse({ ...model, id }, [user(previousTask), assistant(`${ids[index - 1]}_FINDING`), user(task)], options, { report: () => undefined }, none);
-				const received = text(captures.get(id)!);
-				assert.match(received, /EARLY_REQUIREMENT/); assert.match(received, /MIDDLE_DECISION/);
-				for (const prior of ids.slice(0, index)) { assert.ok(received.includes(`${prior}_FINDING`)); }
+				const sent = [user(previousTask), assistant(`${ids[index - 1]}_FINDING`), user(task)];
+				await composite.provideLanguageModelChatResponse({ ...model, id }, sent, options, { report: () => undefined }, none);
+				// Turns the Chat compacted away stay out of the request.
+				assert.strictEqual(text(captures.get(id)!), text(sent));
 				previousTask = task;
 			}
+			const saved = (await Promise.all((await fs.readdir(root)).filter(name => name.endsWith(".json")).map(name => fs.readFile(path.join(root, name), "utf8")))).join("\n");
+			assert.match(saved, /EARLY_REQUIREMENT/); assert.match(saved, /MIDDLE_DECISION/);
+			for (const id of ids) { assert.ok(saved.includes(`${id}_FINDING`), `${id} answer is in the transcript`); }
 		} finally { composite.dispose(); await fs.rm(root, { recursive: true, force: true }); }
 	});
 	test("a request to another model than the one that last answered is flagged as a provider switch, also after reload", async () => {
