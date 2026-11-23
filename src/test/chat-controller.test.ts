@@ -557,7 +557,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "osNotify" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState" | "saveExport" | "openImage" | "openFileReference" | "terminals" | "now" | "setTimer" | "maxRequests">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "osNotify" | "manageToolApprovals" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState" | "saveExport" | "openImage" | "openFileReference" | "terminals" | "now" | "setTimer" | "maxRequests">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -908,13 +908,22 @@ suite("chat controller", () => {
 	});
 
 	test("osNotify reports a finished turn", async () => {
-		const notifications: Array<[string, string]> = [];
-		const current = createHarness(root, new FakeBackend([() => undefined]), undefined, undefined, { osNotify: (title, body) => notifications.push([title, body]) });
+		const notifications: Array<[string, string, string]> = [];
+		const current = createHarness(root, new FakeBackend([() => undefined]), undefined, undefined, { osNotify: (title, body, sessionId) => notifications.push([title, body, sessionId]) });
 		harness = current;
 		current.webview.receive({ type: "send", text: "Finish" });
 		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
 		const id = current.state.get<string>(ACTIVE_SESSION_KEY)!;
-		assert.deepStrictEqual(notifications, [[(await current.store.get(id))?.title, "The agent finished."]]);
+		// The session id lets a click on the notification open this chat.
+		assert.deepStrictEqual(notifications, [[(await current.store.get(id))?.title, "The agent finished.", id]]);
+	});
+
+	test("the tool picker's approval link opens VS Code's tool approval", async () => {
+		let opened = 0;
+		const current = createHarness(root, new FakeBackend([]), undefined, undefined, { manageToolApprovals: async () => { opened++; } });
+		harness = current;
+		current.webview.receive({ type: "manageToolApprovals" });
+		await waitFor(() => opened === 1, "tool approval opened");
 	});
 
 	test("stops a running turn with an info notice", async () => {
@@ -3736,10 +3745,15 @@ suite("chat controller", () => {
 		await waitFor(() => current.webview.ofType("attachmentsAdded").length === 1, "picked attachments");
 		assert.deepStrictEqual(current.webview.ofType("attachmentsAdded")[0].attachments, [ATTACHMENT]);
 
-		current.webview.receive({ type: "addAttachments", uris: ["file:///src/b.ts", "file:///src/c.ts"] });
+		current.webview.receive({ type: "addAttachments", uris: ["file:///src/b.ts", "file:///src/c.ts"], target: "edit" });
 		await waitFor(() => current.webview.ofType("attachmentsAdded").length === 2, "dropped attachments");
 		assert.deepStrictEqual(fake.fromUriCalls, [["file:///src/b.ts", "file:///src/c.ts"]]);
 		assert.deepStrictEqual(current.webview.ofType("attachmentsAdded")[1].attachments, [file]);
+		assert.strictEqual(current.webview.ofType("attachmentsAdded")[1].target, "edit");
+		assert.ok(!("target" in current.webview.ofType("attachmentsAdded")[0]));
+		current.webview.receive({ type: "pickAttachments", target: "invalid" });
+		await waitFor(() => current.webview.ofType("attachmentsAdded").length === 3, "invalid target ignored");
+		assert.ok(!("target" in current.webview.ofType("attachmentsAdded")[2]));
 	});
 
 	test("editing a message reuses its attachment context without reading the files again", async () => {
@@ -4087,10 +4101,11 @@ suite("chat controller", () => {
 		current.webview.receive({ type: "ready" });
 		await waitFor(() => current.webview.ofType("init").length === 1, "init");
 
-		current.webview.receive({ type: "pasteFiles", files: [{ name: "image.png", mimeType: "image/png", data: "iVBORw==" }] });
+		current.webview.receive({ type: "pasteFiles", target: "edit", files: [{ name: "image.png", mimeType: "image/png", data: "iVBORw==" }] });
 		await waitFor(() => current.webview.ofType("attachmentsAdded").length === 1, "pasted attachment");
 		assert.deepStrictEqual(attachments.pastes, [[{ name: "image.png", mimeType: "image/png", data: "iVBORw==" }]]);
 		assert.deepStrictEqual(current.webview.ofType("attachmentsAdded")[0].attachments, [shot]);
+		assert.strictEqual(current.webview.ofType("attachmentsAdded")[0].target, "edit");
 		// A malformed paste is dropped before it reaches the attachment source.
 		current.webview.receive({ type: "pasteFiles", files: [{ name: "x.png", mimeType: "image/png" }] });
 

@@ -41,7 +41,7 @@ export interface ChatProviderRegistration {
 }
 
 /**
- * VS Code re-reads the whole catalog on every model selection, and Copilot
+ * VS Code re-reads the whole catalog on every model selection, and the host
  * re-selects models on each model-change event, so one agent turn can ask
  * for it dozens of times within a second. Answers are shared for this long;
  * any adapter change event drops them at once.

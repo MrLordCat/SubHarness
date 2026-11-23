@@ -1,8 +1,7 @@
 # Codex Subscription Provider
 
-The extension can expose models from an existing ChatGPT/Codex subscription in
-the VS Code and Copilot Chat model picker. This is a separate provider from the
-local OpenAI-compatible and DeepSeek transports.
+The SubHarness chat can expose models from an existing ChatGPT/Codex
+subscription alongside local OpenAI-compatible and DeepSeek models.
 
 This is a model-provider integration, not a separate `@codex` participant.
 Selecting a discovered Codex model in the normal picker, including a model with
@@ -34,7 +33,7 @@ Official references:
 ## Runtime Architecture
 
 ```text
-Copilot Chat UI
+SubHarness chat
   -> llamacpp composite LanguageModelChatProvider
      -> codex:: model routing
      -> local codex app-server over JSONL/stdin
@@ -45,7 +44,7 @@ Copilot Chat UI
               -> tool result resumes the same app-server turn
 ```
 
-Copilot Chat owns the visible chat history. With `persistProviderSessions`
+The SubHarness chat owns the visible chat history. With `persistProviderSessions`
 enabled, the first provider request creates a durable Codex thread and stores
 only its id plus validation fingerprints in VS Code workspace state. Native
 tool-result rounds reuse the live thread, while a completed matching thread can
@@ -60,10 +59,10 @@ starting a model turn or consuming subscription quota.
 
 Codex owns the inner agent loop. Through the app-server experimental
 `dynamicTools` protocol, it selects directly from the tools advertised by the
-outer Copilot request. The provider emits the selection as a
+SubHarness chat request. The provider emits the selection as a
 `LanguageModelToolCallPart` and suspends the current provider response while the
-app-server turn stays alive. Copilot then renders and executes the tool through
-its standard agent loop. The following provider round contains the native
+app-server turn stays alive. The SubHarness chat renders and executes the tool through
+its agent loop. The following provider round contains the native
 result and resolves the still-pending app-server dynamic tool request. Parallel
 requests are emitted together and resume only after every matching result is
 available. The original Codex turn continues directly: there is no interrupt,
@@ -79,7 +78,7 @@ hours if abandoned, and are never persisted as chat history. If VS Code adds
 or removes advertised tools while a call is running, the active turn keeps its
 original catalog until completion instead of restarting with the full history.
 
-Copilot can advertise a large catalog whose size depends on the installed
+The SubHarness chat can advertise a large catalog whose size depends on the installed
 extensions, attached MCP servers, workspace policy, and current Chat mode.
 By default, the provider marks uncommon schemas with app-server
 `deferLoading` inside the `vscode_deferred` namespace, while keeping workspace
@@ -89,7 +88,7 @@ schema only when it is needed. Disable
 `llamacpp.codexDeferNonCoreTools` if an older custom CLI does not support this
 experimental app-server field. Outer tools named `apply_patch` and `view_image`
 use the eager `vscode_native` namespace to avoid colliding with the Codex
-built-ins while preserving native Copilot execution and tool cards.
+built-ins while preserving SubHarness chat execution and tool cards.
 
 Quick Access exposes a Codex working-context slider. It never claims to enlarge
 the physical model window: the selected target is capped to the latest
@@ -101,33 +100,26 @@ shrink a 258.4k-window request to roughly 87k message tokens.
 
 Completed durable conversation threads stay available for up to seven days
 (maximum 16), matching Claude session retention. Reuse first checks the complete SHA-256 history and answer
-digests. Copilot patch v16 additionally forwards a stable conversation id and
-turn index so the provider can tolerate rewritten service, tool, or rendered
-prompt history while still requiring an advancing turn and the exact prior
+digests. The SubHarness chat forwards a stable conversation id and turn index
+so the provider can tolerate rewritten service, tool, or rendered prompt history
+while still requiring an advancing turn and the exact prior
 answer. Without the patch, a conservative fallback ignores mutable tool
 plumbing but requires the complete bounded suffix of recent semantic user
 messages. Model, workspace, sandbox, approval policy, and app-server process
 generation must still match. The dynamic tool catalog may drift: a reused thread retains the
 catalog and namespace routes supplied at `thread/start`, while the provider
-allows only the intersection with the current Copilot request. Newly advertised
+allows only the intersection with the current SubHarness chat request. Newly advertised
 tools wait for a fresh thread; removed, re-namespaced, and schema-changed tools
 are unavailable. Editing a recent user request, regenerating an answer, changing
 runtime configuration, restarting Codex, or missing the cache starts a fresh
-thread with the bounded full Copilot history.
+thread with the bounded full SubHarness chat history.
 Quick Access reports both the in-process thread-reuse ratio and the last
 prompt-cache percentage returned by Codex. Body-free
 codex.chat.thread_reuse_miss events categorize reuse failures without logging
 conversation ids, text, or hashes.
 
-If the native VS Code transcript has already become too large, run
-`SubHarness: Continue Latest Codex Thread in New Chat`. The command arms the
-newest durable completed Codex thread for 24 hours and opens a clean chat.
-Keep the same Codex model selected and send the next user message there. The
-provider resumes the inner Codex thread but does not serialize the old VS Code
-transcript again.
-
 This design also supports private caller tools that are not present in
-`vscode.lm.tools`, including Copilot's terminal implementation. Native calls use
+`vscode.lm.tools`, including the SubHarness chat's terminal implementation. Native calls use
 the session's own permission level, terminal auto-approval rules, and `Bypass
 Approvals`. While delegation is active, internal Codex command and file approval
 requests are declined without an extra modal prompt so Codex can select the
@@ -170,7 +162,7 @@ bodies. Markdown and JSON snapshots are written to extension global storage.
 
 ### New user turn while a native tool is still running
 
-If Copilot forwards a newer user turn while the same conversation is waiting on
+If the SubHarness chat forwards a newer user turn while the same conversation is waiting on
 a native VS Code tool (including `runSubagent`), the provider interrupts the
 pending Codex app-server turn and marks its Live Report record terminal. When
 the model, runtime, tool catalog, process generation, and conversation identity
@@ -239,7 +231,7 @@ The native per-chat selector takes precedence over the global default. If an
 effort is unavailable for a selected model, the provider falls back to that
 model's catalog default.
 
-Codex actions always use Copilot's native VS Code tool loop. The provider
+Codex actions use the SubHarness chat's VS Code tool loop. The provider
 forces the internal runtime to `read-only` plus `on-request`, disables built-in
 action capabilities, declines internal permission requests, and interrupts a
 turn if an internal action still appears. There is intentionally no opt-out.
@@ -269,7 +261,7 @@ reload VS Code and refresh models. The install logs
 ### Commands or searches remain inside the thinking block
 
 A command routed through the native bridge produces `codex.chat.tool_delegated`
-and a normal Copilot tool card. Copilot then executes it using the current
+and a normal SubHarness tool card. The SubHarness chat then executes it using the current
 session approval mode. `codex.internal_tool.declined` or
 `codex.internal_tool.blocked` means the runtime attempted a forbidden internal
 path; the provider denied or interrupted it instead of executing invisibly.
@@ -281,7 +273,7 @@ resumes the turn are queued and logged as `codex.chat.tool_delegation_queued`.
 They are shown in the next native tool segment. A remaining
 `codex.chat.tool_delegation_unavailable` event includes an explicit reason;
 `detached-without-pending-turn` indicates an unrelated call with no valid
-Copilot result round to resume and is intentionally rejected.
+SubHarness chat result round to resume and is intentionally rejected.
 
 ### Clarification questions appear as plain chat text
 
@@ -317,7 +309,7 @@ is available it may show zero; an activity status does not invent token counts.
 
 ### Input exceeds 1048576 characters
 
-Copilot may pass a long chat containing large tool results as more than one
+The SubHarness chat may pass a long conversation containing large tool results as more than one
 million serialized characters even when its token indicator is still below the
 model context window. The provider keeps the first and newest messages, omits
 older middle history, and truncates the newest message only as a last resort.
@@ -329,8 +321,4 @@ model window, selected working target, message budget and every reserve, plus
 original/final character counts and omitted or truncated content. Images
 belonging to omitted history messages are not resent.
 
-Patch v21 additionally caps terminal and native tool data before VS Code writes
-it into its own chat-session snapshots. This prevents future transcript growth;
-it does not shrink sessions that were already persisted. Use the Codex rollover
-command above to leave an existing oversized chat while preserving the latest
-durable completed Codex thread.
+

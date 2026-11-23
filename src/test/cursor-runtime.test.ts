@@ -28,7 +28,7 @@ suite("Cursor real runtime", () => {
 				if (mode !== "new") { messages.push(vscode.LanguageModelChatMessage.User("Repeat the retained marker exactly. Do not use tools.")); }
 				const response: vscode.LanguageModelResponsePart[] = [];
 				await sdk.respond({ key: "api-native-smoke", label: "Cursor", serverUrl: "https://api.cursor.com/v1", protocol: "cursor", apiKey }, { id: model }, () => cursorTranscript(messages), messages,
-					{ tools: [], toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _copilotConversationId: "native-smoke" } }, { report: part => response.push(part) },
+					{ tools: [], toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _conversationId: "native-smoke" } }, { report: part => response.push(part) },
 					{ isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) }, 1_000_000);
 				const text = response.filter(part => part instanceof vscode.LanguageModelTextPart).map(part => (part as vscode.LanguageModelTextPart).value).join("");
 				assert.ok(text.includes(fact), `Native ${mode} lost its synthetic marker.`); assert.strictEqual(updates.at(-1)?.turn.sessionMode, mode);

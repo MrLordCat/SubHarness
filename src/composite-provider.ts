@@ -69,27 +69,23 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 		progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 		token: vscode.CancellationToken
 	): Promise<void> {
-		// Current hosts send the native _conversationId; older Copilot patches use
-		// _copilotConversationId. Normalize once before journaling and routing so
-		// all providers keep the same durable keys across a host update.
 		const usableId = (value: unknown): value is string => typeof value === "string" && Boolean(value.trim()) && value.length <= 512;
 		// A subagent runs under the parent chat's conversation id. Sharing it would
 		// cancel the parent's pending tool turn, take over its native session and
-		// overwrite its journal, so a subagent run stays ephemeral.
-		if (usableId(options.modelOptions?._copilotSubagentInvocationId)) {
+		// overwrite its journal, so a subagent run stays ephemeral. An unusable id
+		// is dropped too, so no provider keys durable state by it.
+		const conversationId: unknown = options.modelOptions?._conversationId;
+		if (conversationId !== undefined && (!usableId(conversationId) || usableId(options.modelOptions?._subagentInvocationId))) {
 			options = { ...options, modelOptions: Object.fromEntries(Object.entries(options.modelOptions!)
-				.filter(([key]) => key !== "_copilotConversationId" && key !== "_conversationId")) };
-		}
-		if (!usableId(options.modelOptions?._copilotConversationId) && usableId(options.modelOptions?._conversationId)) {
-			options = { ...options, modelOptions: { ...options.modelOptions, _copilotConversationId: options.modelOptions!._conversationId } };
+				.filter(([key]) => key !== "_conversationId")) };
 		}
 		const selected = this.registry.resolve(model.id);
-		this.registry.observeRequest(selected, token, options.modelOptions?._copilotConversationId);
+		this.registry.observeRequest(selected, token, options.modelOptions?._conversationId);
 		// Every adapter receives the same authoritative semantic history. Native
 		// providers select their own continuation boundary AFTER this restoration.
 		const usesHistory = Boolean(this.history);
 		let history: Awaited<ReturnType<ConversationHistory["begin"]>> | undefined;
-		try { history = await this.history?.begin(options.modelOptions?._copilotConversationId, messages); }
+		try { history = await this.history?.begin(options.modelOptions?._conversationId, messages); }
 		catch (error) { if (usesHistory) { throw error; } this.warnHistory(); }
 		const emitted: vscode.LanguageModelResponsePart[] = [];
 		let failed = false;
@@ -107,7 +103,7 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 			progress.report(part);
 		};
 		const emitText = (value: string): void => { if (value) { emit(new vscode.LanguageModelTextPart(value)); } };
-		// Copilot Chat would ignore the signal at best; it is neither history nor shown text.
+		// The signal is neither history nor shown text.
 		const wantsSignals = options.modelOptions?.[LIMIT_SIGNAL_OPTION] === true;
 		const signal = (part: vscode.LanguageModelDataPart): void => { if (wantsSignals) { emitText(links.flush()); progress.report(part); } };
 		const wantsPromptCache = options.modelOptions?.[PROMPT_CACHE_OPTION] === true;
@@ -154,7 +150,7 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 		if (failed) { throw providerError; }
 	}
 
-	/** For callers other than Copilot Chat, which never says when a chat is left. */
+	/** Releases resources when a chat is left. */
 	abandonConversation(conversationId: string): Promise<void> {
 		return this.registry.abandonConversation(conversationId);
 	}

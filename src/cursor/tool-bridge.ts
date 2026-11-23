@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
 import { DelegatedTurnState } from "../tools/delegated-turn-state";
 import type { SDKCustomTool, SDKCustomToolResult } from "@cursor/sdk";
-import { enhanceSubagentToolDescription, withRequiredSubagentModel } from "../subagent-guidance";
 import { cursorToolAlias } from "./tool-turn-recovery";
 
 interface PendingTool {
@@ -12,7 +11,7 @@ interface PendingTool {
 	reject(error: Error): void;
 }
 
-/** Callbacks wait here; Copilot, rather than the SDK, executes each advertised tool. */
+/** Callbacks wait here while the chat executes each advertised tool. */
 export class CursorToolBridge implements vscode.Disposable {
 	readonly customTools: Record<string, SDKCustomTool> = {};
 	private readonly state = new DelegatedTurnState<PendingTool, vscode.LanguageModelResponsePart>();
@@ -33,11 +32,10 @@ export class CursorToolBridge implements vscode.Disposable {
 	updateTools(tools: readonly vscode.LanguageModelChatTool[]): void {
 		this.allowedTools = new Set(tools.map(tool => tool.name));
 		for (const alias of Object.keys(this.customTools)) { delete this.customTools[alias]; }
-		for (const original of [...tools].sort((a, b) => a.name.localeCompare(b.name))) {
-			const tool = withRequiredSubagentModel(original);
+		for (const tool of [...tools].sort((a, b) => a.name.localeCompare(b.name))) {
 			const alias = cursorToolAlias(tool.name);
 			this.customTools[alias] = {
-				description: enhanceSubagentToolDescription(tool.name, `VS Code tool ${tool.name}. ${tool.description}`).slice(0, 8000),
+				description: (`VS Code tool ${tool.name}. ${tool.description}`).slice(0, 8000),
 				inputSchema: tool.inputSchema as SDKCustomTool["inputSchema"] ?? { type: "object", properties: {} },
 				execute: args => {
 					if (this.terminal) { return Promise.reject(new vscode.CancellationError()); }

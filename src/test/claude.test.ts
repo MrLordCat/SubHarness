@@ -23,7 +23,6 @@ import {
 	createLatestUserMessage,
 	estimateClaudeRecoveryTokens,
 	formatClaudeRecoveryWarning,
-	findLatestPersistedClaudeConversation,
 	truncateLatestUserContent,
 	findPersistedClaudeConversation,
 	extractFollowUpUserText,
@@ -852,46 +851,6 @@ test("marks the session stream as closed after an interrupt", async () => {
 		})?.sdkSessionId, entry.sdkSessionId);
 	});
 
-	test("selects the newest non-stale Claude session for an explicit rollover", () => {
-		const stale = {
-			conversationId: "stale",
-			sdkSessionId: "11111111-1111-4111-8111-111111111111",
-			modelId: "claude-opus-5",
-			runtimeKey: "runtime-old",
-			userSignatures: ["old"],
-			lastUsedAt: AVAILABILITY_NOW - 8 * 24 * 60 * 60_000,
-		};
-		const older = {
-			...stale,
-			conversationId: "older",
-			sdkSessionId: "22222222-2222-4222-8222-222222222222",
-			lastUsedAt: AVAILABILITY_NOW - 120_000,
-		};
-		const newest = {
-			...stale,
-			conversationId: "newest",
-			sdkSessionId: "33333333-3333-4333-8333-333333333333",
-			lastUsedAt: AVAILABILITY_NOW - 30_000,
-		};
-
-		assert.strictEqual(
-			findLatestPersistedClaudeConversation([
-				stale,
-				older,
-				{ ...newest, quarantinedAt: AVAILABILITY_NOW - 1_000 },
-			], AVAILABILITY_NOW)?.conversationId,
-			"older"
-		);
-		assert.strictEqual(
-			findLatestPersistedClaudeConversation([stale, older, newest], AVAILABILITY_NOW)?.conversationId,
-			"newest"
-		);
-		assert.strictEqual(
-			findLatestPersistedClaudeConversation([stale], AVAILABILITY_NOW),
-			undefined
-		);
-	});
-
 	test("round-trips provider model ids and advertises both Opus generations", () => {
 		assert.strictEqual(
 			decodeClaudeModelId(encodeClaudeModelId("claude-opus-5")),
@@ -1439,7 +1398,7 @@ function claudeChatFixture(): {
 				toolMode: vscode.LanguageModelChatToolMode.Auto,
 				tools,
 				modelOptions: {
-					_copilotConversationId: "claude-tools-chat",
+					_conversationId: "claude-tools-chat",
 					...(strict ? { _aabStrictTools: true } : {}),
 				},
 			}, { report: () => undefined }, tokenSource.token);

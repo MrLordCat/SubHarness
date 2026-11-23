@@ -3,7 +3,6 @@ import * as vscode from "vscode";
 import { ProviderRegistry, ownsHttpModel, providerSourceId, type ProviderSourceDefinition } from "../providers/provider-registry";
 import { CompositeChatModelProvider } from "../composite-provider";
 import { ProviderDirectory } from "../providers/provider-directory";
-import { groupProviderModels } from "../ui/provider-model-picker";
 
 const token: vscode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) };
 function adapter(id: string, fail = false): vscode.LanguageModelChatProvider {
@@ -16,15 +15,14 @@ function adapter(id: string, fail = false): vscode.LanguageModelChatProvider {
 const custom: ProviderSourceDefinition = { id: "example", label: "Example", description: "Registered SDK", kind: "api", mode: "subscription", enabledSetting: "enableExample" };
 
 suite("Provider registry contracts", () => {
-	test("normalizes native conversation IDs before provider routing and foreign-session cancellation without mutating host options", async () => {
+	test("drops unusable conversation IDs before provider routing and foreign-session cancellation without mutating caller options", async () => {
 		const seen: unknown[] = [], foreign: unknown[] = [];
 		const composite = new CompositeChatModelProvider([
-			{ id: "http", ownsModel: () => true, provider: { ...adapter("primary::model"), provideLanguageModelChatResponse: async (_m, _messages, options) => { seen.push(options.modelOptions?._copilotConversationId); } } },
+			{ id: "http", ownsModel: () => true, provider: { ...adapter("primary::model"), provideLanguageModelChatResponse: async (_m, _messages, options) => { seen.push(options.modelOptions?._conversationId); } } },
 			{ id: "example", ownsModel: () => false, provider: adapter("example::model"), onForeignRequest: async id => { foreign.push(id); } },
 		]);
 		const cases: Record<string, unknown>[] = [
-			{ _conversationId: "native-chat" }, { _conversationId: "native-chat", _copilotConversationId: "legacy-chat" },
-			{ _conversationId: "native-chat", _copilotConversationId: " " }, { _conversationId: {} }, { _conversationId: "x".repeat(513) },
+			{ _conversationId: "native-chat" }, { _conversationId: " " }, { _conversationId: {} }, { _conversationId: "x".repeat(513) },
 		];
 		try {
 			for (const modelOptions of cases) {
@@ -33,17 +31,16 @@ suite("Provider registry contracts", () => {
 					{ toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions }, { report: () => undefined }, token);
 				assert.strictEqual(JSON.stringify(modelOptions), snapshot);
 			}
-			assert.deepStrictEqual(seen, ["native-chat", "legacy-chat", "native-chat", undefined, undefined]);
+			assert.deepStrictEqual(seen, ["native-chat", undefined, undefined, undefined]);
 			assert.deepStrictEqual(foreign, seen);
 		} finally { composite.dispose(); }
 	});
-	test("registers a new transport without a branch in Composite or grouping", async () => {
+	test("registers a new transport without a branch in Composite", async () => {
 		const composite = new CompositeChatModelProvider([{ id: custom.id, source: custom, provider: adapter("example::model"), ownsModel: id => providerSourceId(id) === custom.id }]);
 		try {
 			const models = await composite.provideLanguageModelChatInformation({ silent: true }, token);
 			assert.strictEqual(await composite.provideTokenCount(models[0], "text", token), 17);
 			await composite.provideLanguageModelChatResponse(models[0], [], { toolMode: vscode.LanguageModelChatToolMode.Auto }, { report: () => undefined }, token);
-			assert.strictEqual(groupProviderModels(models, [], composite.registry.sources)[0].label, "Example");
 		} finally { composite.dispose(); }
 	});
 	test("keeps failed discovery isolated and rejects unknown or ambiguous routes", async () => {

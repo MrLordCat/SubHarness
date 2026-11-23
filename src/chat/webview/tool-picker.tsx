@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ChatToolGroup, ChatToolInfo } from "../shared/protocol";
+import { postMessage } from "./api";
 import { matchesQuery, popupPlacement, useDismiss, useKeepInView } from "./popup";
 
 interface ToolPickerProps {
@@ -123,7 +124,21 @@ export function ToolPicker({ tools, onSetToolsEnabled }: ToolPickerProps) {
 										<span class="tool-group-label">{entry.group.label}</span>
 										<span class="tool-group-count">{enabledCount}/{entry.tools.length}</span>
 									</div>
-									{entry.group.note ? <div class="tool-group-note">{entry.group.note}</div> : null}
+									{entry.group.note || entry.group.external ? (
+										<div class="tool-group-note">
+											{entry.group.note}
+											{entry.group.external ? (
+												<button
+													type="button"
+													class="tool-group-approve"
+													title="Open VS Code's tool approval and mark the server or tools as always allowed"
+													onClick={() => postMessage({ type: "manageToolApprovals" })}
+												>
+													Allow without asking…
+												</button>
+											) : null}
+										</div>
+									) : null}
 									{entry.tools.map(tool => (
 										<label class="tool-row" title={tool.description} key={tool.name}>
 											<input

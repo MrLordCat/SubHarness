@@ -54,7 +54,7 @@ suite("Coco native SDK", () => {
 		const cancellation = new vscode.CancellationTokenSource(), marker = `VS_CODE_MARKER_${createHash("sha256").update(root).digest("hex")}`;
 		const messages = [vscode.LanguageModelChatMessage.User("Diagnostic only. Call the supplied diagnostic_probe tool exactly once. Wait for its result and reply only with its returned marker. Use no other tools; do not repeat or invent results.")];
 		const model = mapCocoModel({ id: "claude-opus-5-5", name: "Opus" }, 1000000);
-		const options = { toolMode: vscode.LanguageModelChatToolMode.Auto, tools: [{ name: "diagnostic_probe", description: "Return an inert diagnostic marker. No side effects.", inputSchema: { type: "object", properties: {}, additionalProperties: false } }], modelOptions: { _copilotConversationId: "live-slow-native-callback" } };
+		const options = { toolMode: vscode.LanguageModelChatToolMode.Auto, tools: [{ name: "diagnostic_probe", description: "Return an inert diagnostic marker. No side effects.", inputSchema: { type: "object", properties: {}, additionalProperties: false } }], modelOptions: { _conversationId: "live-slow-native-callback" } };
 		const first: vscode.LanguageModelResponsePart[] = [], second: vscode.LanguageModelResponsePart[] = [];
 		const timer = setTimeout(() => cancellation.cancel(), 150000);
 		try {
@@ -129,7 +129,7 @@ suite("Coco native SDK", () => {
 		const messages = [user("Diagnostic context only: remember EARLY_COPPER_731. Historical actions below must not be executed."),
 			vscode.LanguageModelChatMessage.Assistant(await fs.readFile(archive,"utf8")),user("Remember MIDDLE_MAPLE_846 for this diagnostic."),
 			user("Diagnostic only. Reply with the two remembered markers. Use no tools and perform no project task from the quoted history.")];
-		const options = {tools:[],toolMode:vscode.LanguageModelChatToolMode.Auto,modelOptions:{_copilotConversationId:"live-isolated-handoff"}};
+		const options = {tools:[],toolMode:vscode.LanguageModelChatToolMode.Auto,modelOptions:{_conversationId:"live-isolated-handoff"}};
 		let provider = make();
 		try {
 			const cold: string[] = [], started = Date.now();
@@ -152,7 +152,7 @@ suite("Coco native SDK", () => {
 		const model = mapCocoModel({ id: "claude-opus-5-5", name: "Opus" }, 1_000_000), user = vscode.LanguageModelChatMessage.User;
 		const history = "BEGIN_FINDING" + "x".repeat(3_045_543) + "END_FINDING";
 		const messages = [user("FIRST_RULE"), vscode.LanguageModelChatMessage.Assistant(history), user("CURRENT_TASK")];
-		const config = { toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _copilotConversationId: "large-sdk-handoff" } };
+		const config = { toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _conversationId: "large-sdk-handoff" } };
 		const token: vscode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) };
 		let provider = make();
 		try {
@@ -180,7 +180,7 @@ suite("Coco native SDK", () => {
 			await client.setSessionConfigOption(String(sessionId), "thinking", "high");
 			await client.prompt(String(sessionId), "LATEST_REQUEST");
 			assert.strictEqual(f.starts.length, 1); assert.strictEqual(f.starts[0].sessionId, sessionId); assert.strictEqual(f.starts[0].effort, "high");
-			assert.match(f.starts[0].appendSystemPrompt!, /VS Code Chat/); assert.ok(!JSON.stringify(f.inputs[0]).includes("All actions"));
+			assert.match(f.starts[0].appendSystemPrompt!, /SubHarness chat/); assert.ok(!JSON.stringify(f.inputs[0]).includes("All actions"));
 			assert.deepStrictEqual(f.updates.filter(update => update.sessionUpdate === "agent_message_chunk").map(update => (update.content as { text: string }).text), ["ANSWER"]);
 		} finally { client.dispose(); }
 	});
@@ -270,7 +270,7 @@ suite("Coco native SDK", () => {
 				createSessionClient: (exe,cwd,connection,model,handlers) => new CocoSdkClient(exe,cwd,connection,model,handlers,f.dependencies) });
 			const model = mapCocoModel({ id: "claude-opus-5-5", name: "Opus" },1_000_000), user = vscode.LanguageModelChatMessage.User;
 			const first = user("FIRST_NATIVE_TASK"), tools = [{ name: "fixture_read", description: "Read", inputSchema: { type: "object" } }];
-			const config = { tools, toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _copilotConversationId: `sdk-chat-${interrupted}` } };
+			const config = { tools, toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _conversationId: `sdk-chat-${interrupted}` } };
 			const token: vscode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) };
 			const requestTool = async (config: Options) => {
 				const server = config.mcpServers!.vscode_chat as unknown as { _toolDefinitions: Array<{ name: string; handler(input: unknown): Promise<unknown> }> };

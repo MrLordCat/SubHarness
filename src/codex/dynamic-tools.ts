@@ -1,5 +1,4 @@
 import type * as vscode from "vscode";
-import { enhanceSubagentToolDescription, withRequiredSubagentModel } from "../subagent-guidance";
 import { stableJsonStringify } from "../utils";
 
 const MAX_TOOL_DESCRIPTION_CHARS = 4_096;
@@ -35,10 +34,6 @@ const EAGER_TOOL_SUFFIXES = [
 	"fetchwebpage",
 	"viewimage",
 ];
-const EXCLUDED_VSCODE_TOOLS = new Set([
-	"copilot_editFiles",
-	"copilot_switchAgent",
-]);
 const CODEX_BUILTIN_TOOL_COLLISIONS = new Set([
 	"apply_patch",
 	"request_user_input",
@@ -121,7 +116,7 @@ function boundedOutputHint(name: string): string {
 	}
 }
 
-/** Converts the outer Copilot tool catalog into app-server dynamic tool specs. */
+/** Converts the chat tool catalog into app-server dynamic tool specs. */
 export function buildCodexDynamicTools(
 	advertisedTools: readonly vscode.LanguageModelChatTool[],
 	options: { deferNonCoreTools?: boolean } = {}
@@ -148,7 +143,6 @@ export function buildCodexDynamicTools(
 	for (const tool of stableAdvertisedTools) {
 		if (
 			callableNames.has(tool.name)
-			|| EXCLUDED_VSCODE_TOOLS.has(tool.name)
 			|| !isValidDynamicToolName(tool.name)
 		) {
 			skippedNames.push(tool.name);
@@ -157,17 +151,12 @@ export function buildCodexDynamicTools(
 		const useNativeNamespace = CODEX_BUILTIN_TOOL_COLLISIONS.has(tool.name);
 		const useMcpNamespace = tool.name.startsWith("mcp__");
 		const deferLoading = !useNativeNamespace && options.deferNonCoreTools === true && !isCoreAgentTool(tool.name);
-		const routedTool = withRequiredSubagentModel(tool);
 		const spec: CodexDynamicFunctionToolSpec = {
 			type: "function",
 			// Codex reserves mcp__ even for tools nested inside a dynamic namespace.
-			name: useMcpNamespace ? `tool_${routedTool.name.slice(5)}` : routedTool.name,
-			description: enhanceSubagentToolDescription(
-				routedTool.name,
-				(routedTool.description || `Invoke the VS Code tool ${routedTool.name}.`)
-				+ boundedOutputHint(routedTool.name)
-			).slice(0, MAX_TOOL_DESCRIPTION_CHARS),
-			inputSchema: normalizeJsonSchema(routedTool.inputSchema),
+			name: useMcpNamespace ? `tool_${tool.name.slice(5)}` : tool.name,
+			description: ((tool.description || `Invoke the VS Code tool ${tool.name}.`) + boundedOutputHint(tool.name)).slice(0, MAX_TOOL_DESCRIPTION_CHARS),
+			inputSchema: normalizeJsonSchema(tool.inputSchema),
 			...(deferLoading ? { deferLoading: true } : {}),
 		};
 		if (useMcpNamespace) {
@@ -208,7 +197,7 @@ export function buildCodexDynamicTools(
 		specs.push({
 			type: "namespace",
 			name: CODEX_DEFERRED_TOOL_NAMESPACE,
-			description: "Less common VS Code and Copilot tools available through tool search.",
+			description: "Less common VS Code tools available through tool search.",
 			tools: deferredSpecs,
 		});
 	}

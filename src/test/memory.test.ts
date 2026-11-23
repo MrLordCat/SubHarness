@@ -2,12 +2,13 @@ import * as assert from "node:assert";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as vscode from "vscode";
 import {
 	buildMemoryQuery,
 	injectAppendOnlySharedMemoryContext,
 	injectSharedMemoryContext,
 } from "../memory/prompt";
-import { clipMemoryContent } from "../memory/tools";
+import { clipMemoryContent, createMemoryTools, MEMORY_TOOL_NAMES } from "../memory/tools";
 import { filterEntriesVisibleInWorkspace } from "../memory/scope";
 import { SharedMemoryService } from "../memory/shared-memory-service";
 import type { OpenAIChatMessage } from "../types";
@@ -158,12 +159,8 @@ suite("Shared memory", () => {
 	});
 
 	test("publishes only explicit global and current-project tool scopes", async () => {
-		const packageJsonPath = path.resolve(__dirname, "../../package.json");
-		const packageJson = JSON.parse(await fs.readFile(packageJsonPath, "utf8")) as {
-			contributes?: { languageModelTools?: Array<Record<string, unknown>> };
-		};
-		const tools = packageJson.contributes?.languageModelTools ?? [];
-		const tool = (name: string): Record<string, unknown> => {
+		const tools = createMemoryTools(memory);
+		const tool = (name: string) => {
 			const found = tools.find(candidate => candidate.name === name);
 			assert.ok(found, `missing ${name}`);
 			return found;
@@ -246,6 +243,25 @@ suite("Shared memory", () => {
 			context?.text.includes("Coffee preference"),
 			"pinned rules must be injected even when the query does not match them"
 		);
+	});
+
+	test("the chat's memory tools store, search and delete without VS Code's tool registry", async () => {
+		const tools = new Map(createMemoryTools(memory).map(tool => [tool.name, tool]));
+		assert.deepStrictEqual([...tools.keys()], [MEMORY_TOOL_NAMES.store, MEMORY_TOOL_NAMES.search, MEMORY_TOOL_NAMES.delete]);
+		for (const tool of tools.values()) {
+			assert.strictEqual(tool.group, "bridge");
+			assert.strictEqual(tool.readOnly, true);
+			assert.strictEqual((tool.inputSchema as { type?: string }).type, "object");
+		}
+		assert.deepStrictEqual((tools.get(MEMORY_TOOL_NAMES.store)!.inputSchema as { required?: string[] }).required, ["title", "content", "scope"]);
+		const token = new vscode.CancellationTokenSource().token;
+		const stored = String(await tools.get(MEMORY_TOOL_NAMES.store)!.invoke({ title: "Build command", content: "npm run compile", scope: "global" }, token));
+		assert.match(stored, /^Saved global\/\w+ memory /);
+		const id = memory.search("build")[0].id;
+		assert.match(String(await tools.get(MEMORY_TOOL_NAMES.search)!.invoke({ query: "build", scope: "global" }, token)), new RegExp(`\\[${id}\\] Build command`));
+		assert.strictEqual(String(await tools.get(MEMORY_TOOL_NAMES.delete)!.invoke({ id, scope: "global" }, token)), `Deleted global memory ${id}.`);
+		assert.strictEqual(memory.count, 0);
+		await assert.rejects(tools.get(MEMORY_TOOL_NAMES.store)!.invoke({ title: "x", content: "y", scope: "model" }, token), /global" or "workspace/);
 	});
 
 	test("clipMemoryContent keeps the head and tail of long entries", () => {

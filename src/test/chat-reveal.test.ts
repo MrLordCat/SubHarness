@@ -1,5 +1,5 @@
 import * as assert from "node:assert";
-import { CHAT_REVEALED_KEY, revealChatOnce } from "../chat/index";
+import { CHAT_OPEN_URI_PATH, CHAT_REVEALED_KEY, chatSessionFromUri, revealChatOnce } from "../chat/index";
 
 /** A memento that keeps values in a map. */
 function memento(): { values: Map<string, unknown>; get(key: string): unknown; update(key: string, value: unknown): Promise<void> } {
@@ -26,5 +26,11 @@ suite("chat reveal", () => {
 		const state = memento();
 		assert.strictEqual(await revealChatOnce(state, async () => { throw new Error("no view"); }), true);
 		assert.strictEqual(await revealChatOnce(state, async () => undefined), false);
+	});
+
+	test("a notification URI names the chat to open", () => {
+		assert.strictEqual(chatSessionFromUri({ path: CHAT_OPEN_URI_PATH, query: "session=abc-1&windowId=2" }), "abc-1");
+		assert.strictEqual(chatSessionFromUri({ path: CHAT_OPEN_URI_PATH, query: "windowId=2" }), undefined);
+		assert.strictEqual(chatSessionFromUri({ path: "/other", query: "session=abc-1" }), undefined);
 	});
 });

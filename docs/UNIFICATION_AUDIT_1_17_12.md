@@ -40,8 +40,8 @@ P3 — поддержка последующих изменений. Это пр
 - [ProviderDirectoryOptions](../src/providers/provider-directory.ts#L63)
   содержит отдельные функции статуса Codex, Claude и Coco;
   [refresh](../src/providers/provider-directory.ts#L213) перечисляет их снова.
-- [groupProviderModels](../src/ui/provider-model-picker.ts#L25) повторяет
-  распознавание префиксов, подписи провайдеров и группировку.
+- Удалённый системный выбор модели повторял распознавание префиксов,
+  подписи провайдеров и группировку.
 - [activate](../src/extension.ts#L601) вручную создаёт и связывает провайдеры,
   а [подписки на статус](../src/extension.ts#L692) повторяют одну последовательность
   обновления Directory, Quick Access и Providers Manager.

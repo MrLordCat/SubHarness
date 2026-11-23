@@ -2,10 +2,8 @@
 
 ## Scope
 
-The extension contributes supported Claude subscription profiles to the normal
-VS Code Chat model picker. Selecting one starts or resumes an official Claude
-Agent SDK `Query`; it does not redirect the global Copilot endpoint and does not
-run a separate chat participant.
+The SubHarness chat offers supported Claude subscription profiles in its model
+picker. Selecting one starts or resumes an official Claude Agent SDK `Query`.
 
 Claude authentication, subscription limits, model execution, and persisted SDK
 transcripts remain owned by the official Claude Code runtime. The extension
@@ -83,23 +81,22 @@ Every logical turn records one of these modes:
 | `new` | No compatible in-memory or persisted SDK session matched; full input starts a new query. |
 | `warm` | The existing in-memory query receives only the latest user turn. |
 | `restored` | A validated persisted SDK session was found and resumed after process reload. |
-| `rollover` | The explicit Continue Latest command attaches the saved SDK transcript to a clean VS Code chat. |
 | `resume-fallback` | Persisted resume failed before usable output; a fresh query retries with bounded full input. |
 
 In-memory SDK sessions stay alive for 24 hours without user activity, and
 armed rollover intents stay valid for 24 hours, so a pause or reload within a
 day does not drop the live session.
 
-Durable mappings contain session ids, hashes, Copilot conversation identity and
+Durable mappings contain session ids, hashes, SubHarness conversation identity,
 turn index, conversation fingerprints, and timestamps in VS Code workspace
 state. Claude message transcripts remain in the official Agent SDK session
-store. The model, workspace, on-disk SDK transcript, and advanced Copilot
-conversation must remain compatible before reuse. A changed current tool
+store. The model, workspace, on-disk SDK transcript, and advancing conversation
+must remain compatible before reuse. A changed current tool
 catalog or reasoning profile does not by itself force a cold start: the Agent
 SDK resumes with the current request's allowlisted tools and configuration.
 Completed mappings remain eligible for seven days. Mappings written before
-Copilot turn indices were available migrate on the next advancing turn even if
-Copilot compacted or rewrote the visible history during reload.
+SubHarness chat turn indices were available migrate on the next advancing turn even if
+the SubHarness chat compacted or rewrote the visible history during reload.
 
 An unfinished JavaScript tool promise cannot survive Extension Host shutdown.
 Reload at that boundary uses the validated fallback rather than pretending the
@@ -135,12 +132,12 @@ turn. Reports store counts, timings, tool names, lifecycle, request/session
 identifiers, and context categories; they do not store prompts or tool-result
 bodies.
 
-### Native Copilot context usage
+### SubHarness context usage
 
 After the visible text or native tool call on every completed provider response
 boundary, the provider emits a `LanguageModelDataPart` with MIME type `usage`.
 This includes each native-tool boundary and the terminal Agent SDK result, so
-Copilot Chat can update its native Session Info numerator throughout the turn.
+The SubHarness chat can update its context usage display throughout the turn.
 The payload follows the OpenAI-compatible shape:
 
 - `prompt_tokens` is fresh input plus cache-read and cache-creation input from
@@ -170,7 +167,7 @@ different raw provider limit.
 
 ## Known Boundaries
 
-- Tool availability still depends on the active VS Code/Copilot catalog,
+- Tool availability still depends on the active SubHarness chat tool catalog,
   workspace trust and policy, installed extensions, and enabled connectors or
   MCP integrations.
 - Subscription and context probes use Agent SDK control APIs whose exact fields

@@ -13,6 +13,14 @@ suite("os notification", () => {
 		assert.ok(script.includes("&lt;&amp;&quot;&apos;"));
 		assert.ok(script.includes("body &gt; &amp;"));
 		assert.ok(script.includes("'id''quoted'"));
+		assert.ok(script.includes("<toast><visual>"));
+	});
+
+	test("a Windows toast with a launch URI opens it on click", () => {
+		const command = osNotificationCommand("win32", "title", "body", "id", "vscode://ext/open-chat?session=a&windowId=1");
+		assert.ok(command);
+		const script = Buffer.from(command.args[command.args.indexOf("-EncodedCommand") + 1], "base64").toString("utf16le");
+		assert.ok(script.includes(`<toast activationType="protocol" launch="vscode://ext/open-chat?session=a&amp;windowId=1"><visual>`));
 	});
 
 	test("builds macOS and Linux commands and rejects unsupported platforms", () => {
@@ -46,5 +54,14 @@ suite("os notification", () => {
 		notify("title", "body");
 		await new Promise(resolve => setImmediate(resolve));
 		assert.strictEqual(calls, 2);
+	});
+
+	test("passes the launch URI to the toast", async () => {
+		const scripts: string[] = [];
+		const notify = createOsNotifier({ platform: "win32", appId: "id", run: async (_command, args) => { scripts.push(Buffer.from(args[args.indexOf("-EncodedCommand") + 1], "base64").toString("utf16le")); } });
+		notify("title", "body", "vscode://ext/open-chat?session=a");
+		await new Promise(resolve => setImmediate(resolve));
+		assert.strictEqual(scripts.length, 1);
+		assert.ok(scripts[0].includes(`launch="vscode://ext/open-chat?session=a"`));
 	});
 });

@@ -44,7 +44,7 @@ export class ApiSourceRouter implements vscode.Disposable {
 	}
 	async respond(source: ChatModelSource, request: SourceResponse, http: () => Promise<void>): Promise<void> {
 		const adapter = this.adapter(source);
-		if (!adapter) { this.cancelConversation(request.options.modelOptions?._copilotConversationId); }
+		if (!adapter) { this.cancelConversation(request.options.modelOptions?._conversationId); }
 		if (adapter) { await adapter.respond(source, request, http); } else { await http(); }
 	}
 	usesConversationHistory(source: ChatModelSource): boolean { return this.adapter(source)?.id === "cursor"; }

@@ -1,11 +1,10 @@
 # Bridge chat (preview)
 
-The extension has its own chat, independent of Copilot Chat. It talks to the
-same models (Codex, Claude, DeepSeek, custom APIs, local servers, Coco) and
-runs its own tools directly.
+The extension's models and tools are available in its own **SubHarness chat**.
+It talks to Codex, Claude, DeepSeek, custom APIs, local servers and Coco, and
+runs its tools directly.
 
-The chat lives in the secondary side bar, next to Copilot Chat, Claude Code
-and Codex: click its **SubHarness** icon there. The first start after the
+The chat lives in the secondary side bar: click its **SubHarness** icon there. The first start after the
 update opens it once. If the secondary side bar is hidden, show it with the
 layout button in the title bar or **View: Toggle Secondary Side Bar
 Visibility**; VS Code then keeps it open across restarts. You can drag the
@@ -50,7 +49,11 @@ column. Quick Access stays in the **SubHarness** activity bar container.
   remembered per model.
 - **Tools** lists every tool the model may use. The bridge's own tools are on;
   tools of other extensions and MCP servers are off until you enable them.
-  The choice is remembered.
+  The choice is remembered. The **Allow without asking…** link beside an
+  external tool group opens VS Code's **Manage Tool Approval** at profile scope.
+  Mark a server or tool as always allowed there to stop its approval dialog.
+  **SubHarness: Allow External Tools Without Asking** opens the same setting
+  (also in the chat view's **…** menu).
 - The limits chip shows the 5-hour window of the selected Codex or Claude
   subscription, the weekly window instead once it is used up, or the DeepSeek
   balance. Hover it for every window; click it for all providers and reset
@@ -88,7 +91,10 @@ text. Pasted files are saved in the extension's storage and kept for 30 days;
 each can be up to 20 MB, ten at a time.
 
 Attachments show as chips above the input and under the sent message; click
-one to open it. Files are read when the message is sent, including unsaved
+one to open it. While a sent message is being edited, what you paste, drop or
+pick goes to the box you used: the edit box or the input at the bottom. The
+**Add Selection to Chat** and **Add File to Chat** commands go to the edit box
+while one is open. Files are read when the message is sent, including unsaved
 editor content. Each file is capped at 60,000 characters and a message at
 150,000; binary files and files over 2 MB are named but not included. The
 chip of a file the model did not get shows **⚠**; hover it for the reason.
@@ -162,11 +168,9 @@ recursive deletes, disk formatting, publishing packages and similar commands.
 Edit the list in Settings; each entry is a regular expression. `delete_file`
 also asks before it deletes a folder or anything outside the workspace.
 
-Tools that only work inside Copilot Chat or a VS Code chat session are not
-offered: every tool of the Copilot Chat extension (`copilot_*`, its subagents
-and skills) and the VS Code chat tools for questions, todo lists, chat
-terminals, tasks and the integrated browser. Tools of MCP servers and other
-extensions stay available in the **Tools** picker.
+The SubHarness chat offers its built-in tools and tools from MCP servers and
+other extensions in the **Tools** picker. External tools are off until enabled;
+VS Code may ask in a modal dialog before running them.
 
 ## Changed files: Keep and Undo
 
@@ -239,8 +243,11 @@ the chat you are looking at; deleting a running chat stops it first.
 
 While the VS Code window is not focused or is minimized, the operating system
 announces a finished turn, an approval request and a question (a toast on
-Windows, Notification Center on macOS, `notify-send` on Linux). Set
-`llamacpp.chat.systemNotifications` to `false` to turn this off.
+Windows, Notification Center on macOS, `notify-send` on Linux). On Windows,
+clicking the notification focuses the VS Code window that ran the chat and opens
+that chat. The first click may show VS Code's one-time **Allow 'SubHarness'
+extension to open this URI?** prompt; select **Do not ask me again**. Set
+`llamacpp.chat.systemNotifications` to `false` to turn notifications off.
 
 ## Subagents
 
@@ -347,6 +354,7 @@ the changes panel says so.
 | SubHarness: New Chat | Chat view title |
 | SubHarness: Show Chats | Chat view title |
 | SubHarness: Open Chat in Editor | Chat view title |
+| SubHarness: Allow External Tools Without Asking | Chat view **…** menu |
 | SubHarness: Add Selection to Chat | Editor context menu |
 | SubHarness: Add File to Chat | Explorer context menu |
 

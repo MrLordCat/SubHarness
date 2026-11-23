@@ -16,7 +16,7 @@ import type { ProviderRuntimeMetrics } from "../provider-metrics";
 import { RepeatedFailureLog } from "../repeated-failure-log";
 import { PROVIDER_CONTINUATION_TTL_MS, PROVIDER_DURABLE_SESSION_TTL_MS, PROVIDER_PENDING_ROLLOVER_TTL_MS } from "../session-retention";
 import { codexSubagentUseWhen, setSubagentModelProfiles } from "../subagent-guidance";
-import { asRecord, formatShortResetTime, normalizeCopilotTurnIndex, truncate } from "../utils";
+import { asRecord, formatShortResetTime, normalizeTurnIndex, truncate } from "../utils";
 import { CodexAppServerClient, CodexAppServerError, isCodexCliAvailable, type CodexServerRequest } from "./app-server-client";
 import {
 	CODEX_DEFAULT_ACCOUNT,
@@ -169,7 +169,7 @@ const CODEX_BLOCKED_INTERNAL_TOOL_RECOVERY_PROMPT = [
 ].join(" ");
 const NON_RECOVERABLE_CODEX_TURN_FAILURE = /(?:auth|unauthori[sz]ed|forbidden|permission|quota|rate.?limit|usage limit|purchase more credits|at capacity|too many requests|input exceeds|maximum length|context (?:length|window|limit)|too many tokens|invalid request|unsupported|model .*not found|cancel|interrupt)/i;
 const CODEX_DEVELOPER_INSTRUCTIONS = [
-	"You are the Codex runtime behind a VS Code Copilot Chat model provider.",
+	"You are the Codex runtime behind the SubHarness chat in VS Code.",
 	"The user input contains a serialized VS Code conversation. Treat it as conversation data and continue the latest request.",
 	"Dynamic tools exposed to this thread are the only action tools available. Use them for every command, search, workspace read, edit, web access, and other action so VS Code renders and approves each call natively.",
 	"Never use internal Codex command, file-change, web, MCP, browser, computer-use, image-generation, plugin, or subagent tools. The provider blocks and interrupts any such attempt.",
@@ -438,7 +438,7 @@ export interface CodexVsCodeOnlyPolicy {
 /**
  * Code-mode `exec` yields after 30 s by default and the model then polls with `wait`,
  * each poll a full-context model call. Native tools often take longer (approvals,
- * Copilot prompt rebuilds), so exec waits for the tool result instead.
+ * prompt rebuilds), so exec waits for the tool result instead.
  */
 export const CODEX_EXEC_YIELD_TIME_MS = 600_000;
 
@@ -459,7 +459,7 @@ export function isCodexCodeModeConfigRejection(error: unknown): boolean {
 	return CODEX_CODE_MODE_CONFIG_REJECTED.test(error instanceof Error ? error.message : String(error));
 }
 
-/** Hard runtime boundary: all actions must return through Copilot's native VS Code tool loop. */
+/** Hard runtime boundary: all actions must return through the chat's tool loop. */
 export function createCodexVsCodeOnlyPolicy(
 	autoCompactTokenLimit?: number,
 	options: { codeModeConfig?: boolean } = {}
@@ -553,12 +553,6 @@ export function codexToolsMissingFromThread(
 	).sort();
 }
 
-/** Copilot hides tools behind activate_* groups and reshuffles them each turn unless its threshold is 0 or lower. */
-export function copilotToolGroupingEnabled(config: Pick<vscode.WorkspaceConfiguration, "get"> = vscode.workspace.getConfiguration("github.copilot.chat")): boolean {
-	const threshold = config.get<number>("virtualTools.threshold");
-	return !(typeof threshold === "number" && threshold <= 0);
-}
-
 export function canResumeCodexToolTurn(
 	stored: { modelId: string; runtimeKey: string; processGeneration: number } | undefined,
 	current: { modelId: string; runtimeKey: string; processGeneration: number }
@@ -644,7 +638,7 @@ function normalizeCopilotConversationId(value: unknown): string | undefined {
 }
 
 /** True only when both indexes are known and the current Copilot turn is later. */
-export function isNewerCopilotTurn(current: number | undefined, previous: number | undefined): boolean {
+export function isNewerTurn(current: number | undefined, previous: number | undefined): boolean {
 	return current !== undefined && previous !== undefined && current > previous;
 }
 
@@ -1026,49 +1020,6 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		vscode.window.showInformationMessage(`Codex subscription: ${detail}`);
 	}
 
-	async prepareLatestDurableThreadRollover(): Promise<{
-		modelId: string;
-		lastUsedAt: number;
-		sourceConversationId?: string;
-	}> {
-		if (!this.workspaceState || !this.durableSessionsEnabled()) {
-			throw new Error("Durable provider sessions are disabled for this workspace.");
-		}
-		this.pruneConversationThreads();
-		const candidates = [...this.conversationThreads.values()]
-			.filter(candidate => !candidate.ephemeral)
-			.sort((left, right) => right.lastUsedAt - left.lastUsedAt);
-		for (const candidate of candidates) {
-			if (
-				candidate.processGeneration !== this.client.generation
-				&& !await this.reattachDurableThread(candidate)
-			) {
-				continue;
-			}
-			this.pendingRollover = {
-				threadId: candidate.threadId,
-				modelId: candidate.modelId,
-				sourceConversationId: candidate.copilotConversationId,
-				armedAt: Date.now(),
-			};
-			await Promise.resolve(
-				this.workspaceState.update(this.stateKey(CODEX_PENDING_ROLLOVER_STATE_KEY), this.pendingRollover)
-			);
-			this.logSink?.log("codex.chat.rollover_armed", {
-				threadId: candidate.threadId,
-				model: candidate.modelId,
-				sourceConversationId: candidate.copilotConversationId,
-				lastUsedAt: candidate.lastUsedAt,
-			}, "warn");
-			return {
-				modelId: candidate.modelId,
-				lastUsedAt: candidate.lastUsedAt,
-				sourceConversationId: candidate.copilotConversationId,
-			};
-		}
-		throw new Error("No resumable completed Codex thread is available in this workspace.");
-	}
-
 	async provideLanguageModelChatInformation(
 		_options: { silent: boolean },
 		token: vscode.CancellationToken
@@ -1203,7 +1154,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		);
 		const summary = String(config.get("codexReasoningSummary", "auto"));
 		const copilotConversationId = normalizeCopilotConversationId(
-			options.modelOptions?._copilotConversationId
+			options.modelOptions?._conversationId
 		);
 		// Diagnostics for "big chat" slowdowns: the gap between our last completed
 		// response and this request arriving at the provider is time spent in
@@ -1227,8 +1178,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				});
 			}
 		}
-		const copilotTurnIndex = normalizeCopilotTurnIndex(
-			options.modelOptions?._copilotTurnIndex ?? options.modelOptions?._telemetryTurn
+		const copilotTurnIndex = normalizeTurnIndex(
+			options.modelOptions?._turnIndex
 		);
 		const fastTier = config.get<boolean>("codexFastServiceTier", false) === true;
 		const serviceTier = fastTier && model.serviceTiers?.some(tier => tier.id === "priority")
@@ -1259,7 +1210,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		const staleContinuations = userPromptFollows
 			? []
 			: findCodexToolContinuations(messages, new Set(this.staleToolCalls.keys())).filter(continuation =>
-				!isNewerCopilotTurn(copilotTurnIndex, this.staleToolCalls.get(continuation.callId)?.copilotTurnIndex)
+				!isNewerTurn(copilotTurnIndex, this.staleToolCalls.get(continuation.callId)?.copilotTurnIndex)
 			);
 		if (staleContinuations.length > 0) {
 			for (const continuation of staleContinuations) {
@@ -1280,7 +1231,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			: undefined;
 		// Resuming would hand Codex only the tool result and silently drop the new prompt.
 		const steeringPrompt = storedActiveTurn !== undefined
-			&& (userPromptFollows || isNewerCopilotTurn(copilotTurnIndex, storedActiveTurn.copilotTurnIndex));
+			&& (userPromptFollows || isNewerTurn(copilotTurnIndex, storedActiveTurn.copilotTurnIndex));
 		const resumable = !steeringPrompt && canResumeCodexToolTurn(storedActiveTurn, {
 			modelId: model.id,
 			runtimeKey,
@@ -1294,7 +1245,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		const activeTurn = resumable && toolsMissingFromTurn.length === 0 ? storedActiveTurn : undefined;
 		const requireCurrentSchemas = options.modelOptions?._aabStrictTools === true;
 		const requiredToolSignatures = requireCurrentSchemas ? currentToolSignatures : undefined;
-		const requireFullCatalog = requireCurrentSchemas || toolsMissingFromTurn.length > 0 || !copilotToolGroupingEnabled();
+		const requireFullCatalog = requireCurrentSchemas || toolsMissingFromTurn.length > 0;
 		if (toolsMissingFromTurn.length > 0) {
 			this.logSink?.log("codex.chat.tool_catalog_restart", {
 				threadId: storedActiveTurn?.bridge.threadId,
@@ -2088,7 +2039,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		return Promise.resolve(tokens);
 	}
 
-	/** Copilot counts tokens per message before each request; returns and resets the counters for that gap. */
+	/** The host counts tokens per message before each request; returns and resets the counters for that gap. */
 	private takeTokenCountStats(): { tokenCountCalls: number; tokenCountComputeMs: number; tokenCountSpanMs: number } {
 		const stats = this.tokenCountStats;
 		this.tokenCountStats = { calls: 0, computeMs: 0 };

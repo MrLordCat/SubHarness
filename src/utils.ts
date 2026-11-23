@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import { createHash } from "node:crypto";
-import { enhanceSubagentToolDescription } from "./subagent-guidance";
 import type { OpenAIChatMessage, OpenAIContentPart, OpenAIChatRole, OpenAIFunctionToolDef, OpenAIToolCall } from "./types";
 
 // --- Bounded LRU map (shared by caches that must not grow unbounded) ---
@@ -776,7 +775,6 @@ export function convertTools(
 			// duplicate edit attempts while nothing actually executed.
 			const directPriority: Record<string, number> = {
 				run_in_terminal: 200,
-				llamacpp_wait_for_terminal: 199,
 				run_task: 198,
 				read_file: 195,
 				grep_search: 190,
@@ -812,7 +810,6 @@ export function convertTools(
 			terminal_last_command: 100,
 			terminal_selection: 96,
 			llamacpp_delete_memory: 92,
-			runSubagent: 170,
 			executeSubagent: 168,
 			exploreSubagent: 166,
 			terminate: 164,
@@ -891,7 +888,7 @@ export function convertTools(
 			const name = sanitizeFunctionName(t.name);
 			const descriptionBase = typeof t.description === "string" ? t.description : "";
 			const description = appendToolDescription(
-				enhanceSubagentToolDescription(name, normalizeDescriptionForMode(name, descriptionBase)),
+				normalizeDescriptionForMode(name, descriptionBase),
 				getToolExecutionHint(name, hasRunInTerminal)
 			);
 			const params = JSON.parse(stableJsonStringify(
@@ -1147,7 +1144,7 @@ export function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /** Normalizes a Copilot turn index to a safe integer (or undefined). */
-export function normalizeCopilotTurnIndex(value: unknown): number | undefined {
+export function normalizeTurnIndex(value: unknown): number | undefined {
 	const numeric = typeof value === "number" ? value : Number.NaN;
 	return Number.isSafeInteger(numeric) && numeric >= 0 ? numeric : undefined;
 }

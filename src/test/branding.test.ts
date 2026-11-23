@@ -11,8 +11,7 @@ suite("SubHarness branding", () => {
 		version: string;
 		repository: { url: string };
 		contributes: {
-			languageModelChatProviders: Array<{ vendor: string; displayName: string }>;
-			viewsContainers: { activitybar: Array<{ title: string }>; secondarySidebar: Array<{ id: string; title: string }> };
+				viewsContainers: { activitybar: Array<{ title: string }>; secondarySidebar: Array<{ id: string; title: string }> };
 			views: Record<string, Array<{ id: string; type?: string }>>;
 			configuration: {
 				title: string;
@@ -33,8 +32,6 @@ suite("SubHarness branding", () => {
 		assert.strictEqual(manifest.displayName, "SubHarness");
 		assert.strictEqual(manifest.name, "llama-vscode-chat");
 		assert.strictEqual(manifest.publisher, "mrlordcat");
-		assert.strictEqual(manifest.contributes.languageModelChatProviders[0].vendor, "llamacpp");
-		assert.strictEqual(manifest.contributes.languageModelChatProviders[0].displayName, "SubHarness");
 		assert.strictEqual(manifest.contributes.viewsContainers.activitybar[0].title, "SubHarness");
 		const chatContainer = manifest.contributes.viewsContainers.secondarySidebar[0];
 		assert.strictEqual(chatContainer.title, "SubHarness");

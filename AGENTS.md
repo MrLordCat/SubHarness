@@ -24,19 +24,14 @@
   списке субагентов расширение оставляет самую новую Luna 6.x и самую новую
   Terra 6.x (сейчас `gpt-6-luna` и `gpt-6.1-terra`); Sol субагентом не бывает.
   Luna и Terra расходуют квоту подписки ChatGPT, Flash — баланс DeepSeek.
-- **Тул субагента зависит от чата.** Пока работают оба чата, имена разные:
-  - Copilot Chat — `runSubagent`, `model` из списка в его описании (сейчас
-    `deepseek-flash (DeepSeek) (llamacpp)`, `GPT-6-Luna (Codex) (llamacpp)`,
-    `GPT-6.1 Terra (Codex) (llamacpp)`);
-  - чат SubHarness (бывший AI Agent Bridge Chat) — `subagent`, `model` из списка в его
-    описании, а под Coco — из описания параметра `model` (сейчас
-    `deepseek-flash (DeepSeek)`, `GPT-6-Luna (Codex)`, `GPT-6.1 Terra (Codex)`;
-    вариант с ` (llamacpp)` тоже принимается).
+- **Тул субагента — `subagent`** в чате SubHarness (с 2.0.8 модели расширения
+  работают только в нём, интеграции с Copilot Chat больше нет). `model` бери из
+  списка в описании тула, а под Coco — из описания параметра `model` (сейчас
+  `deepseek-flash (DeepSeek)`, `GPT-6-Luna (Codex)`, `GPT-6.1 Terra (Codex)`;
+  вариант с ` (llamacpp)` тоже принимается).
 
-  Остальные тулы тоже называются по-разному (например, `llamacpp_coco_run_in_terminal`
-  в Copilot Chat и `run_in_terminal` в бридж-чате): бери имена из списка тулов
-  текущего чата. В бридж-чате выключенные тулы видны через `list_tools`,
-  включить их можно через `request_tools`.
+  Имена остальных тулов бери из списка тулов текущего чата. Выключенные тулы видны
+  через `list_tools`, включить их можно через `request_tools`.
 
 ### Как ставить задачу исполнителю
 

@@ -1,6 +1,6 @@
-# Global agent instructions (VS Code Copilot / llama-vscode-chat)
+# Global agent instructions (SubHarness chat)
 
-These instructions apply to every session: native Copilot Chat chats and models served through llama-vscode-chat (DeepSeek, local). Work as a careful engineer: research first, then act, then verify.
+These instructions apply to sessions using the SubHarness chat. Work as a careful engineer: research first, then act, then verify.
 
 ## 1. Memory — save and use it (required)
 

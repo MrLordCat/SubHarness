@@ -18,11 +18,6 @@ import {
 } from "../context/context-budget";
 import { resolveProviderSwitchContextTokens, resolveSharedContextLimit } from "../context/provider-handoff";
 import {
-	getCopilotPatchSummary,
-	findCopilotBundle,
-	type CopilotPatchTarget,
-} from "../copilot-patch";
-import {
 	formatCompactTokenCount,
 	formatProviderTokens,
 	type ProviderRuntimeMetrics,
@@ -517,12 +512,6 @@ export function buildCocoItem(
 				icon: new vscode.ThemeIcon("refresh"),
 				command: command("llamacpp.cocoRefreshModels", "Refresh Coco Models"),
 			}),
-			new QuickAccessItem("coco.thinking", "Thinking Effort", {
-				description: "In model picker",
-				tooltip: status?.thinkingLevels?.length ? `Available levels: ${status.thinkingLevels.join(", ")}` : "Choose thinking effort in the native model picker after the catalog loads.",
-				icon: new vscode.ThemeIcon("lightbulb"),
-				command: command("llamacpp.openCopilotModelPicker", "Open Model Picker"),
-			}),
 			new QuickAccessItem("coco.context", metrics?.contextWindowTokens ? "Maximum Context" : "Fallback Context", {
 				description: formatCompactTokenCount(window), icon: new vscode.ThemeIcon("symbol-numeric"),
 				tooltip: "The last measured model window, when available; otherwise the global fallback. Exact model baselines and live windows are used in the model picker.",
@@ -551,14 +540,6 @@ export function buildCocoItem(
 }
 
 const QUICK_ACCESS_REFRESH_DELAY_MS = 200;
-let cachedCopilotPatchTarget: CopilotPatchTarget | undefined;
-
-/** The bundle location is fixed for the lifetime of the extension host. */
-function copilotPatchTarget(): CopilotPatchTarget {
-	cachedCopilotPatchTarget ??= findCopilotBundle(vscode.env.appRoot);
-	return cachedCopilotPatchTarget;
-}
-
 export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickAccessItem>, vscode.Disposable {
 	private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
 	readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
@@ -676,7 +657,6 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 		const streamChunkLoggingEnabled = config.get<boolean>("logStreamChunks", false) === true;
 		const performanceStatusBarEnabled = config.get<boolean>("showPerformanceStatusBar", true) !== false;
 		const contextUsageStatusBarEnabled = config.get<boolean>("showContextUsageStatusBar", true) !== false;
-		const agentHostThinkingPatchEnabled = config.get<boolean>("agentHostThinkingPatchEnabled", true) !== false;
 		const memoryEnabled = config.get<boolean>("memoryEnabled", true) !== false;
 		const memoryCount = this.getMemoryCount();
 		const expiredMemoryCount = this.getExpiredMemoryCount();
@@ -1294,30 +1274,6 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 			],
 		});
 
-		const patchStatus = getCopilotPatchSummary(copilotPatchTarget());
-		const controls = patchStatus.applied ? "controls \u2713" : patchStatus.legacyPatch ? "controls outdated" : "controls \u2717";
-		const patches = new QuickAccessItem("patches", "Copilot Patches", {
-			description: `${controls} \u00b7 ${patchStatus.workbenchApplied ? "bounds \u2713" : "bounds \u2717"}`,
-			icon: new vscode.ThemeIcon("pinned"),
-			tooltip: `Copilot Chat ${patchStatus.copilotVersion}: native model controls ${patchStatus.applied ? "applied" : patchStatus.legacyPatch ? "outdated (an older patch version is installed)" : "not applied"}, chat-history bounds ${patchStatus.workbenchApplied ? "applied" : "not applied"}. Show Patch Status opens the detailed log.`,
-			children: [
-				new QuickAccessItem("patches.thinking", "Thinking Picker (Agents)", {
-					description: agentHostThinkingPatchEnabled ? "On" : "Off",
-					tooltip: "Patches the VS Code agent-host bundle so the Agents model picker gets a Thinking level switch (low/medium/high/extra-high) and answers non-streaming SDK requests with JSON. VS Code builds that already provide this are left unpatched.",
-					icon: toggleIcon(agentHostThinkingPatchEnabled),
-					command: command("llamacpp.toggleAgentHostThinkingPatch", "Toggle Thinking Picker Patch"),
-				}),
-				new QuickAccessItem("patches.status", "Show Patch Status", {
-					icon: new vscode.ThemeIcon("info"),
-					command: command("llamacpp.copilotPatchStatus", "Show Copilot Patch Status"),
-				}),
-				new QuickAccessItem("patches.apply", "Apply Patch", {
-					icon: new vscode.ThemeIcon("wrench"),
-					command: command("llamacpp.applyCopilotPatch", "Apply Copilot Patch"),
-				}),
-			],
-		});
-
 		// Providers that are enabled but unreachable are hidden from Quick
 		// Access and reappear as soon as the availability probe reports them
 		// online again. The Providers group stays visible so the reason can
@@ -1351,7 +1307,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 			.filter(snapshot => !["primary", "local", "deepseek", "codex", "claude", "coco"].includes(snapshot.sourceId) && !snapshot.sourceId.startsWith("api-") && snapshot.state !== "offline")
 			.map(buildProviderSnapshotItem);
 		const updateStatus = this.dependencies.getUpdateStatus?.();
-		return [apiProviders, ...apiProfileItems, ...visibleProviders, ...genericProviders, tokenUsage, experiments, agents, modelBehavior, memory, diagnostics, patches,
+		return [apiProviders, ...apiProfileItems, ...visibleProviders, ...genericProviders, tokenUsage, experiments, agents, modelBehavior, memory, diagnostics,
 			...(updateStatus ? [buildUpdateItem(updateStatus)] : [])];
 	}
 }

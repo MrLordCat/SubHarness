@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { CocoTerminalManager, directoryForCd, type CocoTerminalHost } from "../coco/terminal-manager";
-import { COCO_TERMINAL_TOOLS, selectCocoChatTools } from "../coco/terminal-tools";
+import { selectCocoChatTools } from "../coco/terminal-tools";
 import { CocoTurnBridge } from "../coco/turn-bridge";
 
 class TerminalHost implements CocoTerminalHost, vscode.Disposable {
@@ -342,7 +342,7 @@ suite("Coco interactive terminals", () => {
 
 	test("keeps extension reference names callable and removes agent-host shell tools from ACP", () => {
 		const names = ["powershell", "read_powershell", "write_powershell", "stop_powershell", "list_powershell", "powershell_shutdown",
-			"bash", "read_bash", "write_bash", "stop_bash", "list_bash", "bash_shutdown", "cocoRunInTerminal", COCO_TERMINAL_TOOLS.run,
+			"bash", "read_bash", "write_bash", "stop_bash", "list_bash", "bash_shutdown", "cocoRunInTerminal",
 			"cocoReadTerminal", "cocoSendToTerminal", "cocoKillTerminal", "run_in_terminal", "read_file"];
 		const tools = names.map(name => ({ name, description: name, inputSchema: { type: "object" } }));
 		const selected = selectCocoChatTools(tools);

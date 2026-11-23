@@ -19,7 +19,7 @@ const user = vscode.LanguageModelChatMessage.User;
 const assistant = vscode.LanguageModelChatMessage.Assistant;
 const none: vscode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) };
 const model = mapCocoModel({ id: "claude-opus-5-5", name: "Opus" }, 1_000_000);
-const options = (id = "chat-one") => ({ toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _copilotConversationId: id } });
+const options = (id = "chat-one") => ({ toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _conversationId: id } });
 const text = (parts: readonly vscode.LanguageModelResponsePart[]) => parts.filter((p): p is vscode.LanguageModelTextPart => p instanceof vscode.LanguageModelTextPart).map(p => p.value).join("");
 const body = (prompt: string | readonly CocoPromptContent[]) => typeof prompt === "string" ? prompt : prompt.map(p => p.type === "text" ? p.text : "[image]").join("");
 

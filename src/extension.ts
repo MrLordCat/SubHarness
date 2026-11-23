@@ -15,16 +15,12 @@ import {
 	DEFAULT_SERVER_URL,
 	EXTENSION_ID,
 	EXTENSION_NAME,
-	PROVIDER_VENDOR,
 } from "./constants";
 import { LlamaLogService } from "./logger";
 import { SessionQualityTracker } from "./diagnostics/session-report";
 import { SubscriptionUsageLedger, type SubscriptionProvider } from "./diagnostics/subscription-usage";
 import { getCurrentWorkspaceScopeId, filterEntriesVisibleInWorkspace } from "./memory/scope";
 import { SharedMemoryService } from "./memory/shared-memory-service";
-import { registerMemoryTools } from "./memory/tools";
-import { registerWaitForTerminalTool } from "./tools/wait-terminal";
-import { registerCocoTerminalTools } from "./coco/terminal-tools";
 import { registerContextControlCommand } from "./ui/context-control";
 import { getFollowedCodexContext, onDidChangeFollowedCodexContext } from "./context/provider-handoff";
 import { registerModelBehaviorCommands } from "./ui/model-behavior-commands";
@@ -34,8 +30,6 @@ import { MemoryManagerPanel, estimateMemoryTokens } from "./ui/memory-manager";
 import { ApiProviderManagerPanel } from "./ui/api-provider-manager";
 import { ApiProviderService } from "./api-providers/api-provider-service";
 import { ProviderDirectory } from "./providers/provider-directory";
-import { applyAgentHostThinkingPatch, findAgentHostBundle, getAgentHostThinkingPatchStatus, restoreAgentHostThinkingPatch } from "./byok/agent-host-thinking-patch";
-import { applyWorkbenchTerminalPatch, findWorkbenchBundle, getWorkbenchTerminalPatchStatus, restoreWorkbenchTerminalPatch } from "./byok/workbench-terminal-patch";
 import { CodexChatModelProvider, type CodexUsageRecord } from "./codex/codex-provider";
 import { codexCliStorage, resolveCodexCliPath, setCodexCliStorage } from "./codex/app-server-client";
 import { installCodexCli, installedCodexCliPath, installedCodexCliVersion, latestCodexCliVersion } from "./codex/cli-installer";
@@ -49,7 +43,6 @@ import {
 } from "./codex/accounts";
 import { ClaudeChatModelProvider, type ClaudeLiveTurnUpdate } from "./claude/claude-provider";
 import { CocoChatModelProvider } from "./coco/coco-provider";
-import { showProviderModelPicker } from "./ui/provider-model-picker";
 import { BUILTIN_PROVIDER_SOURCES, ownsHttpModel, providerSourceId, type ChatProviderRegistration } from "./providers/provider-registry";
 import { providerSnapshots } from "./providers/provider-snapshot";
 import { usageProviderForSource } from "./token-usage-history";
@@ -67,7 +60,6 @@ import {
 	UsageExperimentTracker,
 	type ExperimentVariant,
 } from "./usage-experiment";
-import { registerCopilotPatchIntegration } from "./copilot-patch-runtime";
 import { registerChatWindow } from "./chat";
 import { balanceQuota, subscriptionQuota } from "./chat/quota";
 
@@ -589,37 +581,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(tokenUsageHistory);
 	context.subscriptions.push(usageExperiments);
 	await Promise.all([logService.initialize(), memoryService.initialize()]);
-	registerMemoryTools(context, memoryService);
-	registerWaitForTerminalTool(context);
-	registerCocoTerminalTools(context, (event, data) => logService.log(event, data));
-	registerCopilotPatchIntegration(context);
-
-	// Expose agent history caps to the prompt-tsx patch via globalThis.
-	// The prompt-tsx configurationService does not expose getValue(), so the
-	// injected code reads these globals instead of calling configurationService.
-	const updateAgentHistoryCaps = () => {
-		const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
-		(globalThis as Record<string, unknown>).__llamaAgentHistoryRounds = cfg.get<number>("agentHistoryRounds", 400);
-		(globalThis as Record<string, unknown>).__llamaAgentHistoryTurns = cfg.get<number>("agentHistoryTurns", 80);
-		// A journaled chat gets its full history from the journal, so Copilot only
-		// renders the newest tail of it (see patchAgentHistoryCap). 0 falls back to the full caps.
-		(globalThis as Record<string, unknown>).__llamaJournalHistoryRounds = cfg.get<number>("journalRenderRounds", 12) || undefined;
-		(globalThis as Record<string, unknown>).__llamaJournalHistoryTurns = cfg.get<number>("journalRenderTurns", 8) || undefined;
-	};
-	updateAgentHistoryCaps();
-	context.subscriptions.push(
-		vscode.workspace.onDidChangeConfiguration(e => {
-			if (
-				e.affectsConfiguration(`${CONFIG_SECTION}.agentHistoryRounds`)
-				|| e.affectsConfiguration(`${CONFIG_SECTION}.agentHistoryTurns`)
-				|| e.affectsConfiguration(`${CONFIG_SECTION}.journalRenderRounds`)
-				|| e.affectsConfiguration(`${CONFIG_SECTION}.journalRenderTurns`)
-			) {
-				updateAgentHistoryCaps();
-			}
-		})
-	);
-
 	// API provider profiles (multi-endpoint manager) share the model-source path.
 	const apiProviderService = new ApiProviderService(context.globalState, context.secrets);
 	context.subscriptions.push(apiProviderService);
@@ -701,9 +662,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const subscriptionUsage = new SubscriptionUsageLedger(path.join(context.globalStorageUri.fsPath, "subscription-usage"));
 	void subscriptionUsage.initialize().catch(error => logService.logError("subscription_usage.initialize_failed", error));
 	context.subscriptions.push({ dispose: () => subscriptionUsage.dispose() });
-	// The patched Copilot prompt asks this before rendering only a short history tail.
-	(globalThis as Record<string, unknown>).__llamaJournalHas = (conversation: unknown) => conversationHistory.has(conversation);
-	context.subscriptions.push({ dispose: () => { delete (globalThis as Record<string, unknown>).__llamaJournalHas; } });
 	const assetPrune = setTimeout(() => {
 		void conversationHistory.pruneAssets().then(result => { if (result.removed) { logService.log("chat.history.assets_pruned", result); } }).catch(() => undefined);
 	}, 120_000);
@@ -724,7 +682,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 	], history: conversationHistory });
 	context.subscriptions.push(compositeProvider);
-	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, compositeProvider));
 	const quotaChanges = new vscode.EventEmitter<void>();
 	context.subscriptions.push(
 		quotaChanges,
@@ -1035,125 +992,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		SessionQualityPanel.refreshIfOpen();
 	}, 60_000);
 	context.subscriptions.push(new vscode.Disposable(() => clearInterval(usageLimitRefreshTimer)));
-
-	// VS Code hides BYOK models in the Agents Window model picker until
-	// `chat.agentHost.byokModels.enabled` is true (experimental flag, read at
-	// window startup). The extension sets it itself so the bridge works
-	// out of the box; a user-provided value is never overwritten.
-	const ensureAgentsByokFlag = (): void => {
-		const chatConfig = vscode.workspace.getConfiguration("chat");
-		const inspected = chatConfig.inspect<boolean>("agentHost.byokModels.enabled");
-		if (inspected?.globalValue === undefined && inspected?.workspaceValue === undefined) {
-			void chatConfig.update("agentHost.byokModels.enabled", true, vscode.ConfigurationTarget.Global);
-			logService.log("byok.bridge.byok_flag_enabled");
-		}
-	};
-
-	// Never touch workspace settings in the test runner: the test instance
-	// shares the VS Code host lifecycle and a chat.* write can restart the
-	// agent host mid-run (tests abort with a clean extension-host exit).
-	if (context.extensionMode !== vscode.ExtensionMode.Test) {
-		ensureAgentsByokFlag();
-
-		// Reuse idle background tool terminals for sync commands. VS Code
-		// 1.131 spawns a new terminal per sync call once the session terminal
-		// was moved to the background (timeout/interruption); the workbench
-		// patch flips an idle background terminal back to foreground instead.
-		const workbenchTerminalPatchEnabled = vscode.workspace
-			.getConfiguration(CONFIG_SECTION)
-			.get<boolean>("workbenchTerminalPatchEnabled", true);
-		if (workbenchTerminalPatchEnabled) {
-			try {
-				const target = findWorkbenchBundle(vscode.env.appRoot);
-				if (!getWorkbenchTerminalPatchStatus(target.bundlePath).applied) {
-					const result = applyWorkbenchTerminalPatch(target.bundlePath);
-					logService.log("byok.bridge.workbench_terminal_patch_applied", {
-						sha256: result.status.sha256,
-						message: result.message,
-					});
-				}
-			} catch (error) {
-				// Missing/unpatchable bundle must never break activation.
-				logService.logError("byok.bridge.workbench_terminal_patch_failed", error);
-			}
-		}
-	}
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand("llamacpp.toggleWorkbenchTerminalPatch", async () => {
-			let restoring = false;
-			try {
-				const target = findWorkbenchBundle(vscode.env.appRoot);
-				const status = getWorkbenchTerminalPatchStatus(target.bundlePath);
-				restoring = status.applied;
-				if (status.applied) {
-					const result = restoreWorkbenchTerminalPatch(target.bundlePath);
-					logService.log("byok.bridge.workbench_terminal_patch_restored", { sha256: result.status.sha256 });
-					// Startup re-applies the patch while the setting stays on.
-					await vscode.workspace.getConfiguration(CONFIG_SECTION).update("workbenchTerminalPatchEnabled", false, vscode.ConfigurationTarget.Global);
-					vscode.window.showInformationMessage(result.message);
-					return;
-				}
-				const result = applyWorkbenchTerminalPatch(target.bundlePath);
-				logService.log("byok.bridge.workbench_terminal_patch_applied", { sha256: result.status.sha256 });
-				await vscode.workspace.getConfiguration(CONFIG_SECTION).update("workbenchTerminalPatchEnabled", true, vscode.ConfigurationTarget.Global);
-				vscode.window.showInformationMessage(result.message);
-			} catch (error) {
-				logService.logError("byok.bridge.workbench_terminal_patch_failed", error);
-				if (/eperm|eacces|erofs|access is denied|permission denied/i.test(String(error))) {
-					await vscode.commands.executeCommand("llamacpp.recoverPatchPermissions", "terminal", restoring);
-					return;
-				}
-				vscode.window.showErrorMessage(`Workbench terminal patch failed: ${error instanceof Error ? error.message : String(error)}`);
-			}
-		}),
-	);
-
-	// Thinking-level picker for BYOK models in the Agents Window. VS Code
-	// 1.131 omits the configSchema from BYOK snapshot models, so the UI has no
-	// reasoning-effort switch; this patch adds it to the agent-host bundle.
-	if (context.extensionMode !== vscode.ExtensionMode.Test
-		&& vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>("agentHostThinkingPatchEnabled", true)) {
-		try {
-			const target = findAgentHostBundle(vscode.env.appRoot);
-			const status = getAgentHostThinkingPatchStatus(target.bundlePath);
-			if (!status.applied && !status.nativeSupport) {
-				const result = applyAgentHostThinkingPatch(target.bundlePath);
-				logService.log("byok.bridge.thinking_patch_applied", { sha256: result.status.sha256, message: result.message });
-			}
-		} catch (error) {
-			logService.logError("byok.bridge.thinking_patch_failed", error);
-		}
-	}
-	context.subscriptions.push(
-		vscode.commands.registerCommand("llamacpp.toggleAgentHostThinkingPatch", async () => {
-			let restoring = false;
-			try {
-				const target = findAgentHostBundle(vscode.env.appRoot);
-				const status = getAgentHostThinkingPatchStatus(target.bundlePath);
-				restoring = status.applied;
-				if (status.applied) {
-					const result = restoreAgentHostThinkingPatch(target.bundlePath);
-					logService.log("byok.bridge.thinking_patch_restored", { sha256: result.status.sha256 });
-					// Startup re-applies the patch while the setting stays on.
-					await vscode.workspace.getConfiguration(CONFIG_SECTION).update("agentHostThinkingPatchEnabled", false, vscode.ConfigurationTarget.Global);
-					vscode.window.showInformationMessage(result.message);
-					return;
-				}
-				const result = applyAgentHostThinkingPatch(target.bundlePath);
-				logService.log("byok.bridge.thinking_patch_applied", { sha256: result.status.sha256 });
-				await vscode.workspace.getConfiguration(CONFIG_SECTION).update("agentHostThinkingPatchEnabled", true, vscode.ConfigurationTarget.Global);
-				vscode.window.showInformationMessage(result.message);
-			} catch (error) {
-				logService.logError("byok.bridge.thinking_patch_failed", error);
-				if (/eperm|eacces|erofs|access is denied|permission denied/i.test(String(error))) {
-					await vscode.commands.executeCommand("llamacpp.recoverPatchPermissions", "thinking", restoring);
-					return;
-				}
-				vscode.window.showErrorMessage(`Agent-host thinking patch failed: ${error instanceof Error ? error.message : String(error)}`);
-			}
-		}),
-	);
 
 const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 95);
 	performanceStatusBar.name = "Local LLM Throughput";
@@ -1962,22 +1800,6 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand("llamacpp.codexContinueLatestInNewChat", async () => {
-			try {
-				const prepared = await activeCodex().prepareLatestDurableThreadRollover();
-				await vscode.commands.executeCommand("workbench.action.chat.newChat");
-				vscode.window.showInformationMessage(
-					`New chat opened. Keep the same Codex model selected and send the next message within 30 minutes `
-					+ `to continue the thread saved at ${new Date(prepared.lastUsedAt).toLocaleString()}.`
-				);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				vscode.window.showErrorMessage(`Unable to continue the Codex thread: ${message}`);
-			}
-		})
-	);
-
-	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.toggleClaudeSubscription", async () => {
 			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const next = config.get<boolean>("enableClaudeSubscription", true) === false;
@@ -2055,22 +1877,6 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				vscode.window.showErrorMessage(`Unable to read Claude status: ${message}`);
-			}
-		})
-	);
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand("llamacpp.claudeContinueLatestInNewChat", async () => {
-			try {
-				const prepared = await claudeProvider.prepareLatestDurableSessionRollover();
-				await vscode.commands.executeCommand("workbench.action.chat.newChat");
-				vscode.window.showInformationMessage(
-					`New chat opened. Keep Claude Opus selected and send the next message within 30 minutes `
-					+ `to continue the session saved at ${new Date(prepared.lastUsedAt).toLocaleString()}.`
-				);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				vscode.window.showErrorMessage(`Unable to continue the Claude session: ${message}`);
 			}
 		})
 	);
@@ -2263,56 +2069,6 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 			vscode.window.showInformationMessage("Local, DeepSeek, Codex, Claude, and Coco models refreshed.");
 		})
 	);
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand("llamacpp.openCopilotModelPicker", async () => {
-			const candidates = [
-				"github.copilot.chat.openModelPicker",
-				"workbench.action.chat.openModelPicker",
-			];
-
-			for (const commandId of candidates) {
-				try {
-					await vscode.commands.executeCommand(commandId);
-					return;
-				} catch {
-					// Keep trying fallback command ids.
-				}
-			}
-
-			const allCommands = await vscode.commands.getCommands(true);
-			const dynamicCandidate = allCommands.find(
-				command => command.toLowerCase().includes("modelpicker") && command.includes("copilot")
-			);
-
-			if (dynamicCandidate) {
-				try {
-					await vscode.commands.executeCommand(dynamicCandidate);
-					return;
-				} catch {
-					// Fall through to warning message.
-				}
-			}
-
-			vscode.window.showWarningMessage("Unable to open the Copilot model picker automatically.");
-		})
-	);
-
-	context.subscriptions.push(vscode.commands.registerCommand("llamacpp.chooseModelByProvider", async () => {
-		try {
-			let cancelled = false;
-			const models = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Loading models by provider", cancellable: true }, async (_progress, token) => {
-				const result = await compositeProvider.provideLanguageModelChatInformation({ silent: false }, token);
-				cancelled = token.isCancellationRequested;
-				return result;
-			});
-			if (!cancelled) { await showProviderModelPicker(models, apiProviderService.list(), undefined, compositeProvider.registry.sources); }
-		} catch (error) {
-			if (error instanceof vscode.CancellationError) { return; }
-			logService.logError("models.grouped_picker.failed", error);
-			vscode.window.showErrorMessage(`Unable to choose a model: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	}));
 
         context.subscriptions.push(
                 vscode.commands.registerCommand("llamacpp.openLogsFolder", async () => {

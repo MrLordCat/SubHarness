@@ -83,7 +83,7 @@ suite("Coco vision", () => {
 				},
 				cancel: () => undefined, dispose: () => undefined }) as unknown as CocoAcpClient });
 		const token = new vscode.CancellationTokenSource();
-		const chat = { toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _copilotConversationId: "vision-tools" }, tools: [tool] };
+		const chat = { toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _conversationId: "vision-tools" }, tools: [tool] };
 		try {
 			const first: vscode.LanguageModelResponsePart[] = [];
 			const opening = provider.provideLanguageModelChatResponse(mapCocoModel({ id: "auto", name: "Auto" }),
@@ -132,7 +132,7 @@ suite("Coco vision", () => {
 				},
 				cancel: () => undefined, dispose: () => undefined }) as unknown as CocoAcpClient });
 		const token = new vscode.CancellationTokenSource();
-		const chat = { toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _copilotConversationId: "vision-read" }, tools: [tool] };
+		const chat = { toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _conversationId: "vision-read" }, tools: [tool] };
 		const model = mapCocoModel({ id: "auto", name: "Auto" });
 		const first: vscode.LanguageModelResponsePart[] = [], second: vscode.LanguageModelResponsePart[] = [];
 		try {

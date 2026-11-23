@@ -72,7 +72,7 @@ repository metadata, documentation, and release artifacts belong to the fork.
 - Network failures and HTTP 429/502/503/504 responses have cancellation-aware
   pre-stream exponential backoff; timeouts and arbitrary client errors do not.
 - An optional Copilot Chat patch exposes native Thinking Effort and the real
-  model output limit. See [Copilot Chat Integration](COPILOT_PATCH.md).
+  model output limit.
 
 ### Shared Memory
 
@@ -126,7 +126,6 @@ repository metadata, documentation, and release artifacts belong to the fork.
 | Health and session reports | `src/diagnostics/` |
 | Reasoning profiles | `src/reasoning.ts` |
 | Quick Access and behavior commands | `src/ui/` |
-| Copilot bundle patch tooling | `src/copilot-patch-runtime.ts` |
 
 The completed 1.0 audit is tracked in [Project Audit](AUDIT.md), while
 [Architecture](ARCHITECTURE.md) describes the runtime flow and invariants.

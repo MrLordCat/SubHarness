@@ -13,6 +13,8 @@ import type { ChatTool } from "../chat/tools/types";
 import { createWebTools } from "../chat/tools/web-tools";
 import { COCO_CHAT_TOOL_POLICY } from "../coco/tool-policy";
 import { COCO_TOOL_DESCRIPTION_LIMIT } from "../coco/turn-bridge";
+import type { SharedMemoryService } from "../memory/shared-memory-service";
+import { createMemoryTools } from "../memory/tools";
 
 suite("Tool descriptions and guidance", () => {
 	const unusedRun = async (): Promise<never> => {
@@ -36,6 +38,8 @@ suite("Tool descriptions and guidance", () => {
 			}),
 			createSubagentTool({ models: () => [] }),
 			createCloseSubagentTool({ models: () => [] }),
+			// The memory tools only use the service when they run.
+			...createMemoryTools({} as SharedMemoryService),
 		];
 	}
 
@@ -50,14 +54,12 @@ suite("Tool descriptions and guidance", () => {
 		}
 	});
 
-	test("every contributed language model tool description fits the Coco CLI budget", () => {
+	test("the extension contributes no VS Code language model tools; the chat owns its tools", () => {
 		const manifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")) as {
-			contributes: { languageModelTools: Array<{ name: string; modelDescription?: string }> };
+			contributes: { languageModelTools?: unknown; languageModelChatProviders?: unknown };
 		};
-		for (const tool of manifest.contributes.languageModelTools) {
-			const size = length(tool.modelDescription ?? "");
-			assert.ok(size <= COCO_TOOL_DESCRIPTION_LIMIT, `${tool.name}: ${size} characters, limit ${COCO_TOOL_DESCRIPTION_LIMIT}`);
-		}
+		assert.strictEqual(manifest.contributes.languageModelTools, undefined);
+		assert.strictEqual(manifest.contributes.languageModelChatProviders, undefined);
 	});
 
 	test("the prompts send the model to list_tools and request_tools", () => {

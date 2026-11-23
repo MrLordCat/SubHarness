@@ -126,7 +126,6 @@ function info(name: string): vscode.LanguageModelToolInformation {
 
 function fakeRegistry(
 	names: string[],
-	local: Record<string, vscode.LanguageModelTool<object>> = {},
 	copilotNames?: readonly string[],
 ): ToolRegistry & { invoked: string[] } {
 	const invoked: string[] = [];
@@ -138,7 +137,6 @@ function fakeRegistry(
 			invoked.push(name);
 			return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`external ${name}`)]);
 		},
-		local: name => local[name],
 	};
 }
 
@@ -282,14 +280,11 @@ suite("chat tool policy", () => {
 		await assert.rejects(empty.invoke({ terminalId: "term-5", text: "" }, token()), /interrupt/);
 	});
 
-	test("the catalog groups builtins, bridge tools and external tools with the right defaults", () => {
-		const bridge: vscode.LanguageModelTool<object> = { invoke: () => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart("bridge ran")]) };
-		const registry = fakeRegistry(
-			["llamacpp_store_memory", "llamacpp_coco_run_in_terminal", "llamacpp_wait_for_terminal", "pylance_tool", "mcp_github_search", "read_file", "dotnet_install"],
-			{ llamacpp_store_memory: bridge },
-		);
+	test("the catalog groups builtins, memory tools and external tools with the right defaults", () => {
+		// A VS Code tool with a builtin's name never shadows the builtin.
+		const registry = fakeRegistry(["llamacpp_store_memory", "pylance_tool", "mcp_github_search", "read_file", "dotnet_install"]);
 		const catalog = new ChatToolCatalog({
-			builtins: [chatTool("read_file"), chatTool("run_in_terminal", { group: "terminal" })],
+			builtins: [chatTool("read_file"), chatTool("run_in_terminal", { group: "terminal" }), chatTool("llamacpp_store_memory", { group: "bridge" })],
 			state: new FakeMemento(),
 			registry,
 		});
@@ -303,24 +298,19 @@ suite("chat tool policy", () => {
 			["pylance", ["pylance_tool:false"]],
 		]);
 		assert.strictEqual(groups.find(group => group.label === "Files")?.note, undefined);
-		assert.match(groups.find(group => group.label === "pylance")?.note ?? "", /confirmation/);
+		assert.strictEqual(groups.find(group => group.label === "Files")?.external, undefined);
+		assert.match(groups.find(group => group.label === "pylance")?.note ?? "", /tool approval/);
+		// External groups get the picker's link to VS Code's tool approval.
+		assert.strictEqual(groups.find(group => group.label === "pylance")?.external, true);
 		assert.deepStrictEqual(catalog.enabledTools().map(tool => tool.name), ["read_file", "run_in_terminal", "llamacpp_store_memory"]);
 	});
 
-	test("bridge tools run directly and external tools go through VS Code", async () => {
-		let bridgeInput: unknown;
-		const bridge: vscode.LanguageModelTool<object> = {
-			invoke: options => {
-				bridgeInput = options.input;
-				return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart("bridge ran")]);
-			},
-		};
-		const registry = fakeRegistry(["llamacpp_store_memory", "mcp_github_search"], { llamacpp_store_memory: bridge });
+	test("external tools go through VS Code once enabled", async () => {
+		const registry = fakeRegistry(["mcp_github_search"]);
 		const catalog = new ChatToolCatalog({ builtins: [], state: new FakeMemento(), registry });
+		assert.deepStrictEqual(catalog.enabledTools().map(tool => tool.name), []);
 		await catalog.setEnabled(["mcp_github_search"], true);
 		const tools = new Map(catalog.enabledTools().map(tool => [tool.name, tool]));
-		assert.deepStrictEqual(await tools.get("llamacpp_store_memory")?.invoke({ title: "t" }, token()), { text: "bridge ran" });
-		assert.deepStrictEqual(bridgeInput, { title: "t" });
 		assert.deepStrictEqual(await tools.get("mcp_github_search")?.invoke({}, token()), { text: "external mcp_github_search" });
 		assert.deepStrictEqual(registry.invoked, ["mcp_github_search"]);
 	});
@@ -332,7 +322,6 @@ suite("chat tool policy", () => {
 			invoke: async name => name === "mcp_image"
 				? new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart("look"), vscode.LanguageModelDataPart.image(bytes, "image/png")])
 				: new vscode.LanguageModelToolResult([vscode.LanguageModelDataPart.image(new Uint8Array(MAX_IMAGE_BYTES + 1), "image/png")]),
-			local: () => undefined,
 		};
 		const catalog = new ChatToolCatalog({ builtins: [], state: new FakeMemento(), registry });
 		await catalog.setEnabled(["mcp_image", "mcp_oversized"], true);
@@ -346,14 +335,12 @@ suite("chat tool policy", () => {
 	});
 
 	test("Copilot and chat-session tools disappear from groups, enabled tools and toggles", async () => {
-		const bridge: vscode.LanguageModelTool<object> = { invoke: () => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart("bridge ran")]) };
 		const registry = fakeRegistry(
-			["copilot_readFile", "explore_subagent", "manage_todo_list", "open_browser_page", "mcp_github_search", "pylance_tool", "llamacpp_store_memory"],
-			{ llamacpp_store_memory: bridge },
+			["copilot_readFile", "explore_subagent", "manage_todo_list", "open_browser_page", "mcp_github_search", "pylance_tool"],
 			["explore_subagent"],
 		);
 		const state = new FakeMemento();
-		const catalog = new ChatToolCatalog({ builtins: [], state, registry });
+		const catalog = new ChatToolCatalog({ builtins: [chatTool("llamacpp_store_memory", { group: "bridge" })], state, registry });
 		const tools = new Map(catalog.groups().flatMap(group => group.tools).map(tool => [tool.name, tool]));
 		assert.deepStrictEqual([...tools.keys()], ["llamacpp_store_memory", "mcp_github_search", "pylance_tool"]);
 		assert.strictEqual(tools.get("llamacpp_store_memory")?.enabled, true);

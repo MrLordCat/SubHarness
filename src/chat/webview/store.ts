@@ -2,6 +2,7 @@ import {
 	applyHostUpdate,
 	type ChatApprovalRequest,
 	type ChatAttachment,
+	type ChatAttachmentTarget,
 	type ChatChangeSet,
 	type ChatContextSettings,
 	type ChatDraft,
@@ -518,7 +519,7 @@ export class ChatStore {
 				}
 				return;
 			case "attachmentsAdded":
-				this.addPendingAttachments(update.attachments);
+				this.addPendingAttachments(update.attachments, update.target);
 				return;
 			default:
 				applyHostUpdate(this.messages, update);
@@ -536,14 +537,18 @@ export class ChatStore {
 		}
 	}
 
-	private addPendingAttachments(attachments: readonly ChatAttachment[]): void {
-		const target = this.editing ? this.editing.attachments : this.pendingAttachments;
+	private addPendingAttachments(attachments: readonly ChatAttachment[], destination?: ChatAttachmentTarget): void {
+		if (destination === "edit" && !this.editing) {
+			return;
+		}
+		const editing = destination !== "draft" ? this.editing : undefined;
+		const target = editing ? editing.attachments : this.pendingAttachments;
 		const next = mergeAttachments(target, attachments);
 		if (next.length === target.length) {
 			return;
 		}
-		if (this.editing) {
-			this.editing = { ...this.editing, attachments: next };
+		if (editing) {
+			this.editing = { ...editing, attachments: next };
 		} else {
 			this.pendingAttachments = next;
 			this.scheduleDraftSave();

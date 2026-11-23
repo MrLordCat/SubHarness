@@ -1,5 +1,57 @@
 # Changelog
 
+## 2.0.8 (stable release) - 2026-11-23
+
+- Removed: the GitHub Copilot Chat integration. The extension's models no
+  longer register with VS Code, so they are not in Copilot Chat's or the
+  Agents window's model picker; they run in the SubHarness chat only. Removed
+  with it: the Copilot Chat, workbench terminal and agent-host thinking
+  patches with their commands (Apply Copilot Chat Patch, Show Copilot Chat
+  Patch Status, Restore Original Copilot Chat, Recover Patch Permissions, the
+  two patch toggles, Prepare User VS Code) and settings
+  (`llamacpp.autoPatchCopilot`, `workbenchTerminalPatchEnabled`,
+  `agentHostThinkingPatchEnabled`, `agentHistoryRounds`, `agentHistoryTurns`,
+  `journalRenderRounds`, `journalRenderTurns`), the commands Continue Latest
+  Codex Thread in New Chat, Continue Latest Claude Session in New Chat, Choose
+  Chat Model and Choose Model by Provider, the Patches group in Quick Access,
+  and the Agents window BYOK flag. Patches already applied to a VS Code
+  installation stay as they are; a VS Code update replaces them.
+- Changed: the extension contributes no VS Code language model tools. The
+  memory tools are now the chat's own tools (same names, still in the
+  SubHarness group of the tool picker); the Coco terminal bridge tools and
+  `llamacpp_wait_for_terminal` are gone, Coco uses the chat's terminal tools.
+  HTTP models no longer get `llamacpp_wait_for_terminal` added to their tool
+  list, which the chat could not run.
+- Changed: the system prompts of Claude, Codex, Cursor and Coco name the
+  SubHarness chat as their host instead of Copilot Chat, and Copilot's
+  `runSubagent` tool is no longer rewritten. The first request of each
+  provider after the update misses the prompt cache once.
+- Added: on Windows, clicking the system notification of a finished turn, an
+  approval request or a question focuses the VS Code window that ran the chat
+  and opens that chat, instead of starting a new VS Code window. The first
+  click may show VS Code's one-time "Allow 'SubHarness' extension to open this
+  URI?" prompt.
+- Added: **Allow without asking…** beside the tool picker's groups of other
+  extensions' and MCP tools, and the command **SubHarness: Allow External
+  Tools Without Asking** (also in the chat view's **…** menu), open VS Code's
+  Manage Tool Approval at profile scope. Marking a server such as Playwright
+  as always allowed there stops VS Code's dialog that popped up over
+  everything before each of its tool calls.
+- Fixed: a screenshot or file pasted, dropped or picked in the chat's input
+  while a sent message was being edited landed in that message's edit box,
+  out of view, and the next message went out without it. Each request now
+  carries the box it came from, and the answer goes back to that box; a late
+  answer for a closed edit is dropped. The commands that add the editor
+  selection or a file still go to the edit box while one is open.
+- Fixed: in the edit box of a sent message, a picker that opened downward (the
+  model, thinking level or tools picker near the top of the chat) showed under
+  the following messages, and clicks on it reached those messages instead.
+- Changed: when the input's bottom row does not fit on one line, the model,
+  thinking and tools pickers stay on the first line, and the second line has
+  the limit chip, cache hit and context counter on the left and the buttons on
+  the right. The limit chip moved next to the cache hit; on a wide input the
+  row is unchanged otherwise.
+
 ## 2.0.7 (stable release) - 2026-11-22
 
 - Added: the chat's system prompt has a guide for subagents whenever the

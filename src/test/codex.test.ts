@@ -18,9 +18,8 @@ import {
 	diffCodexThreadUsage,
 	findLatestCodexUserTail,
 	intersectCodexThreadTools,
-	isNewerCopilotTurn,
+	isNewerTurn,
 	codexToolsMissingFromThread,
-	copilotToolGroupingEnabled,
 	isCodexCodeModeConfigRejection,
 	isCompleteImageDataUri,
 	findTempImageWithPrefix,
@@ -1387,11 +1386,11 @@ suite("Codex subscription provider", () => {
 	});
 
 	test("compares Copilot turn indexes only when both are known", () => {
-		assert.strictEqual(isNewerCopilotTurn(5, 4), true);
-		assert.strictEqual(isNewerCopilotTurn(4, 4), false);
-		assert.strictEqual(isNewerCopilotTurn(3, 4), false);
-		assert.strictEqual(isNewerCopilotTurn(undefined, 4), false);
-		assert.strictEqual(isNewerCopilotTurn(5, undefined), false);
+		assert.strictEqual(isNewerTurn(5, 4), true);
+		assert.strictEqual(isNewerTurn(4, 4), false);
+		assert.strictEqual(isNewerTurn(3, 4), false);
+		assert.strictEqual(isNewerTurn(undefined, 4), false);
+		assert.strictEqual(isNewerTurn(5, undefined), false);
 	});
 
 	test("reads the message and retry flag of Codex error notifications", () => {
@@ -1618,14 +1617,6 @@ suite("Codex subscription provider", () => {
 		assert.deepStrictEqual(codexToolsMissingFromThread(
 			thread, tools, new Map([["read_file", "same"], ["subagent", "after"]])
 		), ["subagent"]);
-	});
-
-	test("treats Copilot tool grouping as disabled only for a threshold of zero or less", () => {
-		const config = (threshold: unknown) => ({ get: <T>() => threshold as T });
-		assert.strictEqual(copilotToolGroupingEnabled(config(undefined)), true);
-		assert.strictEqual(copilotToolGroupingEnabled(config(128)), true);
-		assert.strictEqual(copilotToolGroupingEnabled(config(0)), false);
-		assert.strictEqual(copilotToolGroupingEnabled(config(-1)), false);
 	});
 
 	test("reuses only the safe intersection of stored and current thread tools", () => {
@@ -1942,48 +1933,6 @@ suite("Codex subscription provider", () => {
 		restored.dispose();
 	});
 
-	test("arms an explicit Codex rollover for the newest durable thread", async () => {
-		const values = new Map<string, unknown>();
-		const workspaceState = {
-			keys: () => [...values.keys()],
-			get: <T>(key: string, defaultValue?: T): T | undefined =>
-				(values.has(key) ? values.get(key) as T : defaultValue),
-			update: async (key: string, value: unknown): Promise<void> => {
-				values.set(key, value);
-			},
-		} as vscode.Memento;
-		const provider = new CodexChatModelProvider("test", undefined, workspaceState);
-		await (provider as unknown as { rememberConversationThread(value: unknown): Promise<void> }).rememberConversationThread({
-			threadId: "thread-rollover-1",
-			ephemeral: false,
-			modelId: "codex::gpt-5.6-terra",
-			runtimeKey: "runtime-key",
-			toolCatalogKey: "tools-key",
-			callableNames: new Set(["read_file"]),
-			toolNamespaces: new Map<string, string>(),
-			toolSignatures: new Map([["read_file", "signature"]]),
-			copilotConversationId: "large-chat",
-			copilotTurnIndex: 42,
-			anchor: createCodexConversationAnchor([vscode.LanguageModelChatMessage.User("request")], "answer"),
-			lastUsedAt: Date.now(),
-			processGeneration: 0,
-		});
-
-		const prepared = await provider.prepareLatestDurableThreadRollover();
-		assert.strictEqual(prepared.modelId, "codex::gpt-5.6-terra");
-		assert.strictEqual(prepared.sourceConversationId, "large-chat");
-		assert.deepStrictEqual(
-			values.get("llamacpp.codexPendingRollover.v1"),
-			{
-				threadId: "thread-rollover-1",
-				modelId: "codex::gpt-5.6-terra",
-				sourceConversationId: "large-chat",
-				armedAt: (values.get("llamacpp.codexPendingRollover.v1") as { armedAt: number }).armedAt,
-			}
-		);
-		provider.dispose();
-	});
-
 	test("only the active Codex account publishes subagent profiles", () => {
 		const provider = new CodexChatModelProvider("test", undefined, undefined, undefined, { id: "work", label: "Work", providerLabel: "Codex 2" });
 		const internals = provider as unknown as { models: Map<string, CodexModel>; mapKnownModels(): vscode.LanguageModelChatInformation[]; getConfig(): vscode.WorkspaceConfiguration };
@@ -2088,7 +2037,7 @@ suite("Codex subscription provider", () => {
 		provider.dispose();
 	});
 
-	test("adds model-routing guidance to the native subagent tool", () => {
+	test("preserves an advertised tool description and schema", () => {
 		const dynamic = buildCodexDynamicTools([{
 			name: "runSubagent",
 			description: "Run a listed agent",
@@ -2096,8 +2045,8 @@ suite("Codex subscription provider", () => {
 		}]);
 		const tool = dynamic.specs.find(spec => spec.type === "function");
 		assert.ok(tool && tool.type === "function");
-		assert.ok(tool.description.includes("Subagent model routing"));
-		assert.ok(tool.description.includes("Never omit runSubagent.model"));
+		assert.strictEqual(tool.description, "Run a listed agent");
+		assert.deepStrictEqual(tool.inputSchema, { type: "object" });
 	});
 
 	test("defers uncommon Codex tools while keeping the core agent loop eager", () => {

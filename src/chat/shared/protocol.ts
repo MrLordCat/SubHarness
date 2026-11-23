@@ -313,6 +313,8 @@ export interface ChatToolGroup {
 	label: string;
 	/** Shown in the picker, e.g. that VS Code may ask before running these tools. */
 	note?: string;
+	/** Tools of other extensions or MCP servers; VS Code's tool approval decides whether it asks before running them. */
+	external?: boolean;
 	tools: ChatToolInfo[];
 }
 
@@ -428,6 +430,9 @@ export interface ChatApprovalRequest {
 	reason: string;
 }
 
+/** Composer that requested an attachment; omitted for host-initiated additions. */
+export type ChatAttachmentTarget = "draft" | "edit";
+
 /** Host → webview. */
 export type HostMessage =
 	| {
@@ -480,7 +485,7 @@ export type HostMessage =
 	/** Chats other than the shown one that run, wait for an approval or finished unseen. */
 	| { type: "activity"; activity: ChatSessionActivity[] }
 	/** Attachments to show in the composer; they are sent with the next message. */
-	| { type: "attachmentsAdded"; attachments: ChatAttachment[] }
+	| { type: "attachmentsAdded"; attachments: ChatAttachment[]; target?: ChatAttachmentTarget }
 	/** The shown chat's queue changed. */
 	| { type: "queued"; queued: ChatQueuedMessage[] }
 	/** Puts messages taken back from the queue into the composer, e.g. after Stop. */
@@ -497,11 +502,11 @@ export type WebviewMessage =
 	/** Removes a queued message before it is delivered. */
 	| { type: "removeQueued"; id: string }
 	/** Opens the attachment picker; the picked files come back as "attachmentsAdded". */
-	| { type: "pickAttachments" }
+	| { type: "pickAttachments"; target?: ChatAttachmentTarget }
 	/** Files dropped on the composer. */
-	| { type: "addAttachments"; uris: string[] }
+	| { type: "addAttachments"; uris: string[]; target?: ChatAttachmentTarget }
 	/** Screenshots and files pasted or dropped from outside VS Code; they come back as "attachmentsAdded". */
-	| { type: "pasteFiles"; files: ChatPastedFile[] }
+	| { type: "pasteFiles"; files: ChatPastedFile[]; target?: ChatAttachmentTarget }
 	/** Starts the sign-in of a subscription from the model picker's offers. */
 	| { type: "signIn"; provider: string }
 	| { type: "openAttachment"; attachment: ChatAttachment }
@@ -536,6 +541,8 @@ export type WebviewMessage =
 	/** Saves the context popup's sliders and Codex toggle. */
 	| { type: "saveContextSettings"; change: ChatContextSettingsChange }
 	| { type: "setToolsEnabled"; names: string[]; enabled: boolean }
+	/** Opens VS Code's tool approval settings, where external tools can run without its dialog. */
+	| { type: "manageToolApprovals" }
 	| { type: "approve"; id: string; allow: boolean }
 	/** Answers to a questions message; answers absent means the user skipped. */
 	| { type: "answerQuestions"; id: string; answers?: ChatQuestionAnswer[] }

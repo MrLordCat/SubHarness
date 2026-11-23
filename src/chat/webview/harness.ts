@@ -2,6 +2,7 @@ import {
 	WEBVIEW_THINKING_PREVIEW_CHARS,
 	WEBVIEW_TOOL_RESULT_PREVIEW_CHARS,
 	type ChatAttachment,
+	type ChatAttachmentTarget,
 	type ChatChangedFile,
 	type ChatChangeSet,
 	type ChatContextSettings,
@@ -327,10 +328,13 @@ function handleWebviewMessage(message: WebviewMessage): void {
 			handleSend(message.text, message.attachments);
 			break;
 		case "pickAttachments":
-			emitPickerAttachments();
+			emitPickerAttachments(message.target);
 			break;
 		case "addAttachments":
-			emitDroppedAttachments(message.uris);
+			emitDroppedAttachments(message.uris, message.target);
+			break;
+		case "pasteFiles":
+			emitDroppedAttachments(message.files.map(file => file.name), message.target);
 			break;
 		case "openFileReference":
 			console.info(`harness: open file ${message.target}`);
@@ -375,6 +379,8 @@ function handleWebviewMessage(message: WebviewMessage): void {
 		case "setToolsEnabled":
 			applyToolsEnabled(message.names, message.enabled);
 			emit({ type: "tools", tools: TOOL_GROUPS });
+			break;
+		case "manageToolApprovals":
 			break;
 		case "editMessage":
 			handleEdit(message.messageId, message.text, message.undoChanges, message.attachments);
@@ -696,9 +702,10 @@ function displayAttachments(attachments: readonly ChatAttachment[]): ChatAttachm
 	}));
 }
 
-function emitPickerAttachments(): void {
+function emitPickerAttachments(target?: ChatAttachmentTarget): void {
 	emit({
 		type: "attachmentsAdded",
+		...(target ? { target } : {}),
 		attachments: [
 			{
 				id: `attachment-${nextId++}`,
@@ -738,7 +745,7 @@ function harnessAttachmentPath(uri: string): string {
 	return segments.slice(-3).join("/") || uri;
 }
 
-function emitDroppedAttachments(uris: readonly string[]): void {
+function emitDroppedAttachments(uris: readonly string[], target?: ChatAttachmentTarget): void {
 	const attachments: ChatAttachment[] = uris.map(uri => ({
 		id: `attachment-${nextId++}`,
 		kind: "file",
@@ -746,7 +753,7 @@ function emitDroppedAttachments(uris: readonly string[]): void {
 		uri,
 	}));
 	if (attachments.length > 0) {
-		emit({ type: "attachmentsAdded", attachments });
+		emit({ type: "attachmentsAdded", attachments, ...(target ? { target } : {}) });
 	}
 }
 

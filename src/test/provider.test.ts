@@ -709,7 +709,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                     vscode.LanguageModelChatMessage.User(MANUAL_COMPACTION_TRIGGER),
                 ],
                 {
-                    modelOptions: { _copilotConversationId: conversationId },
+                    modelOptions: { _conversationId: conversationId },
                     tools: [],
                     toolMode: vscode.LanguageModelChatToolMode.Auto,
                 },
@@ -1730,12 +1730,12 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 inputSchema: { type: "object", properties: {} },
             });
             const baseOptions = {
-                modelOptions: { _copilotConversationId: "conversation-cache-1" },
+                modelOptions: { _conversationId: "conversation-cache-1" },
                 tools: [tool("y_tool"), tool("z_tool")],
                 toolMode: vscode.LanguageModelChatToolMode.Auto,
             } as vscode.ProvideLanguageModelChatResponseOptions;
             const expandedOptions = {
-                modelOptions: { _copilotConversationId: "conversation-cache-1" },
+                modelOptions: { _conversationId: "conversation-cache-1" },
                 tools: [tool("a_tool"), tool("y_tool"), tool("z_tool")],
                 toolMode: vscode.LanguageModelChatToolMode.Auto,
             } as vscode.ProvideLanguageModelChatResponseOptions;
@@ -1772,15 +1772,15 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 inputSchema: { type: "object", properties: {} },
             });
             const initialOptions = {
-                modelOptions: { _copilotConversationId: "conversation-cache-3" },
+                modelOptions: { _conversationId: "conversation-cache-3" },
                 tools: [tool("a_tool"), tool("y_tool"), tool("z_tool")],
                 toolMode: vscode.LanguageModelChatToolMode.Auto,
             } as vscode.ProvideLanguageModelChatResponseOptions;
             // Same count (3), but a built-in extension tool appears instead of
             // y_tool — the model must see it, no silent count-match reuse.
             const changedOptions = {
-                modelOptions: { _copilotConversationId: "conversation-cache-3" },
-                tools: [tool("a_tool"), tool("z_tool"), tool("llamacpp_wait_for_terminal")],
+                modelOptions: { _conversationId: "conversation-cache-3" },
+                tools: [tool("a_tool"), tool("z_tool"), tool("llamacpp_search_memory")],
                 toolMode: vscode.LanguageModelChatToolMode.Auto,
             } as vscode.ProvideLanguageModelChatResponseOptions;
             providerAny.stabilizeToolCatalog(
@@ -1798,7 +1798,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 "request-2"
             );
             const names = (second.tools ?? []).map(toolDef => toolDef.function.name).sort();
-            assert.ok(names.includes("llamacpp_wait_for_terminal"), `built-in must be advertised: ${names.join(",")}`);
+            assert.ok(names.includes("llamacpp_search_memory"), `built-in must be advertised: ${names.join(",")}`);
             assert.ok(!names.includes("y_tool"), `removed tool must disappear: ${names.join(",")}`);
         });
 
@@ -1813,7 +1813,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 ) => ReturnType<typeof convertTools>;
             };
             const options = (description: string, modelSchema: object) => ({
-                modelOptions: { _copilotConversationId: "conversation-cache-schema" },
+                modelOptions: { _conversationId: "conversation-cache-schema" },
                 tools: [
                     { name: "a_tool", description: "a_tool", inputSchema: { type: "object", properties: {} } },
                     { name: "subagent", description, inputSchema: { type: "object", properties: { model: modelSchema } } },
@@ -1845,7 +1845,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 ) => ReturnType<typeof convertTools>;
             };
             const options = (conversation: string, names: string[]) => ({
-                modelOptions: { _copilotConversationId: conversation },
+                modelOptions: { _conversationId: conversation },
                 tools: names.map(name => ({ name, description: name, inputSchema: { type: "object", properties: {} } })),
                 toolMode: vscode.LanguageModelChatToolMode.Auto,
             } as vscode.ProvideLanguageModelChatResponseOptions);
@@ -2111,7 +2111,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 capabilities: {},
             } as unknown as vscode.LanguageModelChatInformation;
             const options = {
-                modelOptions: { _copilotConversationId: "memory-freeze-conversation" },
+                modelOptions: { _conversationId: "memory-freeze-conversation" },
                 tools: [{
                     name: "read_file",
                     description: "Read a file",
@@ -2256,7 +2256,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
             } as unknown as vscode.LanguageModelChatInformation;
             const options = {
                 modelOptions: {
-                    _copilotConversationId: "memory-skip-conversation",
+                    _conversationId: "memory-skip-conversation",
                     _aabSkipSharedMemory: true,
                 },
                 tools: [],
@@ -2567,7 +2567,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 inputSchema: { type: "object", properties: { value: { type: "string" } } },
             });
             const firstOptions = {
-                modelOptions: { _copilotConversationId: "conversation-restart-1" },
+                modelOptions: { _conversationId: "conversation-restart-1" },
                 tools: [tool("read_file", "original read"), tool("grep_search", "original grep")],
                 toolMode: vscode.LanguageModelChatToolMode.Auto,
             } as vscode.ProvideLanguageModelChatResponseOptions;
@@ -3869,31 +3869,6 @@ suite("Llama.cpp Chat Provider Extension", () => {
 
             const names = (out.tools ?? []).map(t => t.function.name);
             assert.deepEqual(names, ["run_in_terminal", "read_file"]);
-        });
-
-        test("convertTools apiDirect keeps runSubagent in a 70-tool subset", () => {
-            const fillerTools = Array.from({ length: 79 }, (_, index) => ({
-                name: `random_tool_${index}`,
-                description: `Random tool ${index}`,
-                inputSchema: { type: "object", properties: {} },
-            }));
-            const out = convertTools(
-                {
-                    toolMode: vscode.LanguageModelChatToolMode.Auto,
-                    tools: [
-                        ...fillerTools,
-                        { name: "runSubagent", description: "Run a listed agent", inputSchema: { type: "object", properties: {} } },
-                        { name: "run_in_terminal", description: "Terminal", inputSchema: { type: "object", properties: {} } },
-                        { name: "read_file", description: "Read", inputSchema: { type: "object", properties: {} } },
-                        { name: "grep_search", description: "Search", inputSchema: { type: "object", properties: {} } },
-                    ],
-                } satisfies vscode.ProvideLanguageModelChatResponseOptions,
-                { mode: "apiDirect", apiDirectMaxTools: 70, apiDirectToolTokenBudget: 65536 }
-            );
-
-            const names = (out.tools ?? []).map(t => t.function.name);
-            assert.equal(names.length, 70);
-            assert.ok(names.includes("runSubagent"));
         });
 
         test("convertTools apiDirect compacts schema metadata", () => {

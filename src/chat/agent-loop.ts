@@ -207,7 +207,7 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 		await request.backend.provideLanguageModelChatResponse(request.model, toLanguageModelMessages([...request.history, assistant], { system: request.system, imageInput: request.model.capabilities?.imageInput === true }), {
 			toolMode: vscode.LanguageModelChatToolMode.Auto,
 			tools: request.tools.tools,
-			modelOptions: { ...request.modelOptions, _conversationId: request.conversationId, _copilotTurnIndex: request.turn, [LIMIT_SIGNAL_OPTION]: true, [PROMPT_CACHE_OPTION]: true },
+			modelOptions: { ...request.modelOptions, _conversationId: request.conversationId, _turnIndex: request.turn, [LIMIT_SIGNAL_OPTION]: true, [PROMPT_CACHE_OPTION]: true },
 		}, progress, request.token);
 		if (roundUsage) {
 			addUsage(completed, roundUsage);

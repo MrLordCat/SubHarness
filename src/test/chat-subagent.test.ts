@@ -8,7 +8,6 @@ import { ChatToolCatalog, type ToolRegistry } from "../chat/tools/catalog";
 import { createCloseSubagentTool, createSubagentTool, parseSubagentInput, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
 import type { ChatTool, SubagentModelOption, SubagentRequest } from "../chat/tools/types";
 import { limitSignalPart } from "../providers/limit-signal";
-import { enhanceSubagentToolDescription, withRequiredSubagentModel } from "../subagent-guidance";
 
 const MODELS: SubagentModelOption[] = [
 	{ id: "claude::smart", label: "Smart (Claude)", useWhen: "hard tests" },
@@ -36,7 +35,6 @@ const READ_TOOL: vscode.LanguageModelChatTool = {
 const EMPTY_REGISTRY: ToolRegistry = {
 	tools: () => [],
 	invoke: async () => new vscode.LanguageModelToolResult([]),
-	local: () => undefined,
 };
 
 class FakeMemento implements vscode.Memento {
@@ -207,10 +205,6 @@ suite("chat subagent", () => {
 		assert.deepStrictEqual(createSubagentTool({ models: () => MODELS.slice(0, 1) }).inputSchema, tool.inputSchema);
 		assert.ok(tool.description.includes('- "Smart (Claude)": '));
 		assert.ok(tool.description.includes('- "Flash (DeepSeek)": '));
-		// Providers rewrite Copilot's runSubagent by name; this tool must keep its own description and schema.
-		assert.strictEqual(enhanceSubagentToolDescription(tool.name, "own"), "own");
-		const definition = { name: tool.name, inputSchema: tool.inputSchema };
-		assert.strictEqual(withRequiredSubagentModel(definition), definition);
 		assert.deepStrictEqual(schema.required, ["prompt"]);
 		assert.ok(tool.description.includes("hard tests"));
 		assert.ok(tool.description.includes("quick searches"));
@@ -304,7 +298,7 @@ suite("chat subagent", () => {
 		assert.ok(messageText(first.messages[0]).includes(SUBAGENT_INSTRUCTIONS));
 		assert.strictEqual(first.messages[1].role, vscode.LanguageModelChatMessageRole.User);
 		assert.strictEqual(messageText(first.messages[1]), "Inspect a.txt");
-		assert.strictEqual(first.options.modelOptions?._copilotSubagentInvocationId, "chat-subagent-call-sub");
+		assert.strictEqual(first.options.modelOptions?._subagentInvocationId, "chat-subagent-call-sub");
 
 		assert.strictEqual(finishes.length, 1);
 		const run = finishes[0];

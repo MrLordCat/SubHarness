@@ -90,7 +90,7 @@ The Snowflake extension's Azure sign-in session is passed to its own Coco panel
 through a private API. SubHarness uses the CLI's Snowflake connection and
 credential cache, so an Azure browser sign-in may be required once for the CLI.
 No token is copied from the Snowflake extension. Coco delegates tools offered
-for the turn, including private Copilot tools, to the native Chat tool loop.
+for the turn, including private SubHarness chat tools, to the native Chat tool loop.
 Chat controls approvals (including Allow All), execution cards and results.
 The same ACP prompt stays alive while Chat executes each tool and returns its
 result. Tool aliases distinguish these client tools from Cortex built-ins.
@@ -111,8 +111,7 @@ are removed from commands, messages and file contents. Text an edit must match
 (`oldString`, `old_str`) is kept, so an earlier attribution can still be
 removed from a file; text that only mentions Snowflake CoCo is left alone.
 Use the Snowflake Coco panel for its own built-in SQL and other agent tools.
-Commands run through **cocoRunInTerminal** in ordinary integrated terminals
-named `Coco 1`, `Coco 2`, etc., including in the Agents Window. Sequential commands
+Commands run through the SubHarness chat's terminal tools in ordinary integrated terminals. Sequential commands
 automatically reuse the last idle terminal, preserving its directory and shell
 variables even when the model omits `terminalId`. Occupied or closed terminals
 are skipped. Set `newTerminal: true` only when a separate shell is needed. If

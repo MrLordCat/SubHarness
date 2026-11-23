@@ -84,7 +84,6 @@ import {
 } from "./diagnostics/provider-health";
 import { BoundedMap, convertMessages, convertTools, sanitizeFunctionName, stableJsonStringify, stripTerminalControlNoise, validateRequest, type ToolCallingMode, type ToolResultMode } from "./utils";
 import { prepareHttpToolHistory } from "./providers/http-tool-history";
-import { ensureBuiltInTools } from "./tools/wait-terminal";
 import { LlamaLogSink } from "./logger";
 import { RepeatedFailureLog } from "./repeated-failure-log";
 import { buildMemoryQuery, injectAppendOnlySharedMemoryContext } from "./memory/prompt";
@@ -191,7 +190,7 @@ export interface LlamaChatTurnMetrics {
     threadReuseMissReason?: string;
     conversationKey?: string;
     durationMs: number;
-    /** Epoch ms when Copilot handed this turn to the provider. */
+    /** Epoch ms when the chat handed this turn to the provider. */
     startedAtMs?: number;
     /** Wall-clock pause between this conversation's previous completed turn and this request, measured by the provider. */
     gapSinceLastResponseMs?: number;
@@ -200,7 +199,7 @@ export interface LlamaChatTurnMetrics {
     queueWaitMs: number;
     /** How many host-side token-count RPC calls this request caused (memoised to ~0). */
     hostTokenCountCalls?: number;
-    /** Number of messages Copilot passed to the provider for this turn. */
+    /** Number of messages the chat passed to the provider for this turn. */
     messageCount?: number;
     firstTokenLatencyMs?: number;
     /** Time until the first user-visible assistant text, when distinct from first model activity. */
@@ -691,7 +690,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     }
 
     /**
-     * Arms one provider-owned manual compaction for a Copilot conversation.
+     * Arms one provider-owned manual compaction for a conversation.
      * The following internal control turn consumes the flag. Requiring both a
      * known persisted snapshot and a short expiry prevents an ordinary user
      * prompt from accidentally entering recovery mode.
@@ -1131,8 +1130,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         options: ProvideLanguageModelChatResponseOptions
     ): string | undefined {
         const modelOptions = options.modelOptions as Record<string, unknown> | undefined;
-        const conversationId = typeof modelOptions?._copilotConversationId === "string"
-            ? modelOptions._copilotConversationId.trim()
+        const conversationId = typeof modelOptions?._conversationId === "string"
+            ? modelOptions._conversationId.trim()
             : "";
         if (conversationId) {
             return [modelId, conversationId].join("\0");
@@ -1208,7 +1207,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         // the whole upstream prefix. As long as the count matches, reuse the
         // exact previous list so the prompt stays byte-identical. The one
         // exception: the extension's OWN built-in tools (llamacpp_*) — a newly
-        // registered built-in (e.g. llamacpp_wait_for_terminal) or a removed
+        // registered built-in (e.g. llamacpp_search_memory) or a removed
         // one must be visible to the model even when the count did not change,
         // so a same-count built-in swap forces a rebuild.
         const countUnchanged = previous
@@ -2010,11 +2009,11 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
 
         if (family === "deepseek") {
             // The configured hard cap (maxOutputTokensCap) can be as high as
-            // 393216 — advertising that value makes Copilot Chat reserve 75%+
+            // 393216 — advertising that value may reserve 75%+
             // of the context window for output and aggressively truncate input
             // history, destroying the upstream prompt-cache prefix every turn.
             // Use deepSeekDefaultMaxOutputTokens (65 536 by default) for the
-            // model picker so Copilot Chat sees a 12.5% output reservation
+            // model catalog to provide a 12.5% output reservation
             // while the full hard cap still applies to actual API requests.
             const advertisedCap = this.clampInt(
                 this.getConfig().get("deepSeekDefaultMaxOutputTokens", 70000),
@@ -4210,7 +4209,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         // cannot evict entries that this conversation's cached prefix depends on.
         const conversationScope = this.cachePrefixScope(requestModelId, options);
         const manualCompactionRequested = this.consumeManualCompaction(
-            (options.modelOptions as Record<string, unknown> | undefined)?._copilotConversationId,
+            (options.modelOptions as Record<string, unknown> | undefined)?._conversationId,
             messages
         );
         this.setReasoningScope(conversationScope);
@@ -4252,7 +4251,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         this.tokenCountMs = 0;
         this.tokenCountChars = 0;
         // Shape of the incoming conversation — which roles, how much text and how
-        // many tool calls. A "history" cap can silently stop working when Copilot
+        // many tool calls. A "history" cap can silently stop working when the chat
         // starts feeding the prompt from a different source, and this log makes
         // that visible without a profiler.
         const shape = this.describeMessageShape(messages);
@@ -4468,13 +4467,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 sharedMemoryMaxTokens,
             },
         });
-        // Hosts may not propagate newly registered tools into request
-        // options (e.g. right after an update until a full restart). The
-        // extension's built-in agent tools are injected here so the model
-        // always sees them; host-supplied duplicates are deduped by name.
         const toolOptions: vscode.ProvideLanguageModelChatResponseOptions = {
             ...options,
-            tools: ensureBuiltInTools(options.tools ?? []),
+            tools: options.tools ?? [],
         };
         const convertedToolConfig = convertTools(toolOptions, {
             mode: toolCallingModeConfig as ToolCallingMode,
@@ -4737,8 +4732,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         // x-session-affinity header pins a conversation to one instance.
         if (isCloudflareWorkersAiBase(serverUrl)) {
             const affinity = cloudflareSessionAffinity(
-                typeof (options.modelOptions as Record<string, unknown> | undefined)?._copilotConversationId === "string"
-                    ? String((options.modelOptions as Record<string, unknown>)._copilotConversationId)
+                typeof (options.modelOptions as Record<string, unknown> | undefined)?._conversationId === "string"
+                    ? String((options.modelOptions as Record<string, unknown>)._conversationId)
                     : undefined
             );
             if (affinity) {
@@ -5365,8 +5360,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 ].join("\n\n");
                 this.log("chat.compaction.manual.complete", {
                     requestId,
-                    conversationKey: typeof (options.modelOptions as Record<string, unknown> | undefined)?._copilotConversationId === "string"
-                        ? this.shortHash(String((options.modelOptions as Record<string, unknown>)._copilotConversationId))
+                    conversationKey: typeof (options.modelOptions as Record<string, unknown> | undefined)?._conversationId === "string"
+                        ? this.shortHash(String((options.modelOptions as Record<string, unknown>)._conversationId))
                         : undefined,
                     beforeMessages: prepared.initialMessageCount,
                     afterMessages: prepared.finalMessageCount,
@@ -6182,8 +6177,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 modelId: model.id,
                 providerKind: this.providerKindLabel(serverUrl),
                 lifecyclePhase: "completed",
-                conversationKey: typeof options.modelOptions?._copilotConversationId === "string"
-                    ? this.shortHash(options.modelOptions._copilotConversationId)
+                conversationKey: typeof options.modelOptions?._conversationId === "string"
+                    ? this.shortHash(options.modelOptions._conversationId)
                     : undefined,
                 durationMs: finishedAt - turnStartedAt,
                 startedAtMs: turnStartedAt,
@@ -6281,8 +6276,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     providerKind: this.providerKindLabel(serverUrl),
                     lifecyclePhase: "failed",
                     terminalDetail: err instanceof Error ? err.message : String(err),
-                    conversationKey: typeof options.modelOptions?._copilotConversationId === "string"
-                        ? this.shortHash(options.modelOptions._copilotConversationId)
+                    conversationKey: typeof options.modelOptions?._conversationId === "string"
+                        ? this.shortHash(options.modelOptions._conversationId)
                         : undefined,
                     durationMs: Date.now() - turnStartedAt,
                     startedAtMs: turnStartedAt,

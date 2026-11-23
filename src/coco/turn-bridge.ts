@@ -4,7 +4,7 @@ import * as vscode from "vscode";
 import type { CocoPermissionRequest } from "./acp-client";
 import { DelegatedTurnState } from "../tools/delegated-turn-state";
 import { SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
-import { availableSubagentModelProfiles, enhanceSubagentToolDescription, withRequiredSubagentModel } from "../subagent-guidance";
+import { availableSubagentModelProfiles } from "../subagent-guidance";
 import { stripCocoAttributionFromInput } from "./attribution";
 import { CocoResponseStream } from "./response-stream";
 import { selectCocoChatTools } from "./terminal-tools";
@@ -162,7 +162,7 @@ export class CocoTurnBridge implements vscode.Disposable {
 		for (const original of selectCocoChatTools(advertisedTools).sort((a, b) => a.name.localeCompare(b.name))) {
 			if (seen.has(original.name)) { continue; }
 			seen.add(original.name);
-			const tool = withRequiredSubagentModel(original);
+			const tool = original;
 			const alias = cocoClientToolName(tool.name);
 			this.tools.set(alias, tool);
 		}
@@ -171,7 +171,7 @@ export class CocoTurnBridge implements vscode.Disposable {
 	get clientTools(): JsonObject[] {
 		return [...this.tools].map(([alias, tool]) => ({
 			name: alias,
-			description: fitCocoToolDescription(enhanceSubagentToolDescription(tool.name, tool.description)),
+			description: fitCocoToolDescription(tool.description),
 			inputSchema: cocoSubagentSchema(tool) ?? tool.inputSchema ?? { type: "object", properties: {} },
 		}));
 	}
@@ -180,13 +180,13 @@ export class CocoTurnBridge implements vscode.Disposable {
 	get cutToolDescriptions(): number {
 		let cut = 0;
 		for (const tool of this.tools.values()) {
-			if (enhanceSubagentToolDescription(tool.name, tool.description).replace(/\s+/g, " ").trim().length > COCO_TOOL_DESCRIPTION_LIMIT) { cut++; }
+			if (tool.description.replace(/\s+/g, " ").trim().length > COCO_TOOL_DESCRIPTION_LIMIT) { cut++; }
 		}
 		return cut;
 	}
 
 	get isTerminal(): boolean { return this.terminal; }
-	/** Copilot treats a response with only reasoning as a failed request and retries it. */
+	/** Ensure a response with only reasoning has visible text. */
 	get awaitingOutput(): boolean { return this.state.attached && !this.terminal && !this.segmentOutput; }
 	get pendingCallIds(): ReadonlySet<string> { return new Set(this.pending.keys()); }
 	get issuedCallIds(): ReadonlySet<string> { return this.issued; }

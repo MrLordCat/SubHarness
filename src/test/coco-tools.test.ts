@@ -363,17 +363,17 @@ suite("Coco native Chat tools", () => {
 			} },
 		]);
 		const token = new vscode.CancellationTokenSource();
-		const chat = { ...options, modelOptions: { _copilotConversationId: "parent-chat" } };
+		const chat = { ...options, modelOptions: { _conversationId: "parent-chat" } };
 		try {
 			const first: vscode.LanguageModelResponsePart[] = [];
 			await composite.provideLanguageModelChatResponse(model, [vscode.LanguageModelChatMessage.User("Delegate")], chat,
 				{ report: part => first.push(part) }, token.token);
 			const call = callFrom(first);
-			// Copilot sends the subagent with the parent's conversation id.
+			// A subagent request may still carry the parent's conversation id.
 			await composite.provideLanguageModelChatResponse({ ...model, id: "cursor::fixture" }, [vscode.LanguageModelChatMessage.User("Subagent task")],
-				{ ...options, modelOptions: { _copilotConversationId: "parent-chat", _conversationId: "parent-chat", _copilotSubagentInvocationId: "sub-1" } },
+				{ ...options, modelOptions: { _conversationId: "parent-chat", _subagentInvocationId: "sub-1" } },
 				{ report: () => undefined }, token.token);
-			assert.deepStrictEqual(seen, [{ _copilotSubagentInvocationId: "sub-1" }], "a subagent run is not bound to the parent conversation");
+			assert.deepStrictEqual(seen, [{ _subagentInvocationId: "sub-1" }], "a subagent run is not bound to the parent conversation");
 			assert.strictEqual(disposed, false, "the subagent must not close the parent's suspended prompt");
 			const final: vscode.LanguageModelResponsePart[] = [];
 			await composite.provideLanguageModelChatResponse(model, continuation(call, "Subagent report"), chat,

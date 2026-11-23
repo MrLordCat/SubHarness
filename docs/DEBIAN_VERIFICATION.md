@@ -73,15 +73,6 @@ terminals still worked. An unprivileged extension cannot modify protected
 application files just because its VSIX was installed. A script faces the same
 restriction unless it obtains the required write access.
 
-For a writable installation, install the VSIX, open VS Code and accept the
-reload prompt. For a protected installation, inspect **SubHarness Copilot
-Patch** in Output and **SubHarness: Show Copilot Chat Patch Status**. A
-user-owned VS Code installation permits automatic patching. Run
-**SubHarness: Prepare User VS Code (Linux, no root)** in the local Linux
-desktop window, then launch **SubHarness Code** or
-`~/.local/bin/code-ai-agent-bridge`. The separate profile needs its own settings
-and account configuration. The existing administrator workflow was not tested.
-
 The system fixture contained the bundled, root-owned Copilot Chat. A separate
 user-installed Copilot Chat copy can make the controls writable while the
 system workbench remains protected; that mixed installation was not part of

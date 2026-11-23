@@ -95,8 +95,10 @@ export interface ChatControllerDeps {
 	confirm?: (message: string, action: string) => Promise<boolean>;
 	/** Non-modal notice with one action; resolves true when the user picks it. */
 	notify?: (message: string, action: string) => Promise<boolean>;
-	/** Shows an operating-system notification; the host decides whether the window needs one. */
-	osNotify?: (title: string, body: string) => void;
+	/** Opens VS Code's tool approval settings, which decide whether external tools run without its dialog. */
+	manageToolApprovals?: () => Promise<void>;
+	/** Shows an operating-system notification about a chat; the host decides whether the window needs one. */
+	osNotify?: (title: string, body: string, sessionId: string) => void;
 	/** Clock of auto-continue after a limit; tests replace it. */
 	now?: () => number;
 	/** Timer of auto-continue after a limit; tests replace it. */
@@ -489,10 +491,10 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			return attachments ? { type: "saveDraft", sessionId: value.sessionId, text: value.text.slice(0, DRAFT_MAX_CHARS), attachments } : undefined;
 		}
 		case "removeQueued": return typeof value.id === "string" ? { type: "removeQueued", id: value.id } : undefined;
-		case "pickAttachments": return { type: "pickAttachments" };
+		case "pickAttachments": return { type: "pickAttachments", ...(value.target === "draft" || value.target === "edit" ? { target: value.target } : {}) };
 		case "addAttachments":
 			return Array.isArray(value.uris) && value.uris.length <= ADD_ATTACHMENT_LIMIT && value.uris.every(uri => typeof uri === "string")
-				? { type: "addAttachments", uris: value.uris as string[] }
+				? { type: "addAttachments", uris: value.uris as string[], ...(value.target === "draft" || value.target === "edit" ? { target: value.target } : {}) }
 				: undefined;
 		case "pasteFiles": {
 			if (!Array.isArray(value.files) || value.files.length === 0 || value.files.length > PASTED_FILES_LIMIT) {
@@ -507,7 +509,7 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 				}
 				files.push({ name: file.name, mimeType: file.mimeType, data: file.data });
 			}
-			return { type: "pasteFiles", files };
+			return { type: "pasteFiles", files, ...(value.target === "draft" || value.target === "edit" ? { target: value.target } : {}) };
 		}
 		case "openToolImage":
 			return typeof value.messageId === "string" && typeof value.callId === "string"
@@ -584,6 +586,7 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			return Array.isArray(value.names) && value.names.every(name => typeof name === "string") && typeof value.enabled === "boolean"
 				? { type: "setToolsEnabled", names: value.names as string[], enabled: value.enabled }
 				: undefined;
+		case "manageToolApprovals": return { type: "manageToolApprovals" };
 		case "approve":
 			return typeof value.id === "string" && typeof value.allow === "boolean" ? { type: "approve", id: value.id, allow: value.allow } : undefined;
 		case "answerQuestions": {
@@ -1120,21 +1123,21 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "pickAttachments": {
 				const picked = await this._deps.attachments?.pick() ?? [];
 				if (picked.length) {
-					this._post(webview, { type: "attachmentsAdded", attachments: picked });
+					this._post(webview, { type: "attachmentsAdded", attachments: picked, ...(message.target ? { target: message.target } : {}) });
 				}
 				return;
 			}
 			case "addAttachments": {
 				const added = await this._deps.attachments?.fromUris(message.uris) ?? [];
 				if (added.length) {
-					this._post(webview, { type: "attachmentsAdded", attachments: added });
+					this._post(webview, { type: "attachmentsAdded", attachments: added, ...(message.target ? { target: message.target } : {}) });
 				}
 				return;
 			}
 			case "pasteFiles": {
 				const added = await this._deps.attachments?.savePasted?.(message.files) ?? [];
 				if (added.length) {
-					this._post(webview, { type: "attachmentsAdded", attachments: added });
+					this._post(webview, { type: "attachmentsAdded", attachments: added, ...(message.target ? { target: message.target } : {}) });
 				}
 				return;
 			}
@@ -1228,6 +1231,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "setToolsEnabled":
 				await this._deps.tools.setEnabled?.(message.names, message.enabled);
 				this._broadcast({ type: "tools", tools: this._toolGroups() });
+				return;
+			case "manageToolApprovals":
+				await this._deps.manageToolApprovals?.();
 				return;
 			case "approve":
 				for (const runtime of this._runtimes.values()) {
@@ -1805,7 +1811,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			void this._persistEnd(running);
 			// A queued message starts the next turn at once, so only the last turn of a run notifies.
 			if (!stopped && runtime.queued.length === 0) {
-				this._osNotify(runtime.meta.title, turnEndNotification(running.message.parts));
+				this._osNotify(runtime, turnEndNotification(running.message.parts));
 			}
 			void this._updateAutoContinue(runtime, running.message).catch(error => {
 				this._log("chat.auto_continue.failed", { message: errorMessage(error) });
@@ -2407,15 +2413,15 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
-	/** Shows an approval card in the chat's webviews; Stop or a closed controller counts as a denial. */
-	private _osNotify(title: string, body: string): void {
+	private _osNotify(runtime: SessionRuntime, body: string): void {
 		try {
-			this._deps.osNotify?.(title, body);
+			this._deps.osNotify?.(runtime.meta.title, body, runtime.meta.id);
 		} catch (error) {
 			this._log("chat.os_notification.failed", { message: errorMessage(error) });
 		}
 	}
 
+	/** Shows an approval card in the chat's webviews; Stop or a closed controller counts as a denial. */
 	private _requestApproval(
 		running: RunningTurn,
 		toolName: string,
@@ -2452,7 +2458,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			runtime.approvals.set(request.id, { request, settle });
 			subscriptions.push(token.onCancellationRequested(() => settle(false)));
 			this._emit(runtime, { type: "approval", request });
-			this._osNotify(runtime.meta.title, `Waiting for your approval: ${confirmation.title}`);
+			this._osNotify(runtime, `Waiting for your approval: ${confirmation.title}`);
 			this._broadcastActivity();
 			if (runtime.meta.id !== this._activeId) {
 				const notice = this._deps.notify?.(`"${runtime.meta.title}" is waiting for your approval.`, "Open Chat");
@@ -2505,7 +2511,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			subscriptions.push(token.onCancellationRequested(() => settle(undefined)));
 			this._emit(runtime, { type: "questions", request });
 			const question = questions[0]?.question.slice(0, 120);
-			this._osNotify(runtime.meta.title, "The agent has a question for you." + (question ? `\n${question}` : ""));
+			this._osNotify(runtime, "The agent has a question for you." + (question ? `\n${question}` : ""));
 			this._broadcastActivity();
 			if (runtime.meta.id !== this._activeId) {
 				const notice = this._deps.notify?.(`"${runtime.meta.title}" has a question for you.`, "Open Chat");

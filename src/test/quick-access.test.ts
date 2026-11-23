@@ -81,7 +81,7 @@ suite("quick access", () => {
 
 		assert.deepStrictEqual(
 			root.map(labelOf),
-			["Providers", "Local LLM", "DeepSeek", "Codex", "Claude", "Coco", "Token Usage", "Usage Experiments", "Subagents", "Model Behavior", "Memory", "Diagnostics", "Copilot Patches"]
+			["Providers", "Local LLM", "DeepSeek", "Codex", "Claude", "Coco", "Token Usage", "Usage Experiments", "Subagents", "Model Behavior", "Memory", "Diagnostics"]
 		);
 		assert.ok(root.every(item => item.collapsibleState === vscode.TreeItemCollapsibleState.Collapsed));
 		assert.ok(root.every(item => item.id?.startsWith("llamacpp.quickAccess.")));
@@ -344,9 +344,6 @@ test("opens centralized API provider management from Quick Access", async () => 
 		assert.strictEqual(child("DeepSeek", "Endpoint & API Key")?.command?.command, "llamacpp.configureDeepSeek");
 		assert.ok(!labels("DeepSeek").includes("Connection"));
 
-		const thinking = child("Copilot Patches", "Thinking Picker (Agents)");
-		assert.strictEqual(thinking?.description, "On");
-		assert.strictEqual(thinking?.command?.command, "llamacpp.toggleAgentHostThinkingPatch");
 	});
 
 	test("opens provider context sliders from Claude and Codex quick access", async () => {

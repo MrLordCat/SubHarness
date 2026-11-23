@@ -168,6 +168,11 @@ body.vscode-light {
 	padding: 4px 10px;
 }
 
+/* Each row is its own layer (translateY), so later rows would cover a popup that opens downward, e.g. in the edit composer. */
+.chat-message:has(.picker-popup) {
+	z-index: 1;
+}
+
 .msg-user {
 	display: flex;
 	justify-content: flex-end;
@@ -1237,11 +1242,31 @@ body.vscode-light {
 	flex-wrap: wrap;
 	align-items: center;
 	gap: 2px;
-	flex: 1 1 auto;
+	/* Takes nearly all free space while the row fits on one line, so the actions stay at their size on the right. */
+	flex: 1000 1 auto;
 	min-width: 0;
 }
 
+/* Wrapped onto a line of its own, it spans the line: the status starts left and the buttons stay right. */
 .composer-actions {
+	display: flex;
+	flex: 1 1 auto;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 2px 6px;
+	margin-left: auto;
+}
+
+.composer-status {
+	display: flex;
+	flex-wrap: nowrap;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.composer-buttons {
 	display: flex;
 	flex-wrap: nowrap;
 	align-items: center;
@@ -2051,6 +2076,26 @@ body.vscode-light {
 	padding: 0 4px 2px 24px;
 	color: var(--vscode-descriptionForeground);
 	font-size: 11px;
+}
+
+.tool-picker .tool-group-approve {
+	margin-left: 4px;
+	padding: 0;
+	border: none;
+	background: none;
+	color: var(--vscode-textLink-foreground);
+	font: inherit;
+	cursor: pointer;
+}
+
+.tool-picker .tool-group-approve:hover {
+	color: var(--vscode-textLink-activeForeground);
+	text-decoration: underline;
+}
+
+.tool-picker .tool-group-approve:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
 }
 
 .tool-picker .tool-row {

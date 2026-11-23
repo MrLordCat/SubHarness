@@ -133,7 +133,7 @@ export class CursorProfileTransport implements vscode.Disposable {
 			return;
 		}
 		if (options.toolMode === vscode.LanguageModelChatToolMode.Required || options.tools?.length) { throw new Error("Cursor tools require Node.js 22.13 or newer and a supported SDK platform in VS Code. Chat remains available in Ask mode."); }
-		const conversation = options.modelOptions?._copilotConversationId;
+		const conversation = options.modelOptions?._conversationId;
 		const sessionKey = typeof conversation === "string" && conversation ? JSON.stringify([source.key, conversation]) : undefined;
 		const identity = digest(this.identity(source) + JSON.stringify(selection));
 		const hashes = messages.map(message => digest(JSON.stringify(message)));

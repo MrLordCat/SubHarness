@@ -2,11 +2,12 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as vscode from "vscode";
 import { CocoTerminalManager } from "../coco/terminal-manager";
-import { CONFIG_SECTION } from "../constants";
+import { CONFIG_SECTION, EXTENSION_ID } from "../constants";
 import { createOsNotifier, vscodeToastAppId } from "../os-notification";
 import { resolveProviderSwitchContextTokens } from "../context/provider-handoff";
 import { getCurrentWorkspaceScopeId, getCurrentWorkspaceScopeLabel } from "../memory/scope";
 import type { SharedMemoryService } from "../memory/shared-memory-service";
+import { createMemoryTools } from "../memory/tools";
 import { ChatAttachmentSource } from "./attachment-source";
 import { ChatChangeTracker } from "./changes/change-tracker";
 import { findGitExecutable } from "./changes/shadow-git";
@@ -86,6 +87,35 @@ function registerChangeDiff(context: vscode.ExtensionContext, tracker: ChatChang
 	};
 }
 
+/** Path of the URI a click on an OS notification opens; `session` in the query names the chat. */
+export const CHAT_OPEN_URI_PATH = "/open-chat";
+
+/** The chat a notification URI asks for; undefined for any other URI of the extension. */
+export function chatSessionFromUri(uri: { path: string; query: string }): string | undefined {
+	if (uri.path !== CHAT_OPEN_URI_PATH) {
+		return undefined;
+	}
+	return new URLSearchParams(uri.query).get("session") || undefined;
+}
+
+/**
+ * URI a click on a Windows toast opens. VS Code adds the window id, so the click
+ * focuses the window that ran the chat instead of starting a new one.
+ */
+async function chatOpenUri(sessionId: string): Promise<string | undefined> {
+	try {
+		const uri = vscode.Uri.from({
+			scheme: vscode.env.uriScheme,
+			authority: EXTENSION_ID,
+			path: CHAT_OPEN_URI_PATH,
+			query: new URLSearchParams({ session: sessionId }).toString(),
+		});
+		return (await vscode.env.asExternalUri(uri)).toString();
+	} catch {
+		return undefined;
+	}
+}
+
 /** Set once the chat was shown in the secondary side bar, its home since 2.0.5. */
 export const CHAT_REVEALED_KEY = "llamacpp.chat.secondarySidebarRevealed";
 
@@ -149,6 +179,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 			createTodoTool(),
 			createAskQuestionsTool(),
 			...createToolAccessTools(),
+			...(deps.memory ? createMemoryTools(deps.memory) : []),
 			...createChatTerminalTools({ manager: terminals, rules: () => configuredDangerousCommandRules(reportInvalidRule) }),
 			createSubagentTool({
 				// The bridge's subagent catalog: cheapest first, premium flagships and exhausted subscriptions left out.
@@ -160,11 +191,23 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 	});
 	const attachments = new ChatAttachmentSource({ log: deps.log, pasteDir: vscode.Uri.file(path.join(storage, "chat-attachments")) });
 	const contextSettings = createChatContextSettingsSource();
+	const manageToolApprovals = async (): Promise<void> => {
+		try {
+			// Always-allow choices made here at profile scope also cover the calls this chat makes.
+			await vscode.commands.executeCommand("workbench.action.chat.editToolApproval", "profile");
+		} catch (error) {
+			deps.log?.("chat.tool_approvals.failed", { message: error instanceof Error ? error.message : String(error) });
+			void vscode.window.showWarningMessage("VS Code's tool approval is unavailable. It needs VS Code's chat features enabled (chat.disableAIFeatures off).");
+		}
+	};
 	const osNotifier = createOsNotifier({ appId: process.platform === "win32" ? vscodeToastAppId(vscode.env.appRoot) : undefined, log: deps.log });
 	const controller = new ChatController({
-		osNotify: (title, body) => {
+		manageToolApprovals,
+		osNotify: (title, body, sessionId) => {
 			if (!vscode.window.state.focused && vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>("chat.systemNotifications", true) !== false) {
-				osNotifier(title, body);
+				// Only a Windows toast can carry a click target.
+				const launch = process.platform === "win32" ? chatOpenUri(sessionId) : Promise.resolve(undefined);
+				void launch.then(uri => osNotifier(title, body, uri));
 			}
 		},
 		backend: deps.composite,
@@ -256,8 +299,20 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		terminals,
 		controller,
 		contextSettings,
+		vscode.window.registerUriHandler({
+			handleUri: async uri => {
+				const sessionId = chatSessionFromUri(uri);
+				if (!sessionId) {
+					return;
+				}
+				deps.log?.("chat.notification.opened", {});
+				await focusChat();
+				await controller.openSession(sessionId);
+			},
+		}),
 		vscode.commands.registerCommand("llamacpp.chat.new", () => controller.newChat()),
 		vscode.commands.registerCommand("llamacpp.chat.history", () => controller.showSessions()),
+		vscode.commands.registerCommand("llamacpp.chat.manageToolApprovals", manageToolApprovals),
 		vscode.commands.registerCommand("llamacpp.chat.openInEditor", () => host.openInEditor()),
 		vscode.commands.registerCommand("llamacpp.chat.addSelection", async () => {
 			const selection = attachments.selection();

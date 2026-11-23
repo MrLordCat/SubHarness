@@ -197,7 +197,7 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<Suba
 			// A delegated task nobody watches step by step keeps a bound; the chat turn itself has none.
 			maxRounds: SUBAGENT_MAX_ROUNDS,
 			// The composite then keeps the run off the parent's conversation, journal and native session.
-			modelOptions: { _copilotSubagentInvocationId: options.invocationId ?? `chat-subagent-${options.callId}`, _aabStrictTools: true },
+			modelOptions: { _subagentInvocationId: options.invocationId ?? `chat-subagent-${options.callId}`, _aabStrictTools: true },
 		});
 		const text = report.trim();
 		if (!text && notices.length > 0) {

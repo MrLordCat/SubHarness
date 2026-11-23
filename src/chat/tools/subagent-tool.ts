@@ -1,6 +1,6 @@
 import { CHAT_TOOL_GROUPS, type ChatTool, type SubagentModelOption, type SubagentRequest } from "./types";
 
-/** Not "run_subagent": the bridge would treat that as Copilot's runSubagent and rewrite its description and schema. */
+/** Tool name used by the SubHarness chat. */
 export const SUBAGENT_TOOL_NAME = "subagent";
 
 /** Tool for releasing an open subagent. */

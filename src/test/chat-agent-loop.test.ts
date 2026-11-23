@@ -247,7 +247,7 @@ suite("chat agent loop", () => {
 		const options = fake.requests[0].options;
 		assert.strictEqual(options.toolMode, vscode.LanguageModelChatToolMode.Auto);
 		assert.strictEqual(options.modelOptions?._conversationId, "chat-1");
-		assert.strictEqual(options.modelOptions?._copilotTurnIndex, 7);
+		assert.strictEqual(options.modelOptions?._turnIndex, 7);
 		assert.deepStrictEqual(options.tools, [readTool]);
 		const second = fake.requests[1].messages;
 		assert.strictEqual(second.length, 3);

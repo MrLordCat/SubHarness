@@ -87,7 +87,7 @@
 - Регрессионные тесты на A1–A3, A5, B1, B2, C1, D2.
 - `npm run compile`, `npm run lint`, `npm run check:metadata`, полный
   `vscode-test`, `tsc --noUnusedLocals` без ошибок.
-- Документация: `docs/COPILOT_PATCH.md` (v26, целостность бэкапа),
+- Документация:
   `README.md`, `CHANGELOG.md`.
 - Версия 1.18.17 (dev-патч), `npm run package`, установка `.vsix`,
   проверка `version/source`.

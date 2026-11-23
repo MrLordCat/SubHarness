@@ -14,7 +14,7 @@ import type { ChatModelSource } from "../model-sources/source-routing";
 
 const none: vscode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) };
 const tool: vscode.LanguageModelChatTool = { name: "read_file", description: "Read a workspace file", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } };
-const options: vscode.ProvideLanguageModelChatResponseOptions = { tools: [tool], toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _copilotConversationId: "chat-one" } };
+const options: vscode.ProvideLanguageModelChatResponseOptions = { tools: [tool], toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _conversationId: "chat-one" } };
 const source: ChatModelSource = { key: "api-cursor-test", label: "Cursor", serverUrl: "https://api.cursor.com/v1", apiKey: "saved-test-key", protocol: "cursor" };
 const user = () => vscode.LanguageModelChatMessage.User("Read the file through VS Code");
 const resultMessage = (callId: string, text: string) => new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, [new vscode.LanguageModelToolResultPart(callId, [new vscode.LanguageModelTextPart(text)])]);
@@ -192,7 +192,7 @@ suite("Cursor native tools", () => {
 				await f.sdk.respond(source, { id: "test" }, { text: "read" }, [user()], options, { report: part => parts.push(part) }, none);
 				const call = parts.find(part => part instanceof vscode.LanguageModelToolCallPart) as vscode.LanguageModelToolCallPart;
 				const changedSource = change === "key" ? { ...source, apiKey: "different-key" } : change === "profile" ? { ...source, key: "api-other-profile" } : source;
-				const changedOptions = change === "conversation" ? { ...options, modelOptions: { _copilotConversationId: "chat-two" } } : options;
+				const changedOptions = change === "conversation" ? { ...options, modelOptions: { _conversationId: "chat-two" } } : options;
 				await assert.rejects(f.sdk.respond(changedSource, { id: "test" }, { text: "" }, [resultMessage(call.callId, "output")], changedOptions, { report: () => undefined }, none), /changed during tool execution/);
 				assert.strictEqual(f.created.length, 1); assert.strictEqual(f.closed(), 1); assert.deepStrictEqual(f.returned, []);
 			} finally { f.sdk.dispose(); }

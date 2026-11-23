@@ -13,7 +13,7 @@ import type { LlamaLogSink } from "../logger";
 import type { ProviderRuntimeMetrics } from "../provider-metrics";
 import { PROVIDER_ACTIVE_SESSION_IDLE_MS, PROVIDER_DURABLE_SESSION_TTL_MS, PROVIDER_PENDING_ROLLOVER_TTL_MS } from "../session-retention";
 import { setSubagentModelProfiles } from "../subagent-guidance";
-import { clampInteger, formatShortResetTime, formatTokenCount, isCacheControlPart, normalizeCopilotTurnIndex, stableJsonStringify } from "../utils";
+import { clampInteger, formatShortResetTime, formatTokenCount, isCacheControlPart, normalizeTurnIndex, stableJsonStringify } from "../utils";
 import {
 	buildClaudeModelAvailability,
 	type ClaudeModelAvailability,
@@ -601,16 +601,6 @@ export function findPersistedClaudeConversation(
 				- Number(left.runtimeKey === value.runtimeKey)
 			|| right.lastUsedAt - left.lastUsedAt
 		)[0];
-}
-
-export function findLatestPersistedClaudeConversation(
-	entries: readonly PersistedClaudeConversationSession[],
-	now = Date.now()
-): PersistedClaudeConversationSession | undefined {
-	return entries
-		.filter(entry => entry.quarantinedAt === undefined
-			&& now - entry.lastUsedAt <= PROVIDER_DURABLE_SESSION_TTL_MS)
-		.sort((left, right) => right.lastUsedAt - left.lastUsedAt)[0];
 }
 
 interface ClaudeToolContinuation {
@@ -1202,62 +1192,6 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		vscode.window.showInformationMessage(`Claude: ${details.join(". ")}.`);
 	}
 
-	async prepareLatestDurableSessionRollover(): Promise<{
-		modelId: string;
-		lastUsedAt: number;
-		sourceConversationId: string;
-	}> {
-		if (!this.workspaceState || !this.durableSessionsEnabled()) {
-			throw new Error("Durable provider sessions are disabled for this workspace.");
-		}
-		const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-		const candidates = [...this.durableSessions.values()]
-			.filter(entry => entry.quarantinedAt === undefined
-				&& Date.now() - entry.lastUsedAt <= PROVIDER_DURABLE_SESSION_TTL_MS)
-			.sort((left, right) => right.lastUsedAt - left.lastUsedAt);
-		let removedMissingSession = false;
-		for (const candidate of candidates) {
-			const validation = await validatePersistedClaudeSession(
-				candidate.sdkSessionId,
-				cwd,
-				candidate.resumeSessionAt
-			);
-			if (!validation.resumeBoundaryValid) {
-				candidate.quarantinedAt = Date.now();
-				candidate.quarantineReason = `rollover:${validation.reason}`;
-				removedMissingSession = true;
-				continue;
-			}
-			if (removedMissingSession) {
-				await this.persistDurableSessions();
-			}
-			this.pendingRollover = {
-				sourceConversationId: candidate.conversationId,
-				sdkSessionId: candidate.sdkSessionId,
-				resumeSessionAt: candidate.resumeSessionAt,
-				modelId: candidate.modelId,
-				armedAt: Date.now(),
-			};
-			await Promise.resolve(
-				this.workspaceState.update(CLAUDE_PENDING_ROLLOVER_STATE_KEY, this.pendingRollover)
-			);
-			this.logSink?.log("claude.chat.rollover_armed", {
-				model: candidate.modelId,
-				sourceConversationId: candidate.conversationId,
-				lastUsedAt: candidate.lastUsedAt,
-			}, "warn");
-			return {
-				modelId: candidate.modelId,
-				lastUsedAt: candidate.lastUsedAt,
-				sourceConversationId: candidate.conversationId,
-			};
-		}
-		if (removedMissingSession) {
-			await this.persistDurableSessions();
-		}
-		throw new Error("No resumable Claude session was found in this workspace.");
-	}
-
 	async refreshSubscriptionUsage(force = false): Promise<void> {
 		if (
 			!force
@@ -1482,9 +1416,9 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			return;
 		}
 
-		const conversationId = normalizeConversationId(options.modelOptions?._copilotConversationId);
-		const copilotTurnIndex = normalizeCopilotTurnIndex(
-			options.modelOptions?._copilotTurnIndex ?? options.modelOptions?._telemetryTurn
+		const conversationId = normalizeConversationId(options.modelOptions?._conversationId);
+		const copilotTurnIndex = normalizeTurnIndex(
+			options.modelOptions?._turnIndex
 		);
 		const userSignatures = collectUserSignatures(messages);
 		const maxInputChars = resolveClaudeInitialInputChars(
@@ -2820,7 +2754,7 @@ export interface ClaudeInitialConversationText {
 
 /**
  * Serializes a cold-start transcript without ever constructing the complete
- * unbounded JSON string first. This matters for very long Copilot chats where
+ * unbounded JSON string first. This matters for very long chats where
  * JSON.stringify(allMessages) can exceed V8's maximum string length before a
  * configured character limit has a chance to run.
  */
@@ -3014,7 +2948,7 @@ export function createLatestUserMessage(
 		}
 		return chars;
 	};
-	// A Copilot chat turn wraps the question in <userRequest>; its context (skills, instructions,
+	// A SubHarness chat turn wraps the question in <userRequest>; its context (skills, instructions,
 	// terminals) can exceed the size limit, so it is never skipped for an older, shorter turn.
 	const isChatTurn = (message: vscode.LanguageModelChatRequestMessage): boolean => message.content.some(part =>
 		part instanceof vscode.LanguageModelTextPart && part.value.includes("<userRequest>"));

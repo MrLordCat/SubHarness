@@ -38,9 +38,9 @@ export interface CursorSdkDependencies {
 interface Turn { identity: string; bridge: CursorToolBridge; agent?: CursorLocalAgent; run?: CursorLocalRun; ended?: boolean; completed?: boolean; sent?: boolean; session: CursorSession; metrics: CursorTurnMetrics; conversationId?: unknown; callIds: string[]; messages: readonly vscode.LanguageModelChatRequestMessage[] }
 
 export const CURSOR_NATIVE_TOOL_POLICY = [
-	"You are the Cursor runtime behind a VS Code Copilot Chat model provider.",
+	"You are the Cursor runtime behind the SubHarness chat in VS Code.",
 	"All commands, filesystem access, edits, web access, questions, planning and subagents must use the supplied VS Code callback tools on the custom-user-tools MCP server.",
-	"GetMcpTools is only for discovering those callback tools. Use CallMcpTool to invoke them; Copilot handles approval and execution and returns the result.",
+	"GetMcpTools is only for discovering those callback tools. Use CallMcpTool to invoke them; The SubHarness chat handles approval and execution and returns the result.",
 	"Do not use Cursor built-in shell, read, edit, search, web, task, external MCP servers, or internal subagents.",
 	"For commands prefer the supplied run_in_terminal tool. Continue from returned tool results without repeating completed calls.",
 ].join("\n");
@@ -51,7 +51,7 @@ export function cursorSdkRuntimeAvailable(): boolean {
 	return supportedPlatform && (major > 22 || major === 22 && minor >= 13);
 }
 
-/** Local SDK agent loop, with exclusively Copilot-executed callback tools. */
+/** Local SDK agent loop, with callback tools executed by the chat. */
 export class CursorSdkTransport implements vscode.Disposable {
 	private readonly turns = new Set<Turn>();
 	private readonly sessions: CursorSessionStore;
@@ -78,7 +78,7 @@ export class CursorSdkTransport implements vscode.Disposable {
 		progress: vscode.Progress<vscode.LanguageModelResponsePart>, token: vscode.CancellationToken, maximumChars?: number, historyTokenBudget?: number): Promise<void> {
 		if (!this.available) { throw new Error("Cursor tools require Node.js 22.13 or newer in the VS Code extension host."); }
 		if (token.isCancellationRequested) { throw new vscode.CancellationError(); }
-		const conversationId = options.modelOptions?._copilotConversationId;
+		const conversationId = options.modelOptions?._conversationId;
 		const cwd = this.dependencies.cwd?.() ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 		const canonicalSelection = { id: selection.id, params: [...selection.params ?? []].sort((a, b) => a.id.localeCompare(b.id)) };
 		const identity = createHash("sha256").update(JSON.stringify([cwd, source.key, source.serverUrl, source.apiKey, canonicalSelection, conversationId])).digest("hex");

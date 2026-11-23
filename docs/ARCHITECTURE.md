@@ -2,10 +2,9 @@
 
 ## Scope
 
-This extension exposes OpenAI-compatible local models, DeepSeek, Cursor,
-Codex, Claude and Snowflake Coco through one VS Code language model provider. Stable
-compatibility ids remain under the `llamacpp` namespace even though each source
-uses an independent transport and lifecycle.
+The SubHarness chat exposes OpenAI-compatible local models, DeepSeek, Cursor,
+Codex, Claude and Snowflake Coco through independent transports and lifecycles.
+Stable compatibility ids remain under the `llamacpp` namespace.
 
 ## Runtime Components
 
@@ -44,7 +43,7 @@ uses an independent transport and lifecycle.
   `src/usage-experiment.ts` normalize provider telemetry and persist bounded
   comparison data without prompt bodies.
 - `src/subagent-guidance.ts` adds stable provider/model routing guidance to the
-  outer Copilot subagent tool without changing its execution boundary.
+  SubHarness chat subagent tool without changing its execution boundary.
 - `src/memory/` owns durable shared memory, retrieval, prompt injection, and
   VS Code language model tools.
 - `src/tools/tool-call-reliability.ts` owns deterministic tool argument repair,
@@ -65,7 +64,7 @@ uses an independent transport and lifecycle.
 - `src/context/tool-result-summary.ts` extracts bounded, non-secret structural
   facts shared by live tool-result truncation and history compaction.
 - `src/context/usage.ts` validates upstream token counters and builds the
-  fallback statistics forwarded to native Copilot Session Info.
+  fallback statistics forwarded to the SubHarness chat's session information.
 - `src/reasoning.ts` maps VS Code session effort values to local and DeepSeek
   request profiles and supplies the native model configuration schema.
 - `src/request/chat-request.ts` builds source-specific OpenAI-compatible request
@@ -106,7 +105,7 @@ See [provider contracts](PROVIDER_ARCHITECTURE.md) for extension points and
   sessions can be restored from provider-owned durable transcripts after an
   Extension Host restart.
 4. A session-scoped native reasoning selection overrides the global mode when
-   Copilot supplies it through `modelOptions`.
+   the SubHarness chat supplies it through request options.
 5. VS Code messages and tools are converted to OpenAI format.
 6. The stable provider knowledge policy is prepended to native system instructions.
 7. Relevant non-expired memory for the active workspace/model scope is inserted
@@ -134,7 +133,7 @@ See [provider contracts](PROVIDER_ARCHITECTURE.md) for extension points and
   file, web, MCP, browser, plugin, hook, image, and subagent actions disabled.
   Codex's permissions message is left out, so the model does not read the
   sandbox as a ban on edits through the dynamic tools.
-3. The current VS Code/Copilot tool catalog is canonicalized and advertised as
+3. The current SubHarness chat tool catalog is canonicalized and advertised as
   app-server dynamic tools. Core coding tools stay eager; uncommon schemas can
   be loaded through the app-server tool-search mechanism.
 4. Tool calls are emitted as native VS Code cards and the app-server turn is
@@ -155,11 +154,11 @@ See [provider contracts](PROVIDER_ARCHITECTURE.md) for extension points and
 
 1. The official Agent SDK starts with built-in tools, plugins, skills, and
   external MCP configuration disabled.
-2. Copilot tools are hosted by one SDK MCP server; `canUseTool` allows only its
+2. SubHarness chat tools are hosted by one SDK MCP server; `canUseTool` allows only its
   `mcp__vscode__*` names.
 3. Matching conversations reuse warm sessions. Native tool results resume the
   suspended SDK query rather than constructing a second request history.
-4. Completed sessions use the Agent SDK transcript store. A stable Copilot
+4. Completed sessions use the Agent SDK transcript store. A stable SubHarness chat
   conversation id, model/runtime fingerprint, and user-history prefix select a
   resumable session after reload; an invalid resume safely retries from full
   VS Code history before visible output is emitted.
@@ -175,12 +174,12 @@ See [provider contracts](PROVIDER_ARCHITECTURE.md) for extension points and
 
 ### Reload and tool-catalog stability
 
-Closing VS Code necessarily restarts Copilot Chat, Extension Host processes,
+Closing VS Code necessarily restarts the SubHarness chat, Extension Host processes,
 and subscription-provider subprocesses. The extension cannot skip VS Code's
 physical tool registration, but it prevents that registration from becoming a
 semantic cold start:
 
-- the guarded Copilot integration forwards a stable conversation identity;
+- the SubHarness chat forwards a stable conversation identity;
 - Local and DeepSeek canonicalize tool order and JSON Schema keys so the exact
   server-side prompt-cache prefix survives a reload;
 - Codex canonicalizes dynamic tools and reattaches a durable app-server thread;

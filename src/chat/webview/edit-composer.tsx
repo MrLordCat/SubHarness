@@ -18,7 +18,7 @@ export function EditComposer({ store, message, changedFilesSinceTurn, context }:
 	const [, setRevision] = useState(0);
 	// The message item is memoized, so pickers and attachments need their own subscription.
 	useLayoutEffect(() => store.subscribe(() => setRevision(revision => revision + 1)), [store]);
-	const actions = useComposerActions(store);
+	const actions = useComposerActions(store, "edit");
 	const [undoChanges, setUndoChanges] = useState(changedFilesSinceTurn > 0);
 	const attachments = store.editing?.attachments ?? [];
 	const text = message.parts

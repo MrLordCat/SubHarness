@@ -48,7 +48,7 @@ export function App({ store }: { store: ChatStore }) {
 		onSignIn,
 		onOpenAttachment,
 		onRemoveAttachment,
-	} = useComposerActions(store);
+	} = useComposerActions(store, "draft");
 	const onApprove = useCallback((id: string, allow: boolean) => postMessage({ type: "approve", id, allow }), []);
 	const onAnswer = useCallback((id: string, answers?: ChatQuestionAnswer[]) => postMessage(answers ? { type: "answerQuestions", id, answers } : { type: "answerQuestions", id }), []);
 	const onListSessions = useCallback(() => postMessage({ type: "listSessions" }), []);

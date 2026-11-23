@@ -20,7 +20,7 @@ import { cursorToolAlias } from "../cursor/tool-turn-recovery";
 
 const none: vscode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) };
 const source: ChatModelSource = { key: "api-cursor-continuity", label: "Cursor", serverUrl: "https://api.cursor.com/v1", apiKey: "fixture-key", protocol: "cursor" };
-const options: vscode.ProvideLanguageModelChatResponseOptions = { tools: [{ name: "read_file", description: "Read a file", inputSchema: { type: "object" } }], toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _copilotConversationId: "cursor-chat" } };
+const options: vscode.ProvideLanguageModelChatResponseOptions = { tools: [{ name: "read_file", description: "Read a file", inputSchema: { type: "object" } }], toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _conversationId: "cursor-chat" } };
 const user = (text: string) => vscode.LanguageModelChatMessage.User(text);
 const assistant = (text: string) => vscode.LanguageModelChatMessage.Assistant(text);
 const nativeUsage: TokenUsage = { inputTokens: 1000, outputTokens: 20, cacheReadTokens: 900, cacheWriteTokens: 97, totalTokens: 2017 };
@@ -147,7 +147,7 @@ suite("Cursor conversation continuity", () => {
 			await f.respond([...messages, assistant("Provider stopped"), user("CONTINUE_NEW_MESSAGE")]);
 			assert.deepStrictEqual(f.restored, ["agent-1"]); assert.strictEqual(f.sent.length, 2); assert.strictEqual(f.created.length, 1);
 			assert.match(f.sent[1].input.text, /CONTINUE_NEW_MESSAGE/); assert.ok(!f.sent[1].input.text.includes("ORIGINAL_REQUEST"));
-			await assert.rejects(f.respond(messages, [], { ...options, modelOptions: { _copilotConversationId: "different-chat" } }), /no longer active/);
+			await assert.rejects(f.respond(messages, [], { ...options, modelOptions: { _conversationId: "different-chat" } }), /no longer active/);
 		} finally { await f.dispose(); }
 	});
 	test("keeps one agent when VS Code splits text parts and refreshes host-only metadata", async () => {
@@ -411,7 +411,7 @@ suite("Cursor conversation continuity", () => {
 			try {
 				await f.respond([user("ORIGINAL")]);
 				await f.respond([user("ORIGINAL"), assistant("OLD"), user("NEXT")], [],
-					change === "conversation" ? { ...options, modelOptions: { _copilotConversationId: "other-chat" } } : options,
+					change === "conversation" ? { ...options, modelOptions: { _conversationId: "other-chat" } } : options,
 					change === "key" ? { ...source, apiKey: "new-key" } : change === "profile" ? { ...source, key: "api-other" } : source);
 				assert.strictEqual(f.created.length, 2); assert.ok(f.sent[1].input.text.includes("ORIGINAL"));
 			} finally { await f.dispose(); }

@@ -164,7 +164,7 @@ export function isCodexInternalActionItem(item: Record<string, unknown>): boolea
 	return typeof item.type === "string" && CODEX_INTERNAL_ACTION_ITEMS.has(item.type);
 }
 
-/** Keeps one app-server turn alive while Copilot executes native tool cards. */
+/** Keeps one app-server turn alive while the chat executes tools. */
 export class CodexTurnBridge implements vscode.Disposable {
 	private boundary = deferred<CodexTurnBoundary>();
 	private readonly pendingTools = new PendingToolRegistry<PendingToolResponse>();

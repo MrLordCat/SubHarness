@@ -83,7 +83,7 @@ suite("Cursor API profiles", () => {
 		const b = backend();
 		try {
 			const [model] = await b.transport.models(source, none, "test");
-			const send = (profile: ChatModelSource, messages: vscode.LanguageModelChatRequestMessage[], conversation?: string) => b.transport.respond(profile, "composer-test", model, messages, { ...automatic, modelOptions: { ...(conversation ? { _copilotConversationId: conversation } : {}), effort: "high" } }, { report: () => undefined }, none);
+			const send = (profile: ChatModelSource, messages: vscode.LanguageModelChatRequestMessage[], conversation?: string) => b.transport.respond(profile, "composer-test", model, messages, { ...automatic, modelOptions: { ...(conversation ? { _conversationId: conversation } : {}), effort: "high" } }, { report: () => undefined }, none);
 			await send(source, [user("first")], "chat-one");
 			await send(source, [user("first"), vscode.LanguageModelChatMessage.Assistant("answer"), user("second")], "chat-one");
 			const followup = b.calls.find(call => call.url.endsWith("/agent-1/runs"));
@@ -113,10 +113,10 @@ suite("Cursor API profiles", () => {
 		const b = backend(), automaticSource = { ...source, workingContextLength: undefined };
 		try {
 			const [model] = await b.transport.models(automaticSource, none, "test");
-			await b.transport.respond(automaticSource, "composer-test", model, [user("first")], { ...automatic, modelOptions: { _copilotConversationId: "same-chat" } }, { report: () => undefined }, none);
+			await b.transport.respond(automaticSource, "composer-test", model, [user("first")], { ...automatic, modelOptions: { _conversationId: "same-chat" } }, { report: () => undefined }, none);
 			const selection = b.calls.find(call => call.url.endsWith("/agents"))!.body!.model as { params: Array<{ id: string; value: string }> };
 			assert.ok(selection.params.some(item => item.id === "context_window" && item.value === "1m"));
-			await b.transport.respond(automaticSource, "composer-test", model, [user("first"), user("next")], { ...automatic, modelOptions: { _copilotConversationId: "same-chat", effort: "high" } }, { report: () => undefined }, none);
+			await b.transport.respond(automaticSource, "composer-test", model, [user("first"), user("next")], { ...automatic, modelOptions: { _conversationId: "same-chat", effort: "high" } }, { report: () => undefined }, none);
 			assert.strictEqual(b.calls.filter(call => call.url.endsWith("/agents")).length, 2);
 			await assert.rejects(b.transport.respond(automaticSource, "composer-test", model, [user("x")], { ...automatic, modelOptions: { effort: "invented" } }, { report: () => undefined }, none), /Unsupported Cursor parameter/);
 		} finally { b.transport.dispose(); }

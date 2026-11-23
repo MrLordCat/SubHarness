@@ -3,23 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import {
-	applyCopilotPatch,
-	COPILOT_PATCH_MARKER,
-	CopilotPatchBusyError,
-	findCopilotBundles,
-	getCopilotPatchStatus,
-	getCopilotPatchSummary,
-	restoreCopilotPatch,
-	type CopilotPatchTarget,
-} from "../copilot-patch";
 import { CocoHistoryArchive } from "../coco/history-transfer";
 import { LlamaCppChatModelProvider } from "../llama-provider";
 import { ProviderRegistry } from "../providers/provider-registry";
 import { LlamaQuickActionsProvider } from "../ui/quick-access";
 import { coalesce } from "../utils";
 
-const LEGACY_MARKER = "/* llama-vscode-chat:copilot-native-model-controls:v22 */";
 const never: vscode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) };
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -32,14 +21,6 @@ class MemorySecrets implements vscode.SecretStorage {
 	onDidChange = new vscode.EventEmitter<vscode.SecretStorageChangeEvent>().event;
 }
 
-function tempTarget(directory: string, bundle: string | Buffer): CopilotPatchTarget {
-	const bundlePath = path.join(directory, "extension.js");
-	const packagePath = path.join(directory, "package.json");
-	fs.writeFileSync(bundlePath, bundle);
-	fs.writeFileSync(packagePath, JSON.stringify({ name: "copilot-chat", version: "0.69.0" }));
-	return { bundlePath, packagePath, manifest: { name: "copilot-chat", version: "0.69.0" } };
-}
-
 function model(id: string): vscode.LanguageModelChatInformation {
 	return { id, name: id, family: "test", version: "1", maxInputTokens: 100, maxOutputTokens: 10, capabilities: {} };
 }
@@ -48,102 +29,6 @@ suite("Agent runtime performance", () => {
 	let directory: string;
 	setup(() => { directory = fs.mkdtempSync(path.join(os.tmpdir(), "aab-runtime-perf-")); });
 	teardown(() => { fs.rmSync(directory, { recursive: true, force: true }); });
-
-	test("refuses to upgrade or restore from a backup that already carries a patch", () => {
-		const legacy = `${LEGACY_MARKER}var copilot=1;`;
-		const target = tempTarget(directory, legacy);
-		const backupPath = target.bundlePath + ".llama-vscode-chat.backup";
-		fs.writeFileSync(backupPath, legacy);
-
-		const status = getCopilotPatchStatus(target);
-		assert.strictEqual(status.legacyPatch, true);
-		assert.strictEqual(status.backupContaminated, true);
-		assert.throws(() => applyCopilotPatch(target), /already contains an AI Agent Bridge patch/);
-		assert.throws(() => restoreCopilotPatch(target), /already contains an AI Agent Bridge patch/);
-		assert.strictEqual(fs.readFileSync(target.bundlePath, "utf8"), legacy, "the bundle must stay untouched");
-		assert.ok(fs.existsSync(backupPath), "the only backup must not be deleted");
-		assert.ok(!fs.existsSync(target.bundlePath + ".llama-vscode-chat.lock"), "the lock must be released after a failure");
-	});
-
-	test("serialises patching across processes and takes over a stale lock", () => {
-		const legacy = `${LEGACY_MARKER}var copilot=1;`;
-		const target = tempTarget(directory, legacy);
-		fs.writeFileSync(target.bundlePath + ".llama-vscode-chat.backup", legacy);
-		const lockPath = target.bundlePath + ".llama-vscode-chat.lock";
-
-		fs.writeFileSync(lockPath, "4242\n");
-		assert.throws(() => applyCopilotPatch(target), (error: unknown) => error instanceof CopilotPatchBusyError);
-		assert.ok(fs.existsSync(lockPath), "a live lock belongs to another process");
-
-		const old = new Date(Date.now() - 10 * 60_000);
-		fs.utimesSync(lockPath, old, old);
-		// Past the lock, the contaminated backup is what stops this upgrade.
-		assert.throws(() => applyCopilotPatch(target), /already contains an AI Agent Bridge patch/);
-		assert.ok(!fs.existsSync(lockPath));
-	});
-
-	test("replaces a contaminated backup with the clean installed bundle", function () {
-		this.timeout(120_000);
-		const source = findCopilotBundles(vscode.env.appRoot)
-			.flatMap(entry => [entry.bundlePath + ".llama-vscode-chat.backup", entry.bundlePath])
-			.find(file => fs.existsSync(file) && !fs.readFileSync(file, "utf8").includes("/* llama-vscode-chat:copilot-"));
-		if (!source) {
-			this.skip();
-			return;
-		}
-		const original = fs.readFileSync(source);
-		const target = tempTarget(directory, original);
-		const backupPath = target.bundlePath + ".llama-vscode-chat.backup";
-		fs.writeFileSync(backupPath, `${LEGACY_MARKER}${original.toString("utf8")}`);
-
-		const result = applyCopilotPatch(target);
-		assert.strictEqual(result.changed, true);
-		assert.ok(fs.readFileSync(target.bundlePath, "utf8").includes(COPILOT_PATCH_MARKER));
-		assert.ok(fs.readFileSync(backupPath).equals(original), "the backup must hold the clean original");
-		assert.strictEqual(result.status.backupContaminated, false);
-		restoreCopilotPatch(target);
-		assert.ok(fs.readFileSync(target.bundlePath).equals(original));
-	});
-
-	test("upgrades the bundle patched by the previous patch version from its backup", function () {
-		this.timeout(120_000);
-		const version = Number(COPILOT_PATCH_MARKER.match(/:v(\d+) \*\//)?.[1]);
-		const marker = (n: number) => `/* llama-vscode-chat:copilot-native-model-controls:v${n} */`;
-		const legacyStatus = (n: number) => {
-			const probe = tempTarget(fs.mkdtempSync(path.join(directory, "probe-")), `${marker(n)}var copilot=1;`);
-			return getCopilotPatchStatus(probe).legacyPatch;
-		};
-		assert.strictEqual(legacyStatus(version - 1), true);
-		assert.strictEqual(legacyStatus(2), true);
-		assert.strictEqual(legacyStatus(version), false);
-		assert.strictEqual(legacyStatus(version + 1), false, "a newer patch is not downgraded");
-		const source = findCopilotBundles(vscode.env.appRoot)
-			.flatMap(entry => [entry.bundlePath + ".llama-vscode-chat.backup", entry.bundlePath])
-			.find(file => fs.existsSync(file) && !fs.readFileSync(file, "utf8").includes("/* llama-vscode-chat:copilot-"));
-		if (!source) {
-			this.skip();
-			return;
-		}
-		const original = fs.readFileSync(source);
-		const target = tempTarget(directory, `${marker(version - 1)}${original.toString("utf8")}`);
-		fs.writeFileSync(target.bundlePath + ".llama-vscode-chat.backup", original);
-		const result = applyCopilotPatch(target);
-		assert.strictEqual(result.changed, true);
-		assert.ok(fs.readFileSync(target.bundlePath, "utf8").includes(COPILOT_PATCH_MARKER));
-		assert.ok(!fs.readFileSync(target.bundlePath, "utf8").includes(marker(version - 1)));
-	});
-
-	test("patch summary re-reads the bundles only when they change", () => {
-		const target = tempTarget(directory, "var copilot=1;");
-		const first = getCopilotPatchSummary(target);
-		assert.deepStrictEqual(first, { copilotVersion: "0.69.0", applied: false, legacyPatch: false, workbenchApplied: false });
-		assert.strictEqual(getCopilotPatchSummary(target), first, "an unchanged bundle reuses the summary");
-
-		fs.writeFileSync(target.bundlePath, `${LEGACY_MARKER}var copilot=1;`);
-		const changed = getCopilotPatchSummary(target);
-		assert.notStrictEqual(changed, first);
-		assert.strictEqual(changed.legacyPatch, true);
-	});
 
 	test("one catalog load answers a burst of model selections until an adapter changes", async () => {
 		const changed = new vscode.EventEmitter<void>();

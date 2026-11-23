@@ -128,7 +128,7 @@ function hashCodexUserSemanticMessage(message: vscode.LanguageModelChatRequestMe
 	hash.update("user\0").update(message.name ?? "").update("\0");
 	let semanticPartCount = 0;
 	for (const part of message.content) {
-		// Tool results are already part of the live Codex thread. Copilot may
+		// Tool results are already part of the live Codex thread. the host may
 		// normalize their call ids or payload representation after completion.
 		if (part instanceof vscode.LanguageModelToolResultPart || part instanceof vscode.LanguageModelToolCallPart) {
 			continue;
@@ -220,9 +220,9 @@ function countMatchingUserSemanticSuffix(
 }
 
 /**
- * Matches a completed provider response to the next Copilot request.
+ * Matches a completed provider response to the next chat request.
  *
- * The exact path is cheapest. The suffix path tolerates Copilot normalizing
+ * The exact path is cheapest. The suffix path tolerates the host normalizing
  * completed tool-call/result plumbing while still requiring the exact prior
  * answer and the complete recent suffix of semantic user messages.
  */

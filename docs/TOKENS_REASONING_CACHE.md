@@ -19,29 +19,6 @@ evenly between hidden reasoning and the visible answer.
 The provider reserves the resolved `max_tokens` while calculating available
 input context. A large hard ceiling no longer becomes the default reservation.
 
-## Copilot Conversation Compaction
-
-There are two independent compaction layers:
-
-- The provider performs deterministic message compaction near its exact local
-  input target. It does not run inference.
-- Copilot Chat can generate an LLM summary of its outer conversation history.
-
-Patch v22 makes Copilot use the complete `maxInputTokens + maxOutputTokens`
-window for this provider, ignores smaller stale session and global summary
-threshold overrides, and avoids reserving Copilot's full raw tool catalog
-before the provider selects its bounded subset. The temporary Agent renderer
-is allowed to pass raw tool results through to the provider, where they are
-sanitized, counted, and deterministically compacted. Copilot-owned automatic
-summarization and truncation are disabled for `llamacpp`; the explicit Compact
-Conversation command triggers provider-owned recovery compaction immediately.
-It summarizes every old turn, removes historical reasoning and exact repetition
-tails, retains only the clean control turn verbatim, and persists the replacement
-snapshot without calling the main model endpoint. Other providers retain native
-Copilot `/compact` behavior. A stable conversation id and
-deterministic tool signatures let durable subscription sessions survive
-renderer history rewrites without weakening their validation rules.
-
 ## Thinking Mode Mapping
 
 | Mode | Local llama.cpp | DeepSeek |
@@ -99,7 +76,7 @@ that prefix in several ways:
 - Tool definitions are priority-sorted, compacted, count-limited, and bounded
   by `apiDirectToolTokenBudget` so the catalog remains stable and affordable.
 - Tool and JSON Schema key ordering is canonical across Local, DeepSeek, Codex,
-  and Claude, so Copilot's post-reload enumeration order cannot change the
+  and Claude, so the SubHarness chat's post-reload enumeration order cannot change the
   provider prompt or runtime fingerprint by itself.
 - Retrieved shared memory is inserted immediately before the latest user turn,
   rather than rewriting the first system message.
@@ -131,7 +108,7 @@ that prefix in several ways:
   Claude session whose SDK query was interrupted is marked unhealthy and is
   never warm-reused — the follow-up resumes the transcript from disk instead
   of being pushed into a dead stream. Codex supersedes an active tool turn
-  even when the follow-up arrives with the same Copilot turn index.
+  even when the follow-up arrives with the same SubHarness chat turn index.
 - A restored Claude session (after a VS Code reload) legitimately rewrites the
   cache once: the new Agent SDK process builds its system prompt from the
   current runtime fingerprint (model, context target, effort, and the

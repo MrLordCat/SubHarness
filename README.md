@@ -25,7 +25,8 @@ Open Chat in Editor** opens the same chat as an editor tab.
 - **Models:** the picker groups models by provider and shows each provider's
   5-hour and weekly limits or its balance.
 - **Tools:** files, search and terminal, with approval prompts for dangerous
-  commands. **Keep/Undo** reviews every file a turn changed.
+  commands, plus tools of other extensions and MCP servers when you enable
+  them. **Keep/Undo** reviews every file a turn changed.
 - **Subagents:** the agent can hand bounded steps to cheaper models and keeps
   working while they run.
 - **One working context:** switching models compacts the conversation instead
@@ -45,9 +46,9 @@ Requires **VS Code 1.131+** on Windows x64 or Linux x64.
 
    ```sh
    # Windows x64
-   code --install-extension llama-vscode-chat-v2.0.7-win32-x64.vsix
+   code --install-extension llama-vscode-chat-v2.0.8-win32-x64.vsix
    # Linux x64
-   code --install-extension llama-vscode-chat-v2.0.7-linux-x64.vsix
+   code --install-extension llama-vscode-chat-v2.0.8-linux-x64.vsix
    ```
 
 3. Run **Developer: Reload Window**.
@@ -168,16 +169,16 @@ See [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md),
 [provider architecture](docs/PROVIDER_ARCHITECTURE.md), and
 [Quick Access](docs/QUICK_ACCESS.md) for the current maintenance contracts.
 
-**Latest release: 2.0.7. Current build: 2.0.7.**
+**Latest release: 2.0.8. Current build: 2.0.8.**
 
 ```sh
 npm ci
 npm run compile
 npm run check:metadata
 npm run lint
-npm test              # 1548 extension-host tests on VS Code 1.143.1 in the current 2.0.7 build
+npm test              # 1447 extension-host tests on VS Code 1.143.1 in the current 2.0.8 build
 npm run package       # builds the local VSIX
-code --install-extension ./llama-vscode-chat-2.0.7.vsix --force
+code --install-extension ./llama-vscode-chat-2.0.8.vsix --force
 ```
 
 The extension ID is `mrlordcat.llama-vscode-chat`; settings and commands retain

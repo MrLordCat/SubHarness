@@ -1,14 +1,8 @@
 import * as vscode from "vscode";
-import { COCO_TERMINAL_TOOLS } from "../../coco/terminal-tools";
-import { getLocalTool } from "../../tools/local-tools";
-import { WAIT_TERMINAL_TOOL_NAME } from "../../tools/wait-terminal";
 import type { ChatToolGroup, ChatToolImage } from "../shared/protocol";
 import { CHAT_TOOL_GROUPS, MAX_IMAGE_BYTES, type ChatTool, type ChatToolOutput } from "./types";
 
 export const TOOL_OVERRIDES_KEY = "llamacpp.chat.toolOverrides";
-
-/** The chat has its own terminal tools; these bridge tools serve Copilot and Coco. */
-const HIDDEN_TOOLS = new Set<string>([...Object.values(COCO_TERMINAL_TOOLS), WAIT_TERMINAL_TOOL_NAME]);
 
 /** VS Code tools that need a Copilot Chat / VS Code chat session; here they fail or open dialogs in the wrong window. */
 export const CHAT_SESSION_TOOLS: ReadonlySet<string> = new Set([
@@ -57,15 +51,13 @@ const BUILTIN_GROUP_LABELS: Record<string, string> = {
 	[CHAT_TOOL_GROUPS.bridge]: "SubHarness",
 };
 const GROUP_ORDER: readonly string[] = Object.keys(BUILTIN_GROUP_LABELS);
-const EXTERNAL_NOTE = "Run through VS Code, which may ask for confirmation in a dialog.";
+const EXTERNAL_NOTE = "Run through VS Code, which asks in a dialog unless its tool approval allows them.";
 
 export interface ToolRegistry {
 	tools(): readonly vscode.LanguageModelToolInformation[];
 	/** Tools contributed by the Copilot Chat extension; re-read on every catalog refresh so extension changes are followed. */
 	copilotToolNames?(): readonly string[];
 	invoke(name: string, input: object, token: vscode.CancellationToken): Thenable<vscode.LanguageModelToolResult>;
-	/** Implementation of a tool this extension registered; it runs without the VS Code confirmation dialog. */
-	local(name: string): vscode.LanguageModelTool<object> | undefined;
 }
 
 function copilotContributedToolNames(): readonly string[] {
@@ -84,7 +76,6 @@ export const vscodeToolRegistry: ToolRegistry = {
 	tools: () => vscode.lm.tools,
 	copilotToolNames: copilotContributedToolNames,
 	invoke: (name, input, token) => vscode.lm.invokeTool(name, { input, toolInvocationToken: undefined }, token),
-	local: getLocalTool,
 };
 
 export interface ChatToolCatalogOptions {
@@ -155,7 +146,7 @@ export class ChatToolCatalog {
 			const id = entry.tool.group;
 			let group = groups.get(id);
 			if (!group) {
-				group = { id, label: entry.groupLabel, tools: [], ...(entry.external ? { note: EXTERNAL_NOTE } : {}) };
+				group = { id, label: entry.groupLabel, tools: [], ...(entry.external ? { note: EXTERNAL_NOTE, external: true } : {}) };
 				groups.set(id, group);
 			}
 			group.tools.push({ name: entry.tool.name, description: entry.tool.description, enabled: overrides[entry.tool.name] ?? entry.defaultEnabled });
@@ -216,33 +207,14 @@ export class ChatToolCatalog {
 		const taken = new Set(this._builtins.map(tool => tool.name));
 		const copilotNames = this._registry.copilotToolNames?.() ?? [];
 		for (const info of this._registry.tools()) {
-			if (taken.has(info.name) || HIDDEN_TOOLS.has(info.name) || CHAT_SESSION_TOOLS.has(info.name) || isCopilotOnlyTool(info.name, copilotNames)) {
+			if (taken.has(info.name) || CHAT_SESSION_TOOLS.has(info.name) || isCopilotOnlyTool(info.name, copilotNames)) {
 				continue;
 			}
 			taken.add(info.name);
-			const local = info.name.startsWith("llamacpp_") ? this._registry.local(info.name) : undefined;
-			if (local) {
-				entries.push({ tool: this._localTool(info, local), groupLabel: BUILTIN_GROUP_LABELS[CHAT_TOOL_GROUPS.bridge], defaultEnabled: true, external: false });
-				continue;
-			}
 			const group = externalGroup(info.name);
 			entries.push({ tool: this._externalTool(info, group.id), groupLabel: group.label, defaultEnabled: false, external: true });
 		}
 		return entries;
-	}
-
-	private _localTool(info: vscode.LanguageModelToolInformation, implementation: vscode.LanguageModelTool<object>): ChatTool {
-		return {
-			name: info.name,
-			description: info.description,
-			inputSchema: info.inputSchema ?? { type: "object", properties: {} },
-			group: CHAT_TOOL_GROUPS.bridge,
-			invoke: async (input, token) => {
-				const options = { input: inputObject(input), toolInvocationToken: undefined } as vscode.LanguageModelToolInvocationOptions<object>;
-				const result = await implementation.invoke(options, token);
-				return result ? resultText(result) : "";
-			},
-		};
 	}
 
 	private _externalTool(info: vscode.LanguageModelToolInformation, group: string): ChatTool {

@@ -329,7 +329,7 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 	}
 	async needsConversationHistory(model: vscode.LanguageModelChatInformation, messages: readonly vscode.LanguageModelChatRequestMessage[], options: vscode.ProvideLanguageModelChatResponseOptions): Promise<boolean> {
 		const id = decodeCocoModelId(model.id);
-		return !id || !await this.sessions.hasBinding(this.sessionIdentity(id), options.modelOptions?._copilotConversationId, cocoUserAnchors(messages));
+		return !id || !await this.sessions.hasBinding(this.sessionIdentity(id), options.modelOptions?._conversationId, cocoUserAnchors(messages));
 	}
 
 	private get enabled(): boolean {
@@ -394,7 +394,7 @@ export class CocoChatModelProvider implements vscode.LanguageModelChatProvider, 
 			throw new vscode.CancellationError();
 		}
 		const results = collectCocoToolResults(messages);
-		const conversationId = typeof options.modelOptions?._copilotConversationId === "string" ? options.modelOptions._copilotConversationId : undefined;
+		const conversationId = typeof options.modelOptions?._conversationId === "string" ? options.modelOptions._conversationId : undefined;
 		const continuations = [...this.activeTurns].filter(turn => results.some(result => turn.bridge.pendingCallIds.has(result.callId)));
 		if (continuations.length > 1) {
 			throw new Error("Coco received tool results from different Chat conversations.");

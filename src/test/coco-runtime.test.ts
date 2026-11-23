@@ -19,7 +19,7 @@ suite("Coco real runtime", () => {
 		const values = new Map<string, unknown>();
 		const state = { get: (key: string, fallback?: unknown) => values.get(key) ?? fallback, update: async (key: string, value: unknown) => { values.set(key, value); }, keys: () => [...values.keys()] } as vscode.Memento;
 		const usage: CocoRecordedUsage[] = [], providers: CocoChatModelProvider[] = [], composites: CompositeChatModelProvider[] = [];
-		const options = { toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _copilotConversationId: "native-integration-check" } };
+		const options = { toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { _conversationId: "native-integration-check" } };
 		const token: vscode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: () => new vscode.Disposable(() => undefined) };
 		// Small advertised budget deliberately exercises the real chunk-import path.
 		const model = { ...mapCocoModel({ id: "claude-opus-5-5", name: "Opus 5.5" }, 1_000_000), maxInputTokens: 67_536 };

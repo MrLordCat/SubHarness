@@ -10,8 +10,8 @@ the same time. Profiles are managed from:
 
 `Quick Access → Providers → Providers Manager`
 
-Each enabled profile contributes its discovered models to the native VS Code
-model picker without replacing the built-in Local LLM or DeepSeek source.
+Each enabled profile contributes its discovered models to the SubHarness chat
+model picker alongside Local LLM and DeepSeek.
 
 ## Profile Fields
 
@@ -74,8 +74,9 @@ Models whose catalog has no supported reasoning levels do not show this picker.
 
 Chat uses the official [Cursor TypeScript SDK](https://cursor.com/docs/sdk/typescript)
 in local mode. Inference runs on Cursor's servers. Commands, edits, questions
-and other actions use the tools supplied by Copilot Chat: the SDK callback waits
-while VS Code displays and approves the tool call, then resumes with its result.
+and other actions use tools enabled in the SubHarness chat: the SDK callback
+waits while the chat displays the tool call and VS Code handles any required
+approval, then resumes with its result.
 The SDK's built-in filesystem, shell and web tools are excluded. Project/user
 configuration and external MCP servers are not loaded into this bridge.
 

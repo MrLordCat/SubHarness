@@ -17,7 +17,6 @@ import type {
 	SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk" with { "resolution-mode": "import" };
 import type { LlamaLogSink } from "../logger";
-import { enhanceSubagentToolDescription, withRequiredSubagentModel } from "../subagent-guidance";
 import { asRecord, isCacheControlPart, stripTerminalControlNoise } from "../utils";
 
 export const CLAUDE_ACTIVE_TURN_TIMEOUT_MS = 300_000;
@@ -25,7 +24,7 @@ const TOOL_CARD_SETTLE_MS = 30;
 const MAX_TOOL_RESULT_CHARS = 16_000;
 
 const CLAUDE_VSCODE_SYSTEM_PROMPT = [
-	"You are Claude running as a language model inside VS Code Copilot Chat.",
+	"You are Claude running as a language model inside the SubHarness chat in VS Code.",
 	"The host exposes workspace capabilities as MCP tools from the vscode server.",
 	"Use those tools for file reads, searches, edits, terminals, web access, and other actions.",
 	"Tool execution is performed by VS Code and may require user approval. Call a tool, then wait for its result.",
@@ -736,15 +735,14 @@ export class ClaudeAgentSession implements vscode.Disposable {
 
 		const sdk = await import("@anthropic-ai/claude-agent-sdk");
 		const mcpTools = this.options.tools.map((definition, index) => {
-			const routedDefinition = withRequiredSubagentModel(definition);
-			const mcpName = createMcpToolName(routedDefinition.name, index);
-			const schema = createZodShape(routedDefinition.inputSchema);
+			const mcpName = createMcpToolName(definition.name, index);
+			const schema = createZodShape(definition.inputSchema);
 			return sdk.tool(
 				mcpName,
-				createToolDescription(routedDefinition),
+				createToolDescription(definition),
 				schema,
-				async args => this.delegateTool(routedDefinition.name, asRecord(args)),
-				{ alwaysLoad: isCoreTool(routedDefinition.name) }
+				async args => this.delegateTool(definition.name, asRecord(args)),
+				{ alwaysLoad: isCoreTool(definition.name) }
 			);
 		});
 		const vscodeServer = sdk.createSdkMcpServer({
@@ -1433,7 +1431,7 @@ function createToolDescription(tool: vscode.LanguageModelChatTool): string {
 	const schema = tool.inputSchema && typeof tool.inputSchema === "object"
 		? `\nInput schema: ${JSON.stringify(tool.inputSchema)}`
 		: "";
-	return `${enhanceSubagentToolDescription(tool.name, tool.description || `VS Code tool ${tool.name}`)}${schema}`;
+	return `${tool.description || `VS Code tool ${tool.name}`}${schema}`;
 }
 
 function createZodShape(schema: object | undefined): Record<string, ZodType> {

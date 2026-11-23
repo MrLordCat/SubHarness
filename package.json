@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/SubHarness.git"
 	},
-	"version": "2.0.7",
+	"version": "2.0.8",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -29,16 +29,9 @@
 	"license": "MIT",
 	"activationEvents": [
 		"onStartupFinished",
-		"onLanguageModelChatProvider:llamacpp"
+		"onUri"
 	],
 	"contributes": {
-		"languageModelChatProviders": [
-			{
-				"vendor": "llamacpp",
-				"displayName": "SubHarness",
-				"managementCommand": "llamacpp.manage"
-			}
-		],
 		"viewsContainers": {
 			"activitybar": [
 				{
@@ -496,16 +489,6 @@
 					"maximum": 200,
 					"description": "Maximum Claude Agent SDK model segments in one outer VS Code turn. Set to 0 to disable this segment cap; the cumulative-input circuit breaker remains active."
 				},
-				"llamacpp.workbenchTerminalPatchEnabled": {
-					"type": "boolean",
-					"default": true,
-					"description": "Reuse an idle background tool terminal for sync commands instead of spawning a new terminal per call (patches the VS Code workbench bundle; requires a window restart to take effect)."
-				},
-				"llamacpp.agentHostThinkingPatchEnabled": {
-					"type": "boolean",
-					"default": true,
-					"description": "Apply the BYOK thinking-level and response compatibility fixes to the agent-host bundle at startup when VS Code does not provide them natively. Requires writable application files and a window restart."
-				},
 				"llamacpp.claudeMaxCumulativeInputTokens": {
 					"type": "number",
 					"default": 10000000,
@@ -700,20 +683,6 @@
 					"maximum": 64,
 					"description": "Number of most recent non-system messages to keep during compaction."
 				},
-				"llamacpp.agentHistoryRounds": {
-					"type": "number",
-					"default": 400,
-					"minimum": 0,
-					"maximum": 2000,
-					"description": "Cap for agent tool-call rounds that Copilot renders into the prompt for subagents and for chats without a saved transcript. The oldest 20% plus the newest rounds are kept; 0 restores the default. Large conversations make Copilot's prompt renderer spend minutes per step even when tokens are cached."
-				},
-				"llamacpp.agentHistoryTurns": {
-					"type": "number",
-					"default": 80,
-					"minimum": 0,
-					"maximum": 2000,
-					"description": "Cap for previous conversation turns that Copilot renders into the prompt for subagents and for chats without a saved transcript. The oldest 20% plus the newest turns are kept, and the drop point moves in steps so the upstream prompt cache stays valid. 0 restores the default."
-				},
 				"llamacpp.autoUpdate": {
 					"type": "string",
 					"enum": [
@@ -729,20 +698,6 @@
 					"default": "notify",
 					"scope": "application",
 					"description": "Automatic updates from the GitHub releases of MrLordCat/SubHarness, stable and patch releases. Automatic checks run at most every 5 hours, 30 minutes after a check that could not reach GitHub. Only versions newer than the installed one are offered, so a local development build is never replaced by an older release."
-				},
-				"llamacpp.journalRenderRounds": {
-					"type": "number",
-					"default": 12,
-					"minimum": 0,
-					"maximum": 2000,
-					"description": "Tool-call rounds of the current request that Copilot renders for a chat with a saved transcript. The model still receives the full history, restored from the transcript, so a small value only removes Copilot's per-step render cost in long chats. 0 falls back to agentHistoryRounds."
-				},
-				"llamacpp.journalRenderTurns": {
-					"type": "number",
-					"default": 8,
-					"minimum": 0,
-					"maximum": 2000,
-					"description": "Previous conversation turns that Copilot renders for a chat with a saved transcript. The model still receives the full history, restored from the transcript. 0 falls back to agentHistoryTurns."
 				},
 				"llamacpp.maxOutputTokensCap": {
 					"type": "number",
@@ -937,11 +892,6 @@
 					"maximum": 32768,
 					"description": "Maximum estimated tokens reserved for automatically injected shared memory."
 				},
-				"llamacpp.autoPatchCopilot": {
-					"type": "boolean",
-					"default": true,
-					"description": "Automatically verify and apply the guarded Copilot Chat integration patch on startup. A reload prompt appears only when the active VS Code bundle was actually changed."
-				},
 				"llamacpp.enableFileLogging": {
 					"type": "boolean",
 					"default": true,
@@ -978,339 +928,6 @@
 				}
 			}
 		},
-		"languageModelTools": [
-			{
-				"name": "llamacpp_store_memory",
-				"displayName": "Store Shared Memory",
-				"toolReferenceName": "storeSharedMemory",
-				"modelDescription": "Create or update a durable, user-approved memory entry. Choose scope explicitly: workspace for this project's paths, commands, architecture, decisions and environment; global only for what helps in every project, such as stable user preferences and reusable workflows. Do not store secrets, transient chat details or guesses.",
-				"userDescription": "Save durable context globally or only for the current project.",
-				"canBeReferencedInPrompt": true,
-				"icon": "$(database)",
-				"tags": [
-					"memory",
-					"llamacpp"
-				],
-				"inputSchema": {
-					"type": "object",
-					"properties": {
-						"id": {
-							"type": "string",
-							"description": "Existing memory entry id to update. Omit to create a new entry."
-						},
-						"title": {
-							"type": "string",
-							"description": "Short descriptive title for the durable fact or decision."
-						},
-						"content": {
-							"type": "string",
-							"description": "Self-contained memory content that remains understandable in a future chat."
-						},
-						"tags": {
-							"type": "array",
-							"items": {
-								"type": "string"
-							},
-							"description": "Optional lowercase search tags."
-						},
-						"pinned": {
-							"type": "boolean",
-							"description": "Prioritize this entry after it passes scope, expiry, and relevance checks."
-						},
-						"scope": {
-							"type": "string",
-							"enum": [
-								"global",
-								"workspace"
-							],
-							"description": "Required destination. Use global only when useful in every project; use workspace for the current project. The workspace identity is filled securely by the extension."
-						},
-						"kind": {
-							"type": "string",
-							"enum": [
-								"preference",
-								"decision",
-								"environment",
-								"workflow",
-								"externalFact",
-								"other"
-							],
-							"description": "Semantic type. externalFact requires sourceUrl and verifiedAt."
-						},
-						"sourceUrl": {
-							"type": "string",
-							"description": "Primary source URL for an externally verified fact."
-						},
-						"verifiedAt": {
-							"type": "string",
-							"description": "ISO date/time when the external fact was verified."
-						},
-						"expiresAt": {
-							"type": "string",
-							"description": "Optional ISO date/time after which the entry is excluded from automatic retrieval."
-						}
-					},
-					"required": [
-						"title",
-						"content",
-						"scope"
-					],
-					"additionalProperties": false
-				}
-			},
-			{
-				"name": "llamacpp_search_memory",
-				"displayName": "Search Shared Memory",
-				"toolReferenceName": "searchSharedMemory",
-				"modelDescription": "Search durable memory visible to the current project. Without scope, results include global memory plus memory belonging to the current project. Set global or workspace to restrict the search. An empty query lists recent and pinned entries.",
-				"userDescription": "Find durable context saved by this extension.",
-				"canBeReferencedInPrompt": true,
-				"icon": "$(search)",
-				"tags": [
-					"memory",
-					"llamacpp"
-				],
-				"inputSchema": {
-					"type": "object",
-					"properties": {
-						"query": {
-							"type": "string",
-							"description": "Keywords describing the memory to retrieve."
-						},
-						"limit": {
-							"type": "number",
-							"minimum": 1,
-							"maximum": 50,
-							"description": "Maximum number of entries to return."
-						},
-						"includeExpired": {
-							"type": "boolean",
-							"description": "Include expired entries for maintenance and review."
-						},
-						"scope": {
-							"type": "string",
-							"enum": [
-								"global",
-								"workspace"
-							],
-							"description": "Optionally restrict results to global memory or memory owned by the current project."
-						}
-					},
-					"additionalProperties": false
-				}
-			},
-			{
-				"name": "llamacpp_delete_memory",
-				"displayName": "Delete Shared Memory",
-				"toolReferenceName": "deleteSharedMemory",
-				"modelDescription": "Delete one durable memory entry by exact id and explicit scope when it is obsolete or incorrect. Choose global only for a global entry, or workspace for an entry belonging to the current project. Never use this tool speculatively.",
-				"userDescription": "Remove an obsolete durable memory entry.",
-				"canBeReferencedInPrompt": true,
-				"icon": "$(trash)",
-				"tags": [
-					"memory",
-					"llamacpp"
-				],
-				"inputSchema": {
-					"type": "object",
-					"properties": {
-						"id": {
-							"type": "string",
-							"description": "Exact id of the memory entry to delete."
-						},
-						"scope": {
-							"type": "string",
-							"enum": [
-								"global",
-								"workspace"
-							],
-							"description": "Required scope of the entry. Workspace deletion is restricted to the current project."
-						}
-					},
-					"required": [
-						"id",
-						"scope"
-					],
-					"additionalProperties": false
-				}
-			},
-			{
-				"name": "llamacpp_coco_run_in_terminal",
-				"displayName": "Run in Coco Terminal",
-				"toolReferenceName": "cocoRunInTerminal",
-				"modelDescription": "Run a shell command in a VS Code terminal the user can see. Reuses the last idle Coco terminal and its shell state; cwd changes its directory first, and a new terminal opens only when none is idle or newTerminal is true. mode sync waits up to timeoutMs (default 120000); async returns after a second, for servers and watchers. If state is running, read that terminal instead of rerunning. The user may type, interrupt or close it; respect that. Shell integration must be enabled.",
-				"userDescription": "Run a command in an interactive VS Code terminal.",
-				"canBeReferencedInPrompt": true,
-				"icon": "$(terminal)",
-				"tags": [
-					"terminal",
-					"llamacpp",
-					"coco"
-				],
-				"inputSchema": {
-					"type": "object",
-					"properties": {
-						"command": {
-							"type": "string",
-							"description": "Exact command for the default terminal shell (PowerShell on Windows)."
-						},
-						"terminalId": {
-							"type": "string",
-							"description": "Select a particular idle Coco terminal. Omit to reuse the last idle terminal automatically."
-						},
-						"newTerminal": {
-							"type": "boolean",
-							"default": false,
-							"description": "Create a separate terminal even if another is idle. Mutually exclusive with terminalId."
-						},
-						"cwd": {
-							"type": "string",
-							"description": "Directory for the command. An idle terminal already there is reused; otherwise the reused terminal changes into it first. With terminalId, must match that terminal's reported directory. Omit to keep the reused shell's current directory."
-						},
-						"mode": {
-							"type": "string",
-							"enum": [
-								"sync",
-								"async"
-							],
-							"default": "sync"
-						},
-						"timeoutMs": {
-							"type": "number",
-							"minimum": 0,
-							"maximum": 3600000,
-							"description": "Sync wait limit; timeout leaves the command running in the visible terminal."
-						}
-					},
-					"required": [
-						"command"
-					],
-					"additionalProperties": false
-				}
-			},
-			{
-				"name": "llamacpp_coco_read_terminal",
-				"displayName": "Read Coco Terminal",
-				"toolReferenceName": "cocoReadTerminal",
-				"modelDescription": "Read the bounded output and current state of a command started by cocoRunInTerminal. Use its returned terminalId. Optional waitMs waits for that command to finish, up to 60000ms; do not repeatedly poll. Returns output, state, exitCode and truncation flag.",
-				"userDescription": "Read a Coco terminal command's output and status.",
-				"canBeReferencedInPrompt": true,
-				"icon": "$(terminal)",
-				"tags": [
-					"terminal",
-					"llamacpp",
-					"coco"
-				],
-				"inputSchema": {
-					"type": "object",
-					"properties": {
-						"terminalId": {
-							"type": "string"
-						},
-						"waitMs": {
-							"type": "number",
-							"minimum": 0,
-							"maximum": 60000
-						},
-						"maxChars": {
-							"type": "number",
-							"minimum": 1,
-							"maximum": 128000,
-							"description": "Most recent output characters to return (default 12000)."
-						}
-					},
-					"required": [
-						"terminalId"
-					],
-					"additionalProperties": false
-				}
-			},
-			{
-				"name": "llamacpp_coco_send_to_terminal",
-				"displayName": "Send to Coco Terminal",
-				"toolReferenceName": "cocoSendToTerminal",
-				"modelDescription": "Send input to a command currently running in an interactive Coco terminal. Requires terminalId from cocoRunInTerminal. addNewLine defaults to true; for Ctrl+C send text \\u0003 with addNewLine false. To start a new command use cocoRunInTerminal. Never ask the user to supply passwords or tokens through this tool; they can type directly in the terminal.",
-				"userDescription": "Send input to a running Coco terminal command.",
-				"canBeReferencedInPrompt": true,
-				"icon": "$(terminal)",
-				"tags": [
-					"terminal",
-					"llamacpp",
-					"coco"
-				],
-				"inputSchema": {
-					"type": "object",
-					"properties": {
-						"terminalId": {
-							"type": "string"
-						},
-						"text": {
-							"type": "string"
-						},
-						"addNewLine": {
-							"type": "boolean",
-							"default": true
-						}
-					},
-					"required": [
-						"terminalId",
-						"text"
-					],
-					"additionalProperties": false
-				}
-			},
-			{
-				"name": "llamacpp_coco_kill_terminal",
-				"displayName": "Close Coco Terminal",
-				"toolReferenceName": "cocoKillTerminal",
-				"modelDescription": "Close the interactive Coco terminal and terminate its shell. Requires terminalId from cocoRunInTerminal. Resolves any outstanding command wait as closed. The user can also close the terminal with the trash icon in VS Code.",
-				"userDescription": "Close a Coco terminal and stop its shell.",
-				"canBeReferencedInPrompt": true,
-				"icon": "$(trash)",
-				"tags": [
-					"terminal",
-					"llamacpp",
-					"coco"
-				],
-				"inputSchema": {
-					"type": "object",
-					"properties": {
-						"terminalId": {
-							"type": "string"
-						}
-					},
-					"required": [
-						"terminalId"
-					],
-					"additionalProperties": false
-				}
-			},
-			{
-				"name": "llamacpp_wait_for_terminal",
-				"displayName": "Wait for Terminal Command",
-				"toolReferenceName": "waitForTerminal",
-				"modelDescription": "Wait until the next terminal command finishes; returns its command line, exit code and duration. Call it right after starting a command instead of sleeping for a guessed time. timeoutMs is only a safety net (default 10 min). Do not call it for a command that already finished: no notification will arrive, so only the timeout would end the wait.",
-				"userDescription": "Wait for a running terminal command finished notification.",
-				"canBeReferencedInPrompt": true,
-				"icon": "$(watch)",
-				"tags": [
-					"terminal",
-					"llamacpp"
-				],
-				"inputSchema": {
-					"type": "object",
-					"properties": {
-						"timeoutMs": {
-							"type": "number",
-							"minimum": 5000,
-							"maximum": 7200000,
-							"description": "Safety net in milliseconds (default 600000 = 10 min)."
-						}
-					},
-					"additionalProperties": false
-				}
-			}
-		],
 		"commands": [
 			{
 				"command": "llamacpp.chat.new",
@@ -1326,6 +943,10 @@
 				"command": "llamacpp.chat.openInEditor",
 				"title": "SubHarness: Open Chat in Editor",
 				"icon": "$(link-external)"
+			},
+			{
+				"command": "llamacpp.chat.manageToolApprovals",
+				"title": "SubHarness: Allow External Tools Without Asking"
 			},
 			{
 				"command": "llamacpp.chat.addSelection",
@@ -1416,10 +1037,6 @@
 				"title": "SubHarness: Show Codex Subscription Status"
 			},
 			{
-				"command": "llamacpp.codexContinueLatestInNewChat",
-				"title": "SubHarness: Continue Latest Codex Thread in New Chat"
-			},
-			{
 				"command": "llamacpp.toggleClaudeSubscription",
 				"title": "SubHarness: Toggle Claude Subscription Source"
 			},
@@ -1458,10 +1075,6 @@
 			{
 				"command": "llamacpp.claudeShowStatus",
 				"title": "SubHarness: Show Claude Subscription Status"
-			},
-			{
-				"command": "llamacpp.claudeContinueLatestInNewChat",
-				"title": "SubHarness: Continue Latest Claude Session in New Chat"
 			},
 			{
 				"command": "llamacpp.setClaudeContextLength",
@@ -1523,20 +1136,6 @@
 				"icon": "$(refresh)"
 			},
 			{
-				"command": "llamacpp.openCopilotModelPicker",
-				"title": "SubHarness: Choose Chat Model",
-				"icon": "$(comment-discussion)"
-			},
-			{
-				"command": "llamacpp.chooseModelByProvider",
-				"title": "SubHarness: Models by Provider",
-				"icon": "$(list-tree)"
-			},
-			{
-				"command": "llamacpp.applyCopilotPatch",
-				"title": "SubHarness: Apply Copilot Chat Patch"
-			},
-			{
 				"command": "llamacpp.checkForUpdates",
 				"title": "SubHarness: Check for Updates",
 				"icon": "$(sync)"
@@ -1549,19 +1148,6 @@
 			{
 				"command": "llamacpp.chooseAutoUpdateMode",
 				"title": "SubHarness: Choose Automatic Update Mode"
-			},
-			{
-				"command": "llamacpp.prepareUserVsCode",
-				"title": "SubHarness: Prepare User VS Code (Linux, no root)",
-				"enablement": "isLinux && !remoteName"
-			},
-			{
-				"command": "llamacpp.copilotPatchStatus",
-				"title": "SubHarness: Show Copilot Chat Patch Status"
-			},
-			{
-				"command": "llamacpp.restoreCopilotPatch",
-				"title": "SubHarness: Restore Original Copilot Chat"
 			},
 			{
 				"command": "llamacpp.openLogsFolder",
@@ -1651,9 +1237,9 @@
 					"group": "navigation"
 				},
 				{
-					"command": "llamacpp.chooseModelByProvider",
-					"when": "view == llamacpp-quick-actions || view == workbench.panel.chat.view.copilot",
-					"group": "navigation@1"
+					"command": "llamacpp.chat.manageToolApprovals",
+					"when": "view == llamacpp.chat",
+					"group": "1_tools"
 				},
 				{
 					"command": "llamacpp.refreshModels",
