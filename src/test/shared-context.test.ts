@@ -40,6 +40,16 @@ suite("Shared provider context", () => {
 		const b = [user([new vscode.LanguageModelTextPart("RULE "), new vscode.LanguageModelTextPart("<context>new terminal</context>")]), assistant("DONE"), user("NEXT")];
 		assert.deepStrictEqual(cocoUserAnchors(a), cocoUserAnchors(b));
 	});
+	test("a shared handoff keeps the chat's conversation summary whole", () => {
+		const summary = `<conversation_summary>\nSUMMARY_START ${"s".repeat(6000)} SUMMARY_END\n</conversation_summary>`;
+		const rounds = Array.from({ length: 30 }, (_, index) => [user(`OLD_REQUEST_${index} ${"u".repeat(2000)}`), assistant(`OLD_ANSWER_${index} ${"a".repeat(2000)}`)]).flat();
+		const plan = prepareSharedHandoff([user(summary), ...rounds, user("CURRENT")], 20000);
+		assert.ok(plan.wasCompacted);
+		const first = plan.compacted[0].content[0];
+		assert.ok(first instanceof vscode.LanguageModelTextPart && first.value === summary, "the summary stays first and whole");
+		assert.match(text(plan.compacted), /CURRENT/);
+		assert.ok(plan.tokenEstimateAfter <= 20000);
+	});
 	test("summarizes a multi-megabyte unbroken line using bounded excerpts", function () {
 		this.timeout(3000);
 		const plan = prepareSharedHandoff([user("EARLY_RULE"), assistant("BEGIN_FINDING\n" + "x".repeat(3000000) + "\nEND_FINDING"), user("CURRENT")], 12000);

@@ -422,6 +422,12 @@ function formatResetWait(ms: number): string {
 		return `in ${minutes} min`;
 	}
 	const hours = Math.floor(minutes / 60);
+	if (hours >= 24) {
+		// A weekly reset: days and hours, minutes no longer matter.
+		const days = Math.floor(hours / 24);
+		const restHours = hours % 24;
+		return restHours > 0 ? `in ${days} d ${restHours} h` : `in ${days} d`;
+	}
 	const rest = minutes % 60;
 	return rest > 0 ? `in ${hours} h ${rest} min` : `in ${hours} h`;
 }
@@ -515,6 +521,51 @@ export function formatQuotaExhausted(quota: ChatProviderQuota, now: number): str
 	}
 	const reset = window.resetsAt === undefined ? "" : `; it resets ${formatReset(window.resetsAt, now)}`;
 	return `${quota.provider}: the ${window.label} limit is used up${reset}.`;
+}
+
+/** A subscription that can take over an answer its own subscription's limit stopped. */
+export interface OtherSubscriptionModel {
+	modelId: string;
+	/** Its group in the model picker, e.g. "Claude 2". */
+	provider: string;
+}
+
+/**
+ * The same Codex or Claude model on the provider's other subscriptions whose limits are not used
+ * up: `claude::work::claude-opus-5-5` (Claude 2) for `claude::claude-opus-5-5` (Claude 1). A
+ * subscription without a usage report counts as having room.
+ */
+export function otherSubscriptionModels(
+	modelId: string | undefined,
+	models: readonly ChatModelGroup[],
+	quota: readonly ChatProviderQuota[],
+	now: number
+): OtherSubscriptionModel[] {
+	const segments = modelId?.split("::") ?? [];
+	const family = segments[0];
+	const bare = segments.at(-1);
+	if (!modelId || !bare || segments.length < 2 || (family !== "codex" && family !== "claude")) {
+		return [];
+	}
+	const own = models.find(group => group.models.some(model => model.id === modelId))?.provider;
+	const found: OtherSubscriptionModel[] = [];
+	for (const group of models) {
+		if (group.provider === own) {
+			continue;
+		}
+		const usage = quota.find(entry => entry.provider === group.provider);
+		if (usage && exhaustedWindow(usage, now)) {
+			continue;
+		}
+		const model = group.models.find(candidate => {
+			const parts = candidate.id.split("::");
+			return candidate.id !== modelId && parts.length >= 2 && parts[0] === family && parts.at(-1) === bare;
+		});
+		if (model) {
+			found.push({ modelId: model.id, provider: group.provider });
+		}
+	}
+	return found;
 }
 
 export type SessionGroup = "Today" | "Yesterday" | "Last 7 days" | "Older";

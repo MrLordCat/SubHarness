@@ -36,6 +36,73 @@ function parseReset(value: string | null | undefined): number | undefined {
 	return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
+/** The chat's names for Claude's rate-limit windows; the model-scoped weekly ones count as weekly. */
+const RATE_LIMIT_WINDOWS: Readonly<Record<string, string>> = {
+	five_hour: "5-hour",
+	seven_day: "weekly",
+	seven_day_opus: "weekly",
+	seven_day_sonnet: "weekly",
+	seven_day_overage_included: "weekly",
+};
+
+/** How long Claude's usage report stays good enough to name the window that refused a request. */
+const CLAUDE_LIMIT_SNAPSHOT_MAX_AGE_MS = 10 * 60_000;
+
+/**
+ * Claude's own word on the window that refused a request, which beats the error text: the error's
+ * bare clock or month-day date says nothing about which window it is. First a rejected rate-limit
+ * event of this turn, then the used-up window of a fresh usage report that resets last.
+ */
+export function claudeReportedLimit(
+	modelId: string,
+	rateLimit: ClaudeRateLimitInfo | undefined,
+	rateLimitAt: number | undefined,
+	snapshot: ClaudeSubscriptionUsageSnapshot | undefined,
+	snapshotAt: number | undefined,
+	now = Date.now()
+): { window?: string; resetAt?: Date } | undefined {
+	if (rateLimit?.status === "rejected" && rateLimitAt !== undefined && now - rateLimitAt <= CLAUDE_AVAILABILITY_MAX_AGE_MS) {
+		const resetMs = rateLimit.resetsAt === undefined ? undefined : rateLimit.resetsAt > 1e12 ? rateLimit.resetsAt : rateLimit.resetsAt * 1000;
+		const window = rateLimit.rateLimitType ? RATE_LIMIT_WINDOWS[rateLimit.rateLimitType] : undefined;
+		if ((resetMs !== undefined && resetMs > now) || window) {
+			return {
+				...(window ? { window } : {}),
+				...(resetMs !== undefined && resetMs > now ? { resetAt: new Date(resetMs) } : {}),
+			};
+		}
+	}
+	const limits = snapshot?.rate_limits;
+	if (!snapshot?.rate_limits_available || !limits || snapshotAt === undefined || now - snapshotAt > CLAUDE_LIMIT_SNAPSHOT_MAX_AGE_MS) {
+		return undefined;
+	}
+	let found: { window: string; resetAt: Date } | undefined;
+	const consider = (window: string, value: { utilization: number | null; resets_at: string | null } | null | undefined): void => {
+		const reset = parseReset(value?.resets_at);
+		if (typeof value?.utilization !== "number" || value.utilization < 100 || reset === undefined || reset <= now) {
+			return;
+		}
+		if (!found || reset > found.resetAt.getTime()) {
+			found = { window, resetAt: new Date(reset) };
+		}
+	};
+	consider("5-hour", limits.five_hour);
+	consider("weekly", limits.seven_day);
+	// A used-up window of another model family did not refuse this request.
+	const family = familyForModel(modelId);
+	if (family) {
+		if (family === "opus") {
+			consider("weekly", limits.seven_day_opus);
+		}
+		for (const scoped of limits.model_scoped ?? []) {
+			const bucket = normalizeBucket(scoped.display_name);
+			if (bucket === family || bucket.startsWith(family)) {
+				consider("weekly", scoped);
+			}
+		}
+	}
+	return found;
+}
+
 export function buildClaudeModelAvailability(
 	modelId: string,
 	snapshot: ClaudeSubscriptionUsageSnapshot | undefined,

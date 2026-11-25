@@ -49,7 +49,7 @@ export const SUBAGENT_INSTRUCTIONS = `Subagents: the subagent tool hands one bou
 - Do not take a report on trust: read the changed code, check for errors, run the tests that matter. Send fixes with subagentId (keepOpen keeps its context) and call close_subagent once you accept the work.
 - Several subagent calls in one response run in parallel (up to 3); give parallel subagents steps with different files. Your other tool calls in that response run right away. Track the steps in the todo list.
 - With background: true a subagent starts and the call returns at once, so you can keep working; collect its report with wait_subagents. A report you did not collect arrives as the next message after your answer, and the turn lasts until its background subagents finish.
-- A report ends with the files the subagent changed and their line counts; read those changes before you accept them. For non-trivial changes, a cheap subagent can review the diff against the request before you answer.
+- A report ends with the files the subagent changed and their line counts; read those changes before you accept them (changes_diff shows this turn's diff). For non-trivial changes, a cheap subagent can review the diff against the request before you answer: tell it to call changes_diff.
 - Run builds, lint and tests with run_checks instead of a terminal: it returns pass/fail counts and the failures, with the full log on disk.
 - If a model is unavailable (limit, balance, error), use another model of similar size from the list; use premium or paid models only when the user asks or nothing cheaper fits. If none is available, do the step yourself and say so.
 - For a large task, agree on the plan with the user before you start.`;

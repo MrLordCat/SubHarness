@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { prepareSharedHandoff, resolveProviderSwitchContextTokens, resolveSharedContextLimit, setFollowedCodexContext, sharedContextBudget } from "../context/provider-handoff";
-import { isProviderSwitch } from "../providers/provider-switch";
+import { isHistoryReset, isProviderSwitch } from "../providers/provider-switch";
 
 import { buildCacheDiagnostics } from "../context/cache-diagnostics";
 import { calculatePromptCacheUsage } from "../context/usage";
@@ -134,7 +134,11 @@ export function resolveCodexLimitGate(snapshot: CodexRateLimitSnapshot | undefin
 	if (windows.length === 0) {
 		return { kind: "unknown" };
 	}
-	const full = windows.find(window => window.usedPercent >= 100);
+	// With the 5-hour and the weekly window both used up, only the later reset lets the chat go on.
+	const full = windows
+		.filter(window => window.usedPercent >= 100)
+		.reduce<CodexRateLimitWindow | undefined>((latest, window) =>
+			latest === undefined || (window.resetsAt ?? Number.NEGATIVE_INFINITY) > (latest.resetsAt ?? Number.NEGATIVE_INFINITY) ? window : latest, undefined);
 	if (!full) {
 		return { kind: "clear" };
 	}
@@ -953,6 +957,24 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		}
 	}
 
+	/**
+	 * A usage-limit error, with the window and reset of Codex's own report when that shows a used-up
+	 * window: the error text names no window and may give only a clock time.
+	 */
+	private detectLimit(error: unknown): LimitMatch | undefined {
+		const limit = detectLimitError(error, "codex");
+		const reported = limit ? resolveCodexLimitGate(this.lastRateLimitSnapshot) : undefined;
+		if (!limit || reported?.kind !== "limited") {
+			return limit;
+		}
+		const resetAt = reported.match.resetAt;
+		return {
+			...limit,
+			...(reported.match.window ? { window: reported.match.window } : {}),
+			...(resetAt && resetAt.getTime() > Date.now() ? { resetAt, provisional: false } : {}),
+		};
+	}
+
 	/** Logs a failure when it starts or changes, and now and then with the count of skipped repeats while it lasts. */
 	private logRepeatedFailure(key: string, event: string, error: unknown): void {
 		const repeats = this.failureLog.report(key, error);
@@ -1337,7 +1359,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		if (providerSwitched) {
 			// Another model worked on the chat since this thread's last turn; its context is stale.
 			interruptedContinuation = undefined;
-			this.logSink?.log("codex.chat.provider_switch_cold_start", { model: model.id, previousModel: options.modelOptions?._aabProviderSwitched });
+			this.logSink?.log("codex.chat.provider_switch_cold_start", { model: model.id, previousModel: options.modelOptions?._aabProviderSwitched, historyReset: isHistoryReset(options.modelOptions) });
 		}
 		let conversationContinuation: CodexConversationThread | undefined;
 		let conversationTail: readonly vscode.LanguageModelChatRequestMessage[] | undefined;
@@ -1832,7 +1854,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 						inputMode,
 						activeTurn: Boolean(activeTurn),
 					});
-					const limit = detectLimitError(normalized, "codex");
+					const limit = this.detectLimit(normalized);
 					if (limit) {
 						this.limitGate.note("codex", limit);
 						this.publishSubagentProfiles();
@@ -1893,7 +1915,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			const completed = outcome.completed;
 			if (completed.turn.status === "failed") {
 				const error = new Error(completed.turn.error?.message || "Codex turn failed");
-				const limit = detectLimitError(error, "codex");
+				const limit = this.detectLimit(error);
 				this.logSink?.logError("codex.chat.failed", error, {
 					threadId,
 					turnId: completed.turn.id,
@@ -2939,6 +2961,9 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		}
 		// The gate covers a limit a request just hit, before the next usage report says so.
 		const limited = this.isCodexRateLimitReached() || this.limitGate.blocked("codex") !== undefined;
+		// A call to a used-up model is answered with this reset instead of starting a run.
+		const gate = resolveCodexLimitGate(this.lastRateLimitSnapshot);
+		const resetAt = limited ? this.limitGate.get("codex")?.resetAt ?? (gate.kind === "limited" ? gate.match.resetAt : undefined) : undefined;
 		const active = this.account.id === resolveActiveCodexAccountSetting(this.getConfig());
 		setSubagentModelProfiles("codex", [...this.models.values()].map(model => ({
 			// The id is this account's picker model, so the chat runs the subagent on this account.
@@ -2950,6 +2975,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			availabilityReason: limited
 				? `${codexProviderLabel(this.account)}: ChatGPT subscription limit reached (${this.codexUsageLimitPercent ?? "unknown"}%)`
 				: "Model is present in the current ChatGPT subscription catalog",
+			...(resetAt && !Number.isNaN(resetAt.getTime()) ? { unavailableUntil: resetAt.toISOString() } : {}),
 			availabilityCheckedAt: Date.now(),
 			useWhen: codexSubagentUseWhen(model.id),
 		})), this.account.id, active ? 0 : 1 + (this.account.order ?? 0));

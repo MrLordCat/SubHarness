@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as vscode from "vscode";
 import { modelInformation } from "../providers/model-descriptor";
-import { isProviderSwitch } from "../providers/provider-switch";
+import { isHistoryReset, isProviderSwitch } from "../providers/provider-switch";
 
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk" with { "resolution-mode": "import" };
 import { buildCacheDiagnostics, promptCacheUsageFromCacheReads } from "../context/cache-diagnostics";
-import { resolveProviderSwitchContextTokens, resolveSharedContextLimit } from "../context/provider-handoff";
+import { isConversationSummaryMessage, resolveProviderSwitchContextTokens, resolveSharedContextLimit } from "../context/provider-handoff";
 import type { SubscriptionObservation } from "../diagnostics/subscription-usage";
-import { detectLimitError, LimitGate } from "../providers/limit-errors";
+import { detectLimitError, LimitGate, type LimitMatch } from "../providers/limit-errors";
 import { reportLimitNotice } from "../providers/limit-signal";
 import type { LlamaLogSink } from "../logger";
 import type { ProviderRuntimeMetrics } from "../provider-metrics";
@@ -16,6 +16,7 @@ import { setSubagentModelProfiles } from "../subagent-guidance";
 import { clampInteger, formatShortResetTime, formatTokenCount, isCacheControlPart, normalizeTurnIndex, stableJsonStringify } from "../utils";
 import {
 	buildClaudeModelAvailability,
+	claudeReportedLimit,
 	type ClaudeModelAvailability,
 } from "./availability";
 import {
@@ -31,9 +32,18 @@ import {
 	type ClaudeSubscriptionUsageSnapshot,
 } from "./app-server-client";
 import {
+	CLAUDE_DEFAULT_ACCOUNT,
+	claudeAccountEnv,
+	claudeAccountStateKey,
+	claudeProviderLabel,
+	decodeClaudeAccountModelId,
+	encodeClaudeAccountModelId,
+	hasClaudeLogin,
+	resolveActiveClaudeAccountSetting,
+	type ClaudeAccountIdentity,
+} from "./accounts";
+import {
 	CLAUDE_SUBSCRIPTION_MODELS,
-	decodeClaudeModelId,
-	encodeClaudeModelId,
 	estimateClaudeTokens,
 } from "./message-adapter";
 import { resolveClaudeKeepAliveSettings } from "./keepalive-settings";
@@ -386,15 +396,16 @@ export interface ClaudeResumeFailureInfo {
 
 export async function clearPersistedClaudeSessionState(
 	workspaceState: { update(key: string, value: unknown): Thenable<void> } | undefined,
-	logSink?: { logError(event: string, error: unknown): void }
+	logSink?: { logError(event: string, error: unknown): void },
+	accountId = CLAUDE_DEFAULT_ACCOUNT.id
 ): Promise<void> {
 	if (!workspaceState) {
 		return;
 	}
 	try {
 		await Promise.all([
-			Promise.resolve(workspaceState.update(CLAUDE_DURABLE_SESSION_STATE_KEY, undefined)),
-			Promise.resolve(workspaceState.update(CLAUDE_PENDING_ROLLOVER_STATE_KEY, undefined)),
+			Promise.resolve(workspaceState.update(claudeAccountStateKey(CLAUDE_DURABLE_SESSION_STATE_KEY, accountId), undefined)),
+			Promise.resolve(workspaceState.update(claudeAccountStateKey(CLAUDE_PENDING_ROLLOVER_STATE_KEY, accountId), undefined)),
 		]);
 	} catch (error) {
 		logSink?.logError("claude.session_state.clear_failed", error);
@@ -767,7 +778,9 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		private readonly extensionVersion: string,
 		private readonly logSink?: LlamaLogSink,
 		private readonly workspaceState?: vscode.Memento,
-		private readonly dependencies: ClaudeProviderDependencies = {}
+		private readonly dependencies: ClaudeProviderDependencies = {},
+		/** The subscription this instance serves; a second one has its own CLAUDE_CONFIG_DIR. */
+		readonly account: ClaudeAccountIdentity = CLAUDE_DEFAULT_ACCOUNT
 	) {
 		this.loadDurableSessions();
 		this.loadPendingRollover();
@@ -1114,7 +1127,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		if (!resolveClaudeCodeBinary()) {
 			return this.toStatus("signedOut");
 		}
-		if (!hasClaudeAccountEvidence()) {
+		if (!this.hasLogin()) {
 			return this.toStatus("signedOut");
 		}
 		const status = this.toStatus("connected");
@@ -1130,10 +1143,10 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		if (!executable) {
 			throw new Error("The Claude Code runtime was not found. Reinstall the extension or set llamacpp.claudeCliPath.");
 		}
-		const status = await signInWithClaudeCli(executable);
+		const status = await signInWithClaudeCli(executable, undefined, this.authEnv(), `${this.label} sign-in`);
 		if (!status?.loggedIn) {
 			await this.refreshStatus();
-			vscode.window.showWarningMessage("Claude sign-in did not finish. Run \"Sign In to Claude Subscription\" again.");
+			vscode.window.showWarningMessage(`${this.label} sign-in did not finish. Sign in again from the chat or Quick Access.`);
 			return;
 		}
 		// A fresh sign-in may be another account or organisation, whose sessions
@@ -1145,17 +1158,17 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		await this.refreshStatus();
 		this.modelChanges.fire();
 		if (status.authMethod !== "claude.ai") {
-			vscode.window.showWarningMessage(`Claude Code is signed in with ${describeClaudeAuth(status)}. The bridge uses a Claude subscription: sign in again and choose the Claude account.`);
+			vscode.window.showWarningMessage(`${this.label} is signed in with ${describeClaudeAuth(status)}. The bridge uses a Claude subscription: sign in again and choose the Claude account.`);
 			return;
 		}
-		vscode.window.showInformationMessage(`Claude signed in: ${describeClaudeAuth(status)}.`);
+		vscode.window.showInformationMessage(`${this.label} signed in: ${describeClaudeAuth(status)}.`);
 	}
 
 	/** Signs Claude Code out on this computer, then drops the sessions of that account. */
 	async signOut(): Promise<void> {
 		const executable = this.resolveExecutable();
 		if (executable) {
-			await signOutClaudeCli(executable);
+			await signOutClaudeCli(executable, undefined, this.authEnv());
 		}
 		this.closeAllSessions();
 		this.lastSubscriptionUsage = undefined;
@@ -1178,7 +1191,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			this.logSink?.logError("claude.usage_refresh.failed", error);
 		});
 		const executable = this.resolveExecutable();
-		const auth = executable ? await readClaudeAuthStatus(executable).catch(() => undefined) : undefined;
+		const auth = executable ? await readClaudeAuthStatus(executable, undefined, this.authEnv()).catch(() => undefined) : undefined;
 		const details = [this.statusSummary, `Account: ${executable ? describeClaudeAuth(auth) : "Claude Code runtime not found"}`];
 		for (const limit of this.subscriptionUsageLimits) {
 			details.push(`${limit.label}: ${limit.description}`);
@@ -1275,8 +1288,9 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			this.toStatus("signedOut");
 			return [];
 		}
-		if (!hasClaudeAccountEvidence()) {
+		if (!this.hasLogin()) {
 			this.toStatus("signedOut");
+			this.refreshSubagentProfiles();
 			return [];
 		}
 		this.toStatus("connected");
@@ -1291,7 +1305,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		token: vscode.CancellationToken
 	): Promise<void> {
 		this.lastRequestAt = Date.now();
-		const modelId = decodeClaudeModelId(modelInfo.id);
+		const modelId = decodeClaudeAccountModelId(modelInfo.id, this.account.id);
 		if (!modelId) {
 			throw new Error(`Invalid Claude model id: ${modelInfo.id}`);
 		}
@@ -1310,7 +1324,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 				// A limit is not a request failure: answer with one short line so the host does not
 				// retry the request and no provider turn is started.
 				this.logSink?.log("claude.chat.limit_short_circuit", { model: modelId, notice: unresolved });
-				reportLimitNotice(progress, "claude", this.limitGate.get("claude"), unresolved);
+				reportLimitNotice(progress, "claude", this.limitGate.get("claude"), unresolved, this.label);
 				return;
 			}
 		}
@@ -1389,7 +1403,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 					throw error;
 				}
 				this.logSink?.logError("claude.chat.failed", error);
-				const limit = detectLimitError(error, "claude");
+				const limit = this.detectLimit(error, modelId);
 				if (!limit) {
 					throw error;
 				}
@@ -1407,7 +1421,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 					timeZone: limit.timeZone,
 				}, "warn");
 				this.removeSession(continuation.session.key);
-				reportLimitNotice(progress, "claude", limit);
+				reportLimitNotice(progress, "claude", limit, undefined, this.label);
 				return;
 			}
 			continuation.session.lastUsedAt = Date.now();
@@ -1445,7 +1459,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 				this.removeSession(session.key);
 				session = undefined;
 			}
-			this.logSink?.log("claude.chat.provider_switch_cold_start", { model: modelId, previousModel: options.modelOptions?._aabProviderSwitched });
+			this.logSink?.log("claude.chat.provider_switch_cold_start", { model: modelId, previousModel: options.modelOptions?._aabProviderSwitched, historyReset: isHistoryReset(options.modelOptions) });
 		}
 		let restored = false;
 		let rolledOver = false;
@@ -1836,7 +1850,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		} catch (error) {
 			if (!(error instanceof vscode.CancellationError)) {
 				this.logSink?.logError("claude.chat.failed", error);
-				const limit = detectLimitError(error, "claude");
+				const limit = this.detectLimit(error, modelId);
 				if (limit) {
 					// A usage limit is not a session failure: keep the session, skip every fallback,
 					// and show one short English notice instead of the provider's long text.
@@ -1853,7 +1867,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 						timeZone: limit.timeZone,
 					}, "warn");
 					this.removeSession(session.key);
-					reportLimitNotice(progress, "claude", limit);
+					reportLimitNotice(progress, "claude", limit, undefined, this.label);
 					return;
 				}
 				if (session.restoredFromDisk && session.client.canRetryLastTurn) {
@@ -1999,7 +2013,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 					} catch (fallbackError) {
 						this.logSink?.logError("claude.chat.resume_fallback_failed", fallbackError);
 						this.removeSession(fallback.key);
-						const fallbackLimit = detectLimitError(fallbackError, "claude");
+						const fallbackLimit = this.detectLimit(fallbackError, modelId);
 						if (fallbackLimit) {
 							this.limitGate.note("claude", fallbackLimit);
 							this.recordRateLimit({
@@ -2013,7 +2027,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 								window: fallbackLimit.window,
 								resetsAt: fallbackLimit.resetAt?.toISOString(),
 							}, "warn");
-							reportLimitNotice(progress, "claude", fallbackLimit);
+							reportLimitNotice(progress, "claude", fallbackLimit, undefined, this.label);
 							return;
 						}
 						throw fallbackError;
@@ -2060,7 +2074,30 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 	}
 
 	private createSessionClient(options: ConstructorParameters<typeof ClaudeAgentSession>[0]): ClaudeAgentSession {
-		return this.dependencies.createSessionClient ? this.dependencies.createSessionClient(options) : new ClaudeAgentSession(options);
+		// Every CLI process of a second account reads its login and sessions from its own config directory.
+		const env = claudeAccountEnv(this.account);
+		const withAccount = Object.keys(env).length > 0 ? { ...options, env: { ...options.env, ...env } } : options;
+		return this.dependencies.createSessionClient ? this.dependencies.createSessionClient(withAccount) : new ClaudeAgentSession(withAccount);
+	}
+
+	/** Durable state is per account: a session of one subscription cannot resume under another. */
+	private stateKey(baseKey: string): string {
+		return claudeAccountStateKey(baseKey, this.account.id);
+	}
+
+	/** The built-in account keeps the historical check of ~/.claude and ~/.claude.json. */
+	private hasLogin(): boolean {
+		return this.account.configDir ? hasClaudeLogin(this.account) : hasClaudeAccountEvidence();
+	}
+
+	private get label(): string {
+		return claudeProviderLabel(this.account);
+	}
+
+	/** CLAUDE_CONFIG_DIR for `claude auth …` of a second account; the built-in account adds nothing. */
+	private authEnv(): Record<string, string> | undefined {
+		const env = claudeAccountEnv(this.account);
+		return Object.keys(env).length > 0 ? env : undefined;
 	}
 
 	private createSession(value: {
@@ -2288,6 +2325,32 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		this.statusChanges.fire({ state: this.status, summary: this.statusSummary });
 	}
 
+	/**
+	 * A usage-limit error, with the window and reset Claude itself reported when it did: the error
+	 * text alone may name no window or only a clock time.
+	 */
+	private detectLimit(error: unknown, modelId: string): LimitMatch | undefined {
+		const limit = detectLimitError(error, "claude");
+		if (!limit) {
+			return undefined;
+		}
+		const reported = claudeReportedLimit(modelId, this.lastRateLimit, this.lastRateLimitAt, this.lastSubscriptionUsage, this.lastSubscriptionUsageAt);
+		if (!reported) {
+			return limit;
+		}
+		this.logSink?.log("claude.chat.limit_reported", {
+			window: reported.window,
+			resetsAt: reported.resetAt?.toISOString(),
+			textWindow: limit.window,
+			textResetsAt: limit.resetAt?.toISOString(),
+		});
+		return {
+			...limit,
+			...(reported.window ? { window: reported.window } : {}),
+			...(reported.resetAt ? { resetAt: reported.resetAt, provisional: false } : {}),
+		};
+	}
+
 	private recordRateLimit(info: ClaudeRateLimitInfo): void {
 		this.lastRateLimit = info;
 		this.lastRateLimitAt = Date.now();
@@ -2381,7 +2444,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 	}
 
 	private loadDurableSessions(): void {
-		const stored = this.workspaceState?.get<unknown>(CLAUDE_DURABLE_SESSION_STATE_KEY);
+		const stored = this.workspaceState?.get<unknown>(this.stateKey(CLAUDE_DURABLE_SESSION_STATE_KEY));
 		if (!Array.isArray(stored)) {
 			return;
 		}
@@ -2417,7 +2480,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 	}
 
 	private loadPendingRollover(): void {
-		const candidate = this.workspaceState?.get<unknown>(CLAUDE_PENDING_ROLLOVER_STATE_KEY);
+		const candidate = this.workspaceState?.get<unknown>(this.stateKey(CLAUDE_PENDING_ROLLOVER_STATE_KEY));
 		if (!candidate || typeof candidate !== "object") {
 			return;
 		}
@@ -2431,7 +2494,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			|| Date.now() - entry.armedAt > PROVIDER_PENDING_ROLLOVER_TTL_MS
 		) {
 			void Promise.resolve(
-				this.workspaceState?.update(CLAUDE_PENDING_ROLLOVER_STATE_KEY, undefined)
+				this.workspaceState?.update(this.stateKey(CLAUDE_PENDING_ROLLOVER_STATE_KEY), undefined)
 			).catch(error => this.logSink?.logError("claude.rollover_state.clear_failed", error));
 			return;
 		}
@@ -2453,7 +2516,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		this.pendingRollover = undefined;
 		if (this.workspaceState) {
 			await Promise.resolve(
-				this.workspaceState.update(CLAUDE_PENDING_ROLLOVER_STATE_KEY, undefined)
+				this.workspaceState.update(this.stateKey(CLAUDE_PENDING_ROLLOVER_STATE_KEY), undefined)
 			);
 		}
 	}
@@ -2472,7 +2535,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			this.durableSessions.set(this.durableSessionKey(entry.modelId, entry.conversationId), entry);
 		}
 		try {
-			await Promise.resolve(this.workspaceState.update(CLAUDE_DURABLE_SESSION_STATE_KEY, entries));
+			await Promise.resolve(this.workspaceState.update(this.stateKey(CLAUDE_DURABLE_SESSION_STATE_KEY), entries));
 		} catch (error) {
 			this.logSink?.logError("claude.session_state.persist_failed", error);
 			throw error;
@@ -2565,22 +2628,39 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		await this.persistDurableSessions();
 	}
 
+	/**
+	 * Every signed-in account offers its models under one label, "Opus 5.5 (Claude)", like the Codex
+	 * accounts: the active account is tried first, the others follow in account order, and an
+	 * account whose limit is used up drops out until it resets.
+	 */
 	private refreshSubagentProfiles(): void {
+		const scope = this.account.id;
+		if (this.statusKnown && this.status !== "connected") {
+			// An account without a login must not take the shared label from one that can run.
+			setSubagentModelProfiles("claude", [], scope);
+			return;
+		}
+		const active = this.account.id === resolveActiveClaudeAccountSetting(vscode.workspace.getConfiguration("llamacpp"));
 		setSubagentModelProfiles("claude", CLAUDE_SUBSCRIPTION_MODELS.map(model => {
 			const availability = this.getModelAvailability(model.id);
 			return {
-				// The chat model id (`claude::<id>`), so the bridge chat finds the model a subagent asks for.
-				id: encodeClaudeModelId(model.id),
+				// This account's picker model id, so the chat runs the subagent on this subscription.
+				id: encodeClaudeAccountModelId(this.account.id, model.id),
 				label: model.name,
 				provider: "claude",
 				defaultEffort: "high",
 				useWhen: model.description,
 				availability: availability.state,
-				availabilityReason: availability.reason,
+				availabilityReason: this.account.id ? `${this.label}: ${availability.reason}` : availability.reason,
 				availabilityCheckedAt: availability.checkedAt,
 				unavailableUntil: availability.unavailableUntil,
 			};
-		}));
+		}), scope, active ? 0 : 1 + (this.account.order ?? 0));
+	}
+
+	/** "Opus 5.5 (Claude)" becomes "Opus 5.5 (Claude 2)" for the second account, so the picker groups it apart. */
+	private modelName(name: string): string {
+		return name.replace(/\(Claude\)$/, `(${this.label})`);
 	}
 
 	private pruneSessions(): void {
@@ -2636,6 +2716,10 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		this.statusKnown = true;
 		if (this.status !== status) {
 			this.status = status;
+			if (status !== "connected") {
+				// Signed out or off: another account's same models stand in for subagents.
+				this.refreshSubagentProfiles();
+			}
 			this.statusChanges.fire({ state: status, summary: this.statusSummary });
 		}
 		return { state: this.status, summary: this.statusSummary };
@@ -2671,8 +2755,8 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			const actualContextLength = resolveClaudeContextLength(contextLength, observed?.rawMaxTokens);
 			const actualOutputTokens = Math.min(maxOutputTokens, Math.max(1_024, actualContextLength - 1));
 			const info = modelInformation({
-				id: encodeClaudeModelId(model.id),
-				name: model.name,
+				id: encodeClaudeAccountModelId(this.account.id, model.id),
+				name: this.modelName(model.name),
 				family: "claude",
 				version: model.id,
 				contextWindowTokens: actualContextLength,
@@ -2799,12 +2883,18 @@ export function buildClaudeInitialConversationText(
 
 	// A fixed 24-message tail after a provider switch held only the other provider's last
 	// tool rounds, so Claude lost the user's recent requests and resumed an older task.
-	const head = messages.length > 0 ? JSON.stringify(serializeMessage(messages[0])) : undefined;
+	// The head keeps the instructions and the chat's summary of its compacted turns: after a
+	// cleaning the new session knew nothing of the work before the kept turns.
+	let headCount = messages.length > 0 ? 1 : 0;
+	while (headCount < messages.length - 1 && isConversationSummaryMessage(messages[headCount])) {
+		headCount++;
+	}
+	const head = messages.slice(0, headCount).map(message => JSON.stringify(serializeMessage(message)));
 	const tail: string[] = [];
 	let tailStart = messages.length;
 	let used = prefix.length + separator.length + 2
-		+ (head ? head.length + 1 : 0) + CLAUDE_REQUESTS_DIGEST_MAX_CHARS + 256;
-	for (let index = messages.length - 1; index >= (head ? 1 : 0); index--) {
+		+ head.reduce((sum, encoded) => sum + encoded.length + 1, 0) + CLAUDE_REQUESTS_DIGEST_MAX_CHARS + 256;
+	for (let index = messages.length - 1; index >= headCount; index--) {
 		const encoded = JSON.stringify(serializeMessage(messages[index]));
 		if (tail.length > 0 && used + encoded.length + 1 > normalizedMaxChars) {
 			break;
@@ -2813,10 +2903,10 @@ export function buildClaudeInitialConversationText(
 		used += encoded.length + 1;
 		tailStart = index;
 	}
-	const omitted = messages.slice(head ? 1 : 0, tailStart);
+	const omitted = messages.slice(headCount, tailStart);
 	const digest = summarizeEarlierUserRequests(omitted);
 	const marker = JSON.stringify({ role: "system", content: `[${omitted.length} older messages omitted to fit Claude context]${digest}` });
-	let text = `${prefix}${separator}[${[...(head ? [head] : []), marker, ...tail].join(",")}]`;
+	let text = `${prefix}${separator}[${[...head, marker, ...tail].join(",")}]`;
 	if (text.length > normalizedMaxChars) {
 		const cut = "\n...[conversation truncated]...\n";
 		const contentBudget = Math.max(0, normalizedMaxChars - cut.length);
@@ -2828,7 +2918,7 @@ export function buildClaudeInitialConversationText(
 	return {
 		text,
 		truncated: true,
-		includedMessages: (head ? 1 : 0) + tail.length,
+		includedMessages: headCount + tail.length,
 	};
 }
 

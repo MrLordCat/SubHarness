@@ -52,6 +52,19 @@ suite("Codex limit gate", () => {
 		}
 	});
 
+	test("with both windows used up the later reset decides", () => {
+		const decision = resolveCodexLimitGate(snapshot({
+			primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: 1_793_800_000 },
+			secondary: { usedPercent: 100, windowDurationMins: 10_080, resetsAt: 1_794_300_000 },
+			rateLimitReachedType: "primary",
+		}));
+		assert.strictEqual(decision.kind, "limited");
+		if (decision.kind === "limited") {
+			assert.strictEqual(decision.match.window, "weekly");
+			assert.strictEqual(decision.match.resetAt?.toISOString(), new Date(1_794_300_000 * 1_000).toISOString());
+		}
+	});
+
 	test("no window numbers leave the current gate untouched", () => {
 		assert.deepStrictEqual(resolveCodexLimitGate(undefined), { kind: "unknown" });
 		assert.deepStrictEqual(resolveCodexLimitGate(snapshot({ rateLimitReachedType: "primary" })), { kind: "unknown" });

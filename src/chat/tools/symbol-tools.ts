@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { WRITE_OUTSIDE_WORKSPACE } from "../approvals";
 import { checkCancellation, inputRecord, integerField, optionalStringField, stringField } from "./core-tools";
 import { CHAT_TOOL_GROUPS, type ChatTool, type ChatToolConfirmation } from "./types";
 import {
@@ -249,6 +250,7 @@ export function createSymbolTools(options: { roots?: WorkspaceRoots } = {}): Cha
 						title: "Rename a symbol outside the workspace",
 						detail: path.resolve(value),
 						reason: "The path is outside the open workspace folders.",
+						kinds: [WRITE_OUTSIDE_WORKSPACE],
 					};
 				}
 				const file = resolveToolPath(record.filePath, currentRoots);
@@ -259,6 +261,7 @@ export function createSymbolTools(options: { roots?: WorkspaceRoots } = {}): Cha
 					title: "Rename a symbol outside the workspace",
 					detail: file,
 					reason: "The path is outside the open workspace folders.",
+					kinds: [WRITE_OUTSIDE_WORKSPACE],
 				};
 			} catch {
 				return undefined;

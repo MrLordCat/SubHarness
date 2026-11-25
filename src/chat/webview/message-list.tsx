@@ -1,7 +1,8 @@
 import type { ComponentChildren } from "preact";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ChatMessage } from "../shared/protocol";
 import { VirtualLayout } from "../shared/virtual-layout";
+import { otherSubscriptionModels } from "./format";
 import { MessageItem } from "./message";
 import type { ChatStore } from "./store";
 
@@ -25,7 +26,8 @@ function compactionBoundaryId(messages: ChatMessage[]): string | undefined {
 		for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
 			const part = parts[partIndex];
 			if (part.kind === "compaction") {
-				return part.keepFromMessageId;
+				// A cleaning that only stubbed results summarizes nothing.
+				return part.method === "none" ? undefined : part.keepFromMessageId;
 			}
 		}
 	}
@@ -50,6 +52,14 @@ export function MessageList({ store, running, context }: MessageListProps) {
 	const [hasNew, setHasNew] = useState(false);
 	const latestRef = useRef<{ source: ChatMessage[]; count: number; id: string | undefined; text: string } | undefined>(undefined);
 	const [, setRevision] = useState(0);
+
+	// The newest answer's limit card offers the same model of the provider's other subscriptions with room.
+	const lastMessage = store.messages.at(-1);
+	const lastModelId = lastMessage?.role === "assistant" ? lastMessage.modelId : undefined;
+	const alternatives = useMemo(
+		() => otherSubscriptionModels(lastModelId, store.models, store.quota, Date.now()),
+		[lastModelId, store.models, store.quota]
+	);
 
 	// A starting run closes the editor; the host would drop it anyway.
 	useEffect(() => {
@@ -277,6 +287,7 @@ export function MessageList({ store, running, context }: MessageListProps) {
 					compactionBoundary={message.id === boundaryId}
 					isLast={index === store.messages.length - 1}
 					autoContinue={index === store.messages.length - 1 ? store.session?.autoContinue : undefined}
+					subscriptionAlternatives={index === store.messages.length - 1 ? alternatives : undefined}
 					changedFilesSinceTurn={message.id === editingId ? store.filesChangedSince(message.turn) : 0}
 					context={context}
 					store={store}

@@ -4,6 +4,7 @@ import { attachmentLabel, attachmentTitle, imageMimeType } from "../shared/attac
 import {
 	PASTED_FILE_MAX_BYTES,
 	PASTED_FILES_LIMIT,
+	type ChatApprovalKind,
 	type ChatAttachment,
 	type ChatContextSettings,
 	type ChatModelGroup,
@@ -24,6 +25,8 @@ interface ComposerProps {
 	run: ChatRunState;
 	models: ChatModelGroup[];
 	tools: ChatToolGroup[];
+	/** Kinds of actions that run without an approval card; the Tools list shows and revokes them. */
+	alwaysAllowed?: ChatApprovalKind[];
 	selectedModelId: string | undefined;
 	selectedThinking: string | undefined;
 	quota: ChatProviderQuota[];
@@ -127,6 +130,7 @@ export function Composer({
 	run,
 	models,
 	tools,
+	alwaysAllowed,
 	selectedModelId,
 	selectedThinking,
 	quota,
@@ -437,7 +441,7 @@ export function Composer({
 						{selectedModel?.thinking
 							? <ThinkingPicker thinking={selectedModel.thinking} selected={selectedThinking} onSelect={onSelectThinking} />
 							: null}
-						<ToolPicker tools={tools} onSetToolsEnabled={onSetToolsEnabled} />
+						<ToolPicker tools={tools} alwaysAllowed={alwaysAllowed ?? []} onSetToolsEnabled={onSetToolsEnabled} />
 					</div>
 					{/* Status and buttons wrap together: on a second line the status starts left and the buttons stay right. */}
 					<div class="composer-actions">

@@ -49,11 +49,10 @@ column. Quick Access stays in the **SubHarness** activity bar container.
   remembered per model.
 - **Tools** lists every tool the model may use. The bridge's own tools are on;
   tools of other extensions and MCP servers are off until you enable them.
-  The choice is remembered. The **Allow without asking…** link beside an
-  external tool group opens VS Code's **Manage Tool Approval** at profile scope.
-  Mark a server or tool as always allowed there to stop its approval dialog.
-  **SubHarness: Allow External Tools Without Asking** opens the same setting
-  (also in the chat view's **…** menu).
+  The choice is remembered. **Always allowed** at the end of the list shows
+  the kinds of actions that run without an approval card; **Revoke** makes one
+  ask again. **SubHarness: Manage Always Allowed Actions** (also in the chat
+  view's **…** menu) lists and revokes them too.
 - The limits chip shows the 5-hour window of the selected Codex or Claude
   subscription, the weekly window instead once it is used up, or the DeepSeek
   balance. Hover it for every window; click it for all providers and reset
@@ -145,7 +144,7 @@ reloaded; the error says why when it knows and lists the chat's live
 terminals.
 
 A turn has no limit on tool rounds: it runs until the model answers without a
-tool call or you press **Stop**. A subagent stops after 100 tool rounds.
+tool call or you press **Stop**. A subagent stops after 1000 tool rounds.
 
 When an answer used tools, its text after the last tool round is shown in a
 separate **Answer** block with a tinted background, apart from the commentary
@@ -185,16 +184,32 @@ project and the global ones, with search and a scope filter. Click an entry to
 read it, then **Edit**, **Pin**/**Unpin** or **Delete**; **New** adds an
 entry. Pinned entries reach the model with every new chat.
 
-The model runs tools without asking, with one exception: a terminal command
-that matches a rule in `llamacpp.chat.dangerousCommands` waits for your
-approval in the chat. The default rules cover force pushes, hard resets,
-recursive deletes, disk formatting, publishing packages and similar commands.
-Edit the list in Settings; each entry is a regular expression. `delete_file`
-also asks before it deletes a folder or anything outside the workspace.
+The model runs tools without asking, with these exceptions, which wait for your
+approval in the chat:
+
+- a terminal command or a `run_checks` command that matches a rule in
+  `llamacpp.chat.dangerousCommands`. The default rules cover force pushes, hard
+  resets, recursive deletes, disk formatting, publishing packages and similar
+  commands. Edit the list in Settings; each entry is a regular expression;
+- creating, editing, renaming in or deleting a file outside the workspace;
+- deleting a whole folder.
+
+The card offers **Allow**, **Always allow** and **Deny**. **Always allow**
+covers the kind of action, not the one file or command line: every write
+outside the workspace, every folder deletion, or every command that one rule
+holds, such as every `git restore`. The card names what it covers. The choice
+holds in every workspace and is saved in `llamacpp.chat.alwaysAllow`; only
+your user setting counts, so a workspace cannot allow itself. A waiting card of
+the same kind in another chat or subagent goes through at once. A command that
+matches several rules, such as `git restore x; rm -rf y`, asks until every one
+of them is allowed.
 
 The SubHarness chat offers its built-in tools and tools from MCP servers and
-other extensions in the **Tools** picker. External tools are off until enabled;
-VS Code may ask in a modal dialog before running them.
+other extensions in the **Tools** picker. External tools are off until enabled.
+They run through VS Code, which asks in its own modal dialog before every tool
+that may change something, such as an MCP tool not marked read-only. VS Code
+applies its saved tool approvals only inside its own chat sessions, so for
+calls from this chat that dialog cannot be skipped.
 
 ## Changed files: Keep and Undo
 
@@ -217,6 +232,16 @@ When two chats work at the same time, a chat lists only the files its own
 edit tools wrote, and says how many other changed files it left out. Undo in
 one chat therefore cannot revert another chat's work. Do not let two chats
 edit the same file.
+
+The agent reads the same changes with the `changes_diff` tool: a unified diff
+of the running turn (`scope: "turn"`, the default, with its subagents' edits)
+or of everything waiting for Keep or Undo (`scope: "pending"`). It starts with
+a list of the files and their line counts. `paths` narrows it to files or
+folders, `contextLines` sets the unchanged lines around a change (3 by
+default), and a diff over `maxChars` (40,000 by default) is cut and names the
+files left out. A subagent can call it too, so the agent can ask a cheap model
+to review the turn's changes against the request before it answers. The tool
+only reads the snapshots and starts none.
 
 ## Reading the chat
 
@@ -321,6 +346,13 @@ Models from API profiles (Cursor and other OpenAI-compatible gateways) are
 listed last and marked as paid per use; local llama.cpp servers stay in the
 local group.
 
+When a model's subscription limit is used up on every account that offers it,
+the tool lists it apart as used up. A call to it starts nothing and answers at
+once: the reason, the reset time when the provider reports it, and the models
+that can run now. An open subagent on such a model answers its next task the
+same way and stays open, unless the same model of another account can take it
+over.
+
 ## Long chats
 
 A chat keeps its newest 1,000 requests and their answers. Older requests are
@@ -338,16 +370,61 @@ your latest message reach the model as their first 8,000 and last 3,800
 characters.
 
 A DeepSeek model writes the summary (up to 32,000 characters) when a DeepSeek
-API key is configured. Without a key, or when DeepSeek fails (for example an
-empty balance), the model taking the chat over writes it from the same prompt,
-without tools; if that fails too, the bridge builds an extract of the older
-turns. The summary also carries your summarized requests verbatim (up to 2,000
+API key is configured. Without a key, or when DeepSeek fails, the next writer
+takes the same prompt, without tools:
+
+1. a local llama.cpp model with at least 32,000 tokens of context, other than
+   the chat model; it gets two minutes;
+2. the model taking the chat over;
+3. if that fails too, the bridge builds an extract of the older turns.
+
+An empty DeepSeek balance is remembered for 30 minutes for that key, so
+further compactions do not ask DeepSeek again until then. The summary also carries your summarized requests verbatim (up to 2,000
 characters each and 12,000 in total; when there are more, the first and the
 newest stay) and names the chat's log file, so the model can look up details
 it left out.
 
 A card in the answer shows what was summarized, who wrote the summary, why a
 fallback was used, and your requests.
+
+### Self-cleaning
+
+A chat cleans its context, so you do not need to start a new one. The budget is
+`llamacpp.chatContextBudget`: 200,000 tokens by default, at least 64,000, and 0
+turns cleaning off. When a new request would be over it, the chat first cleans
+the history down to about 60% of the budget, and no higher than 70% of
+`llamacpp.providerSwitchContextTokens`, the most a new provider session
+replays:
+
+1. Stale tool results from earlier requests become a one-line stub with their
+   size and first line. A result is stale when:
+   - it is a file read, and the file was edited or read again in full later;
+   - it is a command, check, test run or browser snapshot that ran again later;
+   - it is a search, file list or web page from an earlier request;
+   - it is 8,000 characters or longer and two requests old.
+
+   Results shorter than 1,200 characters stay. So do subagent reports, answers
+   to questions, the todo list, memory, and everything of the current request.
+2. When that is not enough, older turns are summarized as on a model switch.
+
+Sizes are counted as the provider counts them: the chat's estimate times the
+ratio of the last reported prompt to its estimate. So a session that Claude or
+Codex compacted on its own does not start a cleaning. A cleaning that would
+save less than 10% of the budget is skipped.
+
+Cleaning happens only at the start of a new request, never inside a running
+one, so the prompt cache is rebuilt once per cleaning. The first request after
+a cleaning starts the provider's session again from the cleaned history:
+Claude, Codex, Cursor and Coco open a new native session from it, as after a
+model switch, and HTTP models drop their compacted snapshot. Until a model
+answers after the cleaning, a retry starts again from the cleaned history too.
+The provider's own compaction near the edge of its window stays a safety net
+for one very long request.
+
+The card **Context cleaned** shows how many results were stubbed, how many
+messages were summarized, the size before and after, and the budget. The full
+messages stay in the chat and its log. Session Quality counts the cleanings and
+the tokens they saved.
 
 The chat window renders only the visible messages. Long tool output and long
 thinking text reach the window as short previews and load in full when you
@@ -372,8 +449,21 @@ unless it is more than a day old. The limit card shows **Continue
 automatically after the reset** with the time; clear it to wait for you
 instead. Sending a message or pressing Retry yourself replaces the pending
 continuation. After three continuations in a row that hit the limit again,
-auto-continue stops until you tick the box again. Weekly limits and empty
-balances are not continued.
+auto-continue stops until you tick the box again. A weekly limit shows the
+box cleared, with the real reset date and the wait in days (`in 2 d 5 h`);
+tick it to continue then. Empty balances are not continued.
+
+With a second subscription of the same provider (two ChatGPT or two Claude
+accounts), the limit card also offers **Continue on Codex 2** or **Continue on
+Claude 2** while that subscription has room. It switches the chat to the same
+model of that account and continues the answer like Retry.
+
+The window and the reset come from the provider's own report when it gives
+one: Claude's rate-limit event of that request or a usage report of the last
+ten minutes, and Codex's rate-limit windows (of two used-up windows, the one
+that resets later). Otherwise they are read from the error text, which also
+understands a date (`resets Nov 28, 4pm`, `try again at Nov 28th, 2026 4:12
+PM`).
 
 If VS Code closes or reloads while an answer runs, the chat reopens with a
 note that the answer was interrupted, and **Retry**, which continues it the
@@ -402,10 +492,18 @@ Drafts are kept in the workspace state.
 ## Checking the chat's look
 
 `node scripts/build-webview.mjs --harness` builds a browser harness of the
-chat with a fake host in `artifacts/chat-harness/`. Its URL takes `theme`
-(`dark`, `dark-plus`, `abyss`, `light`, `hc-dark`, `hc-light`), `host=editor`
-and `count` (number of messages). `node scripts/chat-harness-shots.mjs` opens it
-in headless Edge or Chrome and saves screenshots of fixed scenarios (light
-theme errors, the cards, a wide editor tab, a 320 px sidebar with its popups)
-to `artifacts/screens/`; `--only=name,name` picks scenarios. It shows no
-dialogs, so an agent can run it unattended.
+chat with a fake host in `artifacts/chat-harness/`. The harness URL takes
+`theme` (`dark`, `dark-plus`, `abyss`, `light`, `hc-dark`, `hc-light`),
+`host=editor` and `count` (number of messages).
+
+`node scripts/chat-harness-shots.mjs` opens the harness in headless Edge or
+Chrome and saves screenshots of fixed scenarios (light theme errors, the
+cards, a wide editor tab, a 320 px sidebar with its popups) to
+`artifacts/screens/`. The script serves `artifacts/chat-harness/` itself on a
+random local port, so no python or http-server is needed. `--only=name,name`
+picks scenarios; `--widths=320,420,1000` repeats every shot at each width and
+adds a `-<width>` suffix to the file name. Without `--widths`, each scenario
+keeps its own width and file name.
+
+It shows no dialogs and closes its server, so an agent can run it unattended.
+If the harness is missing, it prints the build command and exits with code 1.

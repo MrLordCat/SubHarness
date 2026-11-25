@@ -60,6 +60,7 @@ export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSour
 				askQuestions: context?.askQuestions,
 				listTools: context?.listTools,
 				requestTools: context?.requestTools,
+				changesDiff: context?.changesDiff,
 			});
 			const result = typeof output === "string" ? { text: output } : output;
 			return { text: result.text, isError: false, ...(result.images && result.images.length > 0 ? { images: result.images } : {}) };

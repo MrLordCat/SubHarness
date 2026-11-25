@@ -239,8 +239,11 @@ export class SessionQualityPanel {
 				toolCallRepairRetries: summary.toolCallRepairRetries,
 				toolLoopsDetected: summary.toolLoopsDetected,
 				compactedTurns: summary.compactedTurns,
+				chatCleanings: summary.chatCleanings,
+				chatCleaningSavedTokens: summary.chatCleaningSavedTokens,
 				overflowRetries: summary.overflowRetries,
 			},
+			cleanings: this._tracker.cleanings.slice(-20),
 			records: rawRecords?.map((record, index) => ({
 				index: index + 1,
 				...record.turn,
@@ -696,7 +699,7 @@ function renderCacheTab(d) {
 	h += metric("First token", DURATION(s.averageFirstTokenLatencyMs), 'Average TTFT', s.averageFirstTokenLatencyMs > 10000 ? 'tone-warn' : 'tone-info');
 	h += metric("Generation", s.averageTokensPerSecond ? FMT1(s.averageTokensPerSecond) : 'n/a', s.averageTokensPerSecond ? 'tokens per second' : 'No speed sample', 'tone-purple');
 	const reliabilityTone = seriousIssues > 0 ? 'tone-bad' : s.repairedToolCalls > 0 ? 'tone-warn' : 'tone-good';
-	h += metric("Reliability", seriousIssues > 0 ? seriousIssues + ' issues' : 'Healthy', s.totalToolCalls + ' calls · ' + s.repairedToolCalls + ' repaired · ' + s.compactedTurns + ' compacted', reliabilityTone);
+	h += metric("Reliability", seriousIssues > 0 ? seriousIssues + ' issues' : 'Healthy', s.totalToolCalls + ' calls · ' + s.repairedToolCalls + ' repaired · ' + s.compactedTurns + ' compacted' + ' · ' + s.chatCleanings + ' cleaned' + (s.chatCleanings > 0 ? ' (−' + FMT_SHORT(s.chatCleaningSavedTokens) + ')' : ''), reliabilityTone);
 	h += '</section>';
 
 	// Actionable status banner
@@ -717,6 +720,27 @@ function renderCacheTab(d) {
 				? 'The first segment paid a real cold-start cost, but final/continuation cache health recovered above 90%.'
 				: s.turns > 0 ? 'No server-reported cache or tool reliability problems.' : 'Start a model turn and this dashboard will update automatically.';
 	h += '<div class="diagnostic ' + diagnosticClass + '"><div class="diagnostic-icon">' + diagnosticIcon + '</div><div><div class="diagnostic-title">' + diagnosticTitle + '</div><div class="diagnostic-copy">' + diagnosticCopy + '</div></div></div>';
+
+	// Context self-cleaning history: what each cleaning stubbed or summarized, and what it saved.
+	const cleanings = Array.isArray(d.cleanings) ? d.cleanings : [];
+	if (cleanings.length) {
+		h += '<section class="section"><div class="section-heading"><h2>Chat cleanings</h2><span class="section-note">Newest first · ' + FMT(s.chatCleanings ?? cleanings.length) + ' recorded · ' + FMT_SHORT(s.chatCleaningSavedTokens ?? 0) + ' tokens saved</span></div>';
+		h += '<div class="table-shell"><table class="turn-table"><thead><tr>';
+		h += '<th>At</th><th>Chat</th><th>Model</th><th>Before → after</th><th>Stale results</th><th>Summarized</th><th>Duration</th>';
+		h += '</tr></thead><tbody>';
+		for (const c of [...cleanings].reverse()) {
+			h += '<tr>';
+			h += '<td class="compact-number" title="' + new Date(c.at).toLocaleString() + '">' + CLOCK(c.at) + '</td>';
+			h += '<td class="compact-number" title="' + escAttr(String(c.conversationId || 'unknown')) + '">' + (c.conversationId ? esc(String(c.conversationId).slice(0, 8)) : '—') + '</td>';
+			h += '<td class="model-cell" title="' + escAttr(String(c.modelId || '')) + '">' + esc(MODEL_LABEL(c.modelId)) + '</td>';
+			h += '<td class="compact-number" title="' + FMT(c.tokensBefore) + ' → ' + FMT(c.tokensAfter) + ' tokens of a ' + FMT(c.budgetTokens) + ' token budget">' + FMT_SHORT(c.tokensBefore) + ' → ' + FMT_SHORT(c.tokensAfter) + '</td>';
+			h += '<td>' + FMT(c.staleResults) + '</td>';
+			h += '<td>' + (c.summary ? FMT(c.summarizedMessages) : 'kept') + '</td>';
+			h += '<td>' + DURATION(c.durationMs) + '</td>';
+			h += '</tr>';
+		}
+		h += '</tbody></table></div></section>';
+	}
 
 	// Provider health stays visible even when there are no Claude user turns.
 	const keepAlive = d.providerHealth && d.providerHealth.claudeCacheKeepAlive;

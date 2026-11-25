@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import type { ChatCleaningEvent } from "../chat/context-cleaning";
 import type { LlamaChatContextUsageMetrics, LlamaChatTurnMetrics } from "../llama-provider";
 
 export interface SessionTurnRecord {
@@ -58,6 +59,10 @@ export interface SessionQualitySummary {
 	toolCallRepairRetries: number;
 	toolLoopsDetected: number;
 	compactedTurns: number;
+	/** Context self-cleanings recorded after they finished. */
+	chatCleanings: number;
+	/** Provider tokens the cleanings saved: tokensBefore - tokensAfter, summed. */
+	chatCleaningSavedTokens: number;
 	overflowRetries: number;
 }
 
@@ -84,11 +89,15 @@ function extractModelLabel(modelId: string): string {
 export class SessionQualityTracker {
 	private readonly contexts = new Map<string, LlamaChatContextUsageMetrics>();
 	private readonly _records: SessionTurnRecord[] = [];
+	private readonly _cleanings: ChatCleaningEvent[] = [];
 	private readonly _onDidChange = new vscode.EventEmitter<void>();
 	readonly onDidChange = this._onDidChange.event;
 
 	/** Read-only view of recorded turns (most recent last). */
 	get records(): readonly SessionTurnRecord[] { return this._records; }
+
+	/** Read-only view of finished cleanings (most recent last, at most 200). */
+	get cleanings(): readonly ChatCleaningEvent[] { return this._cleanings; }
 
 	recordContext(context: LlamaChatContextUsageMetrics): void {
 		this.contexts.set(context.requestId, { ...context });
@@ -106,6 +115,14 @@ export class SessionQualityTracker {
 
 	updateTurn(turn: LlamaChatTurnMetrics): void {
 		this.storeTurn(turn, false);
+	}
+
+	recordCleaning(event: ChatCleaningEvent): void {
+		this._cleanings.push({ ...event });
+		if (this._cleanings.length > 200) {
+			this._cleanings.shift();
+		}
+		this._onDidChange.fire();
 	}
 
 	private storeTurn(turn: LlamaChatTurnMetrics, finalized: boolean): void {
@@ -170,6 +187,7 @@ export class SessionQualityTracker {
 	clear(): void {
 		this.contexts.clear();
 		this._records.length = 0;
+		this._cleanings.length = 0;
 		this._onDidChange.fire();
 	}
 
@@ -316,6 +334,8 @@ export class SessionQualityTracker {
 			toolCallRepairRetries: this._records.reduce((sum, record) => sum + record.turn.toolCallRepairRetries, 0),
 			toolLoopsDetected: this._records.filter(record => record.turn.toolLoopDetected).length,
 			compactedTurns: this._records.filter(record => record.context?.autoCompacted || record.context?.hardCompacted).length,
+			chatCleanings: this._cleanings.length,
+			chatCleaningSavedTokens: this._cleanings.reduce((sum, event) => sum + event.tokensBefore - event.tokensAfter, 0),
 			overflowRetries: this._records.filter(record => record.turn.retriedAfterOverflow).length,
 		};
 	}

@@ -41,7 +41,15 @@ import {
 	codexProviderLabel,
 	resolveCodexAccounts,
 } from "./codex/accounts";
-import { ClaudeChatModelProvider, type ClaudeLiveTurnUpdate } from "./claude/claude-provider";
+import { ClaudeChatModelProvider, clearPersistedClaudeSessionState, type ClaudeLiveTurnUpdate } from "./claude/claude-provider";
+import {
+	CLAUDE_DEFAULT_ACCOUNT_ID,
+	decodeClaudeAccountModelId,
+	findClaudeAccount,
+	resolveActiveClaudeAccountId,
+	claudeProviderLabel,
+	resolveClaudeAccounts,
+} from "./claude/accounts";
 import { CocoChatModelProvider } from "./coco/coco-provider";
 import { BUILTIN_PROVIDER_SOURCES, ownsHttpModel, providerSourceId, type ChatProviderRegistration } from "./providers/provider-registry";
 import { providerSnapshots } from "./providers/provider-snapshot";
@@ -595,6 +603,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		getSubscriptionStatuses: () => subscriptionStatuses,
 		getProviderSources: () => compositeProvider.registry.sources,
 		getCatalogLoadedAt: key => apiProviderService.catalogLoadedAt(key),
+		log: (event, data) => logService.log(event, data),
 	});
 	context.subscriptions.push(providerDirectory);
 
@@ -632,11 +641,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return typeof stored === "string" && codexProviders.has(stored) ? stored : undefined;
 	};
 	context.subscriptions.push({ dispose: () => llamaProvider.disposeCursorTransport() });
-	const claudeProvider = new ClaudeChatModelProvider(extVersion, logService, context.workspaceState);
+	const claudeAccounts = resolveClaudeAccounts(
+		vscode.workspace.getConfiguration(CONFIG_SECTION).get<unknown>("claudeAccounts", [])
+	);
+	const claudeProviders = new Map<string, ClaudeChatModelProvider>();
+	for (const account of claudeAccounts) {
+		claudeProviders.set(account.id, new ClaudeChatModelProvider(extVersion, logService, context.workspaceState, {}, account));
+	}
+	const activeClaudeAccountId = (): string => resolveActiveClaudeAccountId(
+		claudeAccounts,
+		vscode.workspace.getConfiguration(CONFIG_SECTION).get("claudeActiveAccount", "")
+	);
+	const activeClaude = (): ClaudeChatModelProvider =>
+		claudeProviders.get(activeClaudeAccountId()) ?? claudeProviders.get(CLAUDE_DEFAULT_ACCOUNT_ID)!;
+	const claudeAccountStatusKey = (accountId: string): string => accountId ? `claude:${accountId}` : "claude";
+	const allClaudeProviders = (): Array<[string, ClaudeChatModelProvider]> => [...claudeProviders.entries()];
+	/** Set by "Add Claude Account": the sign-in flow starts on its own after the reload. */
+	const CLAUDE_PENDING_SIGN_IN_KEY = "llamacpp.claudePendingSignIn.v1";
+	const pendingClaudeSignIn = (): string | undefined => {
+		const stored = context.globalState.get<unknown>(CLAUDE_PENDING_SIGN_IN_KEY);
+		return typeof stored === "string" && claudeProviders.has(stored) ? stored : undefined;
+	};
 	const cocoProvider = new CocoChatModelProvider({ state: context.workspaceState, catalogState: context.globalState, storageRoot: path.join(context.storageUri?.fsPath ?? context.globalStorageUri.fsPath, "coco-history"), log: (event,data) => logService.log(event,data) });
-	context.subscriptions.push(claudeProvider);
 	context.subscriptions.push(cocoProvider);
 	for (const provider of codexProviders.values()) {
+		context.subscriptions.push(provider);
+	}
+	for (const provider of claudeProviders.values()) {
 		context.subscriptions.push(provider);
 	}
 	const codexRegistrations: ChatProviderRegistration[] = allCodexProviders().map(([accountId, provider]) => ({
@@ -646,10 +677,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		...(accountId ? {} : { source: BUILTIN_PROVIDER_SOURCES.find(source => source.id === "codex") }),
 		ownsModel: (modelId: string) => decodeCodexAccountModelId(modelId, accountId) !== undefined,
 	}));
+	const claudeRegistrations: ChatProviderRegistration[] = allClaudeProviders().map(([accountId, provider]) => ({
+		id: claudeAccountStatusKey(accountId),
+		provider,
+		onForeignRequest: () => provider.refreshSubscriptionUsage(),
+		abandonConversation: (id: string) => provider.abandonConversation(id),
+		...(accountId ? {} : { source: BUILTIN_PROVIDER_SOURCES.find(source => source.id === "claude") }),
+		ownsModel: (modelId: string) => decodeClaudeAccountModelId(modelId, accountId) !== undefined,
+	}));
 	const subscriptionProviders = [
 		...codexRegistrations,
-		{ id: "claude", provider: claudeProvider, onForeignRequest: () => claudeProvider.refreshSubscriptionUsage(),
-			abandonConversation: (id: string) => claudeProvider.abandonConversation(id) },
+		...claudeRegistrations,
 		{ id: "coco", provider: cocoProvider, onForeignRequest: (id?: unknown) => cocoProvider.onForeignRequest(id),
 			abandonConversation: (id: string) => cocoProvider.onForeignRequest(id) },
 	];
@@ -685,7 +723,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const quotaChanges = new vscode.EventEmitter<void>();
 	context.subscriptions.push(
 		quotaChanges,
-		claudeProvider.onDidChangeStatus(() => quotaChanges.fire()),
+		...[...claudeProviders.values()].map(provider => provider.onDidChangeStatus(() => quotaChanges.fire())),
 		...[...codexProviders.values()].map(provider => provider.onDidChangeStatus(() => quotaChanges.fire())),
 	);
 	registerChatWindow(context, {
@@ -693,14 +731,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		log: (event, data) => logService.log(event, data),
 		userAgent: ua,
 		memory: memoryService,
+		sessionQuality,
 		quota: {
 			snapshot: () => [
 				...codexAccounts.map(account => subscriptionQuota(codexProviderLabel(account), codexProviders.get(account.id)!.subscriptionWindows)),
-				subscriptionQuota("Claude", claudeProvider.subscriptionWindows),
+				...claudeAccounts.map(account => subscriptionQuota(claudeProviderLabel(account), claudeProviders.get(account.id)!.subscriptionWindows)),
 				balanceQuota("DeepSeek", llamaProvider.deepSeekBalanceSummary),
 			].filter(quota => quota !== undefined),
 			refresh: async () => {
-				await Promise.allSettled([...codexAccounts.map(account => codexProviders.get(account.id)!.refreshStatus()), claudeProvider.refreshSubscriptionUsage(true), llamaProvider.refreshDeepSeekBalance(true)]);
+				await Promise.allSettled([...codexAccounts.map(account => codexProviders.get(account.id)!.refreshStatus()), ...claudeAccounts.map(account => claudeProviders.get(account.id)!.refreshSubscriptionUsage(true)), llamaProvider.refreshDeepSeekBalance(true)]);
 			},
 			onDidChange: quotaChanges.event,
 		},
@@ -710,15 +749,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					const provider = codexProviders.get(account.id)!;
 					return provider.needsSignIn ? [{ provider: codexAccountStatusKey(account.id), label: `Sign in to ${codexProviderLabel(account)}`, detail: provider.cliAvailable ? "ChatGPT subscription" : "ChatGPT subscription; downloads the Codex CLI first" }] : [];
 				}),
-				...(claudeProvider.needsSignIn
-					? [{ provider: "claude", label: "Sign in to Claude", detail: "Claude subscription, through the bundled Claude Code" }]
-					: []),
+				...(claudeAccounts.flatMap(account => {
+					const provider = claudeProviders.get(account.id)!;
+					return provider.needsSignIn ? [{ provider: claudeAccountStatusKey(account.id), label: `Sign in to ${claudeProviderLabel(account)}`, detail: "Claude subscription, through the bundled Claude Code" }] : [];
+				})),
 			],
 			signIn: async provider => {
 				if (provider === "codex" || provider.startsWith("codex:")) {
 					await vscode.commands.executeCommand("llamacpp.codexAccountSignIn", provider === "codex" ? "" : provider.slice(6));
-				} else if (provider === "claude") {
-					await vscode.commands.executeCommand("llamacpp.claudeSignIn");
+				} else if (provider === "claude" || provider.startsWith("claude:")) {
+					await vscode.commands.executeCommand("llamacpp.claudeAccountSignIn", provider === "claude" ? "" : provider.slice(7));
 				}
 			},
 			onDidChange: quotaChanges.event,
@@ -752,9 +792,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		getLastPromptCache: () => lastPromptCache,
 		getSessionSummary: () => sessionQuality.count === 0 ? "No turns" : `${sessionQuality.count} turns / cache ${sessionQuality.summary.cacheHitPercent ?? "n/a"}%`,
 		getExpiredMemoryCount: () => memoryService.expiredCount,
-		getClaudeUsage: () => claudeProvider.usageSummary,
-		getClaudeLastRequest: () => claudeProvider.lastRequestUsage,
-		getClaudeUsageLimits: () => claudeProvider.subscriptionUsageLimits,
+		getClaudeUsage: () => activeClaude().usageSummary,
+		getClaudeLastRequest: () => activeClaude().lastRequestUsage,
+		getClaudeUsageLimits: () => activeClaude().subscriptionUsageLimits,
 		getCodexSubscriptionUsage: () => activeCodex().subscriptionUsageSummary,
 		getSubagentProfiles: () => getSubagentModelProfiles(),
 		getTokenUsageHistory: () => tokenUsageHistory.summary,
@@ -763,8 +803,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		getCodexUsageLimitPercent: () => activeCodex().codexUsageLimitPercent,
 		getCodexUsageLimitReset: () => activeCodex().codexUsageLimitResetLabel,
 		getCodexUsageLimitWindow: () => activeCodex().codexUsageLimitWindowLabel,
-		getClaudeUsageLimitPercent: () => claudeProvider.claudeUsageLimitPercent,
-		getClaudeUsageLimitReset: () => claudeProvider.claudeUsageLimitResetLabel,
+		getClaudeUsageLimitPercent: () => activeClaude().claudeUsageLimitPercent,
+		getClaudeUsageLimitReset: () => activeClaude().claudeUsageLimitResetLabel,
 		getMemoryContextTokens: () => estimateMemoryTokens(filterEntriesVisibleInWorkspace(memoryService.list(), getCurrentWorkspaceScopeId())),
 		getApiProviderSummary: () => ({ total: apiProviderService.count, enabled: apiProviderService.enabledCount }),
 		getTotalMemoryCount: () => memoryService.count,
@@ -775,10 +815,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			return { id: account.id, label: account.label, active: account.id === active,
 				state: provider.providerStatus.state, summary: provider.accountSummary };
 		}); },
+		getClaudeAccounts: () => { const active = activeClaudeAccountId(); return claudeAccounts.map(account => {
+			const provider = claudeProviders.get(account.id)!;
+			return { id: account.id, label: account.label, active: account.id === active,
+				state: provider.accountSummary.startsWith("Connected") ? "connected" : "signedOut", summary: provider.accountSummary };
+		}); },
 		getCocoStatus: () => ({ ...cocoProvider.providerStatus, thinkingLevels: cocoProvider.thinkingLevels }),
 		getProviderSnapshots: () => providerSnapshots(providerDirectory.list(),
-			new Map([...runtimeMetrics, ["codex", activeCodex().runtimeMetrics ?? {}], ["claude", claudeProvider.runtimeMetrics ?? {}], ["coco", cocoProvider.runtimeMetrics ?? {}]]),
-			new Map([["codex", activeCodex().accountSummary], ["claude", claudeProvider.accountSummary]])),
+			new Map([...runtimeMetrics, ["codex", activeCodex().runtimeMetrics ?? {}], ["claude", activeClaude().runtimeMetrics ?? {}], ["coco", cocoProvider.runtimeMetrics ?? {}]]),
+			new Map([["codex", activeCodex().accountSummary], ["claude", activeClaude().accountSummary]])),
 		getUpdateStatus: () => updater.status,
 	});
 	context.subscriptions.push(updater.onDidChange(() => quickActionsProvider.refresh()));
@@ -803,7 +848,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(refreshManagerPanel);
 	const statusProviders: Array<{ id: string; provider: { onDidChangeStatus: vscode.Event<{ state: string; summary: string }> } }> = [
 		...allCodexProviders().map(([accountId, provider]) => ({ id: codexAccountStatusKey(accountId), provider })),
-		{ id: "claude", provider: claudeProvider },
+		...allClaudeProviders().map(([accountId, provider]) => ({ id: claudeAccountStatusKey(accountId), provider })),
 		{ id: "coco", provider: cocoProvider },
 	];
 	for (const { id, provider } of statusProviders) {
@@ -841,10 +886,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		quickActionsProvider.refresh();
 		ApiProviderManagerPanel.refreshIfOpen();
 	}));
-	context.subscriptions.push(claudeProvider.onDidChangeCacheKeepAliveStatus(() => {
-		quickActionsProvider.refresh();
-		SessionQualityPanel.refreshIfOpen();
-	}));
+	for (const provider of claudeProviders.values()) {
+		context.subscriptions.push(provider.onDidChangeCacheKeepAliveStatus(() => {
+			quickActionsProvider.refresh();
+			SessionQualityPanel.refreshIfOpen();
+		}));
+	}
 	for (const [accountId, provider] of allCodexProviders()) {
 		// Each subscription keeps its own window history: mixing two accounts in one
 		// ledger would hide how many tokens each plan actually provides.
@@ -872,30 +919,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			updateCodexSessionQuality(sessionQuality, usage, usage.phase !== "running");
 		}));
 	}
-	context.subscriptions.push(claudeProvider.onDidRecordUsage(usage => {
-		const totalInput = usage.inputTokens + usage.cacheReadInputTokens + usage.cacheCreationInputTokens;
-		recordUsage({
-			provider: "claude",
-			inputTokens: totalInput,
-			outputTokens: usage.outputTokens,
-			cachedInputTokens: usage.cacheReadInputTokens,
-			cacheWriteInputTokens: usage.cacheCreationInputTokens,
-			modelTurns: usage.modelTurns,
-			durationMs: usage.durationMs,
-		}, usage.modelId);
-		subscriptionUsage.record({
-			provider: "claude",
-			modelId: usage.modelId,
-			freshInputTokens: usage.inputTokens,
-			cachedInputTokens: usage.cacheReadInputTokens,
-			cacheWriteInputTokens: usage.cacheCreationInputTokens,
-			outputTokens: usage.outputTokens,
-		});
-		SessionQualityPanel.refreshIfOpen();
-	}));
-	context.subscriptions.push(claudeProvider.onDidUpdateLiveTurn(update => {
-		updateClaudeSessionQuality(sessionQuality, update);
-	}));
+	for (const [accountId, provider] of allClaudeProviders()) {
+		// Each subscription keeps its own window history: mixing two accounts in one
+		// ledger would hide how many tokens each plan actually provides.
+		const ledgerProvider: SubscriptionProvider = accountId ? `claude:${accountId}` : "claude";
+		const accountLabel = claudeProviderLabel(provider.account);
+		context.subscriptions.push(provider.onDidRecordUsage(usage => {
+			const totalInput = usage.inputTokens + usage.cacheReadInputTokens + usage.cacheCreationInputTokens;
+			recordUsage({
+				provider: "claude",
+				inputTokens: totalInput,
+				outputTokens: usage.outputTokens,
+				cachedInputTokens: usage.cacheReadInputTokens,
+				cacheWriteInputTokens: usage.cacheCreationInputTokens,
+				modelTurns: usage.modelTurns,
+				durationMs: usage.durationMs,
+			}, usage.modelId);
+			subscriptionUsage.record({
+				provider: ledgerProvider,
+				modelId: accountId ? `${accountLabel} / ${usage.modelId}` : usage.modelId,
+				freshInputTokens: usage.inputTokens,
+				cachedInputTokens: usage.cacheReadInputTokens,
+				cacheWriteInputTokens: usage.cacheCreationInputTokens,
+				outputTokens: usage.outputTokens,
+			});
+			SessionQualityPanel.refreshIfOpen();
+		}));
+		context.subscriptions.push(provider.onDidUpdateLiveTurn(update => {
+			updateClaudeSessionQuality(sessionQuality, update);
+		}));
+	}
 	context.subscriptions.push(cocoProvider.onDidRecordUsage(usage => {
 		recordUsage({ provider: "coco", inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
 			cachedInputTokens: usage.cachedInputTokens, cacheWriteInputTokens: usage.cacheWriteInputTokens,
@@ -934,7 +987,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		for (const provider of codexProviders.values()) {
 			provider.notifyModelLimitsChanged();
 		}
-		claudeProvider.refreshLanguageModelChatInformation();
+		for (const provider of claudeProviders.values()) {
+			provider.refreshLanguageModelChatInformation();
+		}
 		cocoProvider.refreshLanguageModelChatInformation();
 		quickActionsProvider.refresh();
 	}));
@@ -943,13 +998,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	for (const provider of codexProviders.values()) {
 		provider.refreshLanguageModelChatInformation();
 	}
-	claudeProvider.refreshLanguageModelChatInformation();
+	for (const provider of claudeProviders.values()) {
+		provider.refreshLanguageModelChatInformation();
+	}
 	cocoProvider.refreshLanguageModelChatInformation();
 	void cocoProvider.refreshStatus();
 	for (const [accountId, provider] of allCodexProviders()) {
 		void provider.refreshStatus().then(status => {
 			subscriptionStatuses.set(codexAccountStatusKey(accountId), { state: status.state, summary: status.summary });
 		}).catch(error => logService.logError("codex.initial_status.failed", error));
+	}
+	for (const [accountId, provider] of allClaudeProviders()) {
+		void provider.refreshStatus().then(status => {
+			subscriptionStatuses.set(claudeAccountStatusKey(accountId), { state: status.state, summary: status.summary });
+		}).catch(error => logService.logError("claude.initial_status.failed", error));
 	}
 	// A freshly added account signs in right after the reload that created it.
 	const pendingSignInAccount = pendingCodexSignIn();
@@ -969,9 +1031,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}, 3_000);
 		timer.unref?.();
 	}
-	void claudeProvider.refreshStatus().then(status => {
-		subscriptionStatuses.set("claude", { state: status.state, summary: status.summary });
-	}).catch(error => logService.logError("claude.initial_status.failed", error));
+	// A freshly added Claude account signs in right after the reload that created it.
+	const pendingClaudeAccount = pendingClaudeSignIn();
+	if (pendingClaudeAccount) {
+		void context.globalState.update(CLAUDE_PENDING_SIGN_IN_KEY, undefined);
+		logService.log("claude.account.pending_sign_in", { account: pendingClaudeAccount });
+		const timer = setTimeout(() => {
+			void claudeProviders.get(pendingClaudeAccount)?.signIn()
+				.then(() => quickActionsProvider.refresh())
+				.catch(error => {
+					logService.logError("claude.account.pending_sign_in_failed", error);
+					const message = error instanceof Error ? error.message : String(error);
+					void vscode.window.showErrorMessage(
+						`Claude account sign-in did not finish: ${message}. Open Quick Access → Claude → Claude Accounts to retry.`
+					);
+				});
+		}, 3_000);
+		timer.unref?.();
+	}
 	void providerDirectory.recheck().catch(error => logService.logError("providers.initial_recheck.failed", error));
 	void llamaProvider.refreshDeepSeekBalance().catch(error => logService.logError("deepseek.balance.initial_failed", error));
 
@@ -981,13 +1058,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const usageLimitRefreshTimer = setInterval(() => {
 		quickActionsProvider.refresh();
 		ApiProviderManagerPanel.refreshIfOpen();
-		void claudeProvider.refreshSubscriptionUsage().catch(error => logService.logError("claude.periodic_usage.failed", error));
 		void llamaProvider.refreshDeepSeekBalance().catch(error => logService.logError("deepseek.periodic_balance.failed", error));
 		for (const [accountId, provider] of allCodexProviders()) {
 			subscriptionUsage.observe(accountId ? `codex:${accountId}` : "codex", provider.subscriptionWindows);
 			void provider.refreshStatus().catch(error => logService.logError("codex.periodic_status.failed", error));
 		}
-		subscriptionUsage.observe("claude", claudeProvider.subscriptionWindows);
+		for (const [accountId, provider] of allClaudeProviders()) {
+			const ledgerProvider: SubscriptionProvider = accountId ? `claude:${accountId}` : "claude";
+			subscriptionUsage.observe(ledgerProvider, provider.subscriptionWindows);
+			void provider.refreshSubscriptionUsage().catch(error => logService.logError("claude.periodic_usage.failed", error));
+		}
 		void subscriptionUsage.refresh().catch(error => logService.logError("subscription_usage.refresh_failed", error));
 		SessionQualityPanel.refreshIfOpen();
 	}, 60_000);
@@ -1192,6 +1272,11 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 					},
 					() => llamaProvider.runHealthCheck(extVersion, cancellation.token)
 				);
+				// The explicit health check also refreshes provider status polling.
+				providerDirectory.resetLocalProbeBackoff();
+				void providerDirectory.recheck().catch(error =>
+					logService.logError("providers.health_check_recheck.failed", error)
+				);
 				// Enrich the provider snapshot with session metrics and the
 				// subscription providers so the health panel is a full picture.
 				const summary = sessionQuality.summary;
@@ -1219,11 +1304,11 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 						errorCount,
 					},
 					claude: {
-						status: claudeProvider.statusSummary.startsWith("Connected") ? "connected" : claudeProvider.statusSummary.startsWith("Paused") ? "paused_usage_limit" : "warning",
-						summary: claudeProvider.statusSummary,
-						usagePercent: claudeProvider.claudeUsageLimitPercent,
-						resetLabel: claudeProvider.claudeUsageLimitResetLabel,
-						keepAlive: claudeProvider.cacheKeepAliveStatus,
+						status: activeClaude().statusSummary.startsWith("Connected") ? "connected" : activeClaude().statusSummary.startsWith("Paused") ? "paused_usage_limit" : "warning",
+						summary: activeClaude().statusSummary,
+						usagePercent: activeClaude().claudeUsageLimitPercent,
+						resetLabel: activeClaude().claudeUsageLimitResetLabel,
+						keepAlive: activeClaude().cacheKeepAliveStatus,
 					},
 					codex: {
 						status: activeCodex().accountSummary === "Connected" ? "connected" : "warning",
@@ -1240,7 +1325,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 					sessionQuality,
 					extVersion,
 					vscodeVersion,
-					() => claudeProvider.cacheKeepAliveStatus,
+					() => activeClaude().cacheKeepAliveStatus,
 					() => lastHealthEnriched,
 					() => subscriptionUsage.summary()
 				);
@@ -1256,7 +1341,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 					sessionQuality,
 					extVersion,
 					vscodeVersion,
-					() => claudeProvider.cacheKeepAliveStatus,
+					() => activeClaude().cacheKeepAliveStatus,
 					() => lastHealthEnriched,
 					() => subscriptionUsage.summary()
 				);
@@ -1340,8 +1425,8 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 						usageReset: activeCodex().codexUsageLimitResetLabel,
 					},
 					claude: {
-						   summary: subscriptionStatuses.get("claude")?.summary ?? claudeProvider.accountSummary,
-						limits: claudeProvider.subscriptionUsageLimits.map(limit => ({
+						   summary: subscriptionStatuses.get(claudeAccountStatusKey(activeClaudeAccountId()))?.summary ?? activeClaude().accountSummary,
+						limits: activeClaude().subscriptionUsageLimits.map(limit => ({
 							label: limit.label,
 							description: limit.description,
 						})),
@@ -1452,7 +1537,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 		quickActionsProvider.refresh();
 		const provider = codexProviders.get(account.id);
 		await provider?.refreshStatus().catch(error => logService.logError("codex.switch_status.failed", error));
-		vscode.window.showInformationMessage(`Codex account: ${account.label}. Its models are now in the picker.`);
+		vscode.window.showInformationMessage(`Codex account: ${account.label}. Subagents try it first, and Quick Access shows its usage.`);
 	};
 
 	context.subscriptions.push(
@@ -1566,6 +1651,187 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 			}
 			logService.log("codex.account.removed", { account: account.id });
 			await offerReload(`Codex account "${account.label}" removed. Reload the window to finish.`);
+		})
+	);
+
+	const claudeProviderFor = (accountId: unknown): ClaudeChatModelProvider => {
+		const account = findClaudeAccount(claudeAccounts, accountId);
+		return (account && claudeProviders.get(account.id)) || activeClaude();
+	};
+	const refreshAllClaudeCatalogs = (): void => {
+		for (const provider of claudeProviders.values()) {
+			provider.refreshLanguageModelChatInformation();
+		}
+	};
+	const setActiveClaudeAccount = async (accountId: unknown): Promise<void> => {
+		const account = findClaudeAccount(claudeAccounts, accountId);
+		if (!account) {
+			return;
+		}
+		const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+		await config.update("claudeActiveAccount", account.id, vscode.ConfigurationTarget.Global);
+		// Re-announce catalogs so subagents try the active account first.
+		refreshAllClaudeCatalogs();
+		quickActionsProvider.refresh();
+		const provider = claudeProviders.get(account.id);
+		await provider?.refreshStatus().catch(error => logService.logError("claude.switch_status.failed", error));
+		vscode.window.showInformationMessage(`Claude account: ${account.label}. Subagents try it first, and Quick Access shows its usage.`);
+	};
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.selectClaudeAccount", async (arg?: { accountId?: string } | string) => {
+			const requested = typeof arg === "string" ? arg : arg?.accountId;
+			if (requested !== undefined) {
+				await setActiveClaudeAccount(requested);
+				return;
+			}
+			const active = activeClaudeAccountId();
+			const picked = await vscode.window.showQuickPick(claudeAccounts.map(account => ({
+				label: `${account.id === active ? "$(check) " : ""}${account.label}`,
+				description: account.configDir ?? "~/.claude",
+				detail: claudeProviders.get(account.id)?.accountSummary,
+				accountId: account.id,
+			})), { title: "SubHarness: Claude Account", placeHolder: "Choose the Claude subscription used by the model picker" });
+			if (picked) {
+				await setActiveClaudeAccount(picked.accountId);
+			}
+		})
+	);
+
+	/** Raw entries stay in the stored order; the resolved list only feeds the runtime. */
+	const rawClaudeAccounts = (): Array<Record<string, unknown>> => {
+		const raw = vscode.workspace.getConfiguration(CONFIG_SECTION).get<unknown>("claudeAccounts", []);
+		return Array.isArray(raw)
+			? raw.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+			: [];
+	};
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.addClaudeAccount", async () => {
+			const used = new Set(claudeAccounts.map(account => account.id).filter(id => id !== CLAUDE_DEFAULT_ACCOUNT_ID));
+			const id = await vscode.window.showInputBox({
+				title: "SubHarness: Add Claude Account",
+				prompt: "Short id for the second Claude subscription. It names the Claude config folder (~/.claude-<id>) and its models.",
+				placeHolder: "work",
+				ignoreFocusOut: true,
+				validateInput: value => {
+					const normalized = value.trim().toLowerCase();
+					if (!normalized) {
+						return "Enter an id, for example work";
+					}
+					if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(normalized)) {
+						return "Use lowercase letters, digits, - or _ (up to 32 characters), starting with a letter or digit";
+					}
+					if (used.has(normalized)) {
+						return `An account with the id "${normalized}" already exists`;
+					}
+					return undefined;
+				},
+			});
+			if (!id?.trim()) {
+				return;
+			}
+			const accountId = id.trim().toLowerCase();
+			const label = await vscode.window.showInputBox({
+				title: "SubHarness: Add Claude Account",
+				prompt: "Name shown in Quick Access and in the model picker",
+				value: accountId,
+				ignoreFocusOut: true,
+			});
+			if (label === undefined) {
+				return;
+			}
+			const entries = rawClaudeAccounts();
+			entries.push({ id: accountId, label: label.trim() || accountId });
+			await vscode.workspace.getConfiguration(CONFIG_SECTION)
+				.update("claudeAccounts", entries, vscode.ConfigurationTarget.Global);
+			// The new subscription becomes the active one: subagents try it first, status commands use it.
+			await vscode.workspace.getConfiguration(CONFIG_SECTION)
+				.update("claudeActiveAccount", accountId, vscode.ConfigurationTarget.Global);
+			// Providers are created at activation, so the sign-in runs after the reload.
+			await context.globalState.update(CLAUDE_PENDING_SIGN_IN_KEY, accountId);
+			logService.log("claude.account.added", { account: accountId });
+			await offerReload(
+				`Claude account "${label.trim() || accountId}" added and selected. Reload the window to finish; the Claude sign-in page opens by itself.`
+			);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.removeClaudeAccount", async (arg?: { accountId?: string } | string) => {
+			const requested = typeof arg === "string" ? arg : arg?.accountId;
+			const account = findClaudeAccount(claudeAccounts, requested);
+			if (!account || !account.id) {
+				vscode.window.showInformationMessage("The built-in Claude account cannot be removed.");
+				return;
+			}
+			const confirmed = await vscode.window.showWarningMessage(
+				`Remove the Claude account "${account.label}"? Its config folder and login stay on disk; adding the same id again restores them. Its stored chat sessions are cleared.`,
+				{ modal: true },
+				"Remove"
+			);
+			if (confirmed !== "Remove") {
+				return;
+			}
+			const entries = rawClaudeAccounts().filter(entry => String(entry.id ?? "").trim().toLowerCase() !== account.id);
+			await vscode.workspace.getConfiguration(CONFIG_SECTION)
+				.update("claudeAccounts", entries, vscode.ConfigurationTarget.Global);
+			if (activeClaudeAccountId() === account.id) {
+				// Never leave the active account pointing at an account that no longer exists.
+				await vscode.workspace.getConfiguration(CONFIG_SECTION)
+					.update("claudeActiveAccount", CLAUDE_DEFAULT_ACCOUNT_ID, vscode.ConfigurationTarget.Global);
+			}
+			// The config directory (and with it the login) is never deleted; only the stored chat sessions go.
+			await clearPersistedClaudeSessionState(context.workspaceState, logService, account.id);
+			logService.log("claude.account.removed", { account: account.id });
+			await offerReload(`Claude account "${account.label}" removed. Reload the window to finish.`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.claudeAccountSignIn", async (arg?: { accountId?: string } | string) => {
+			const requested = typeof arg === "string" ? arg : arg?.accountId;
+			const account = findClaudeAccount(claudeAccounts, requested);
+			if (!account) {
+				await vscode.commands.executeCommand("llamacpp.claudeSignIn");
+				return;
+			}
+			try {
+				await claudeProviderFor(account.id).signIn();
+				quickActionsProvider.refresh();
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				vscode.window.showErrorMessage(`Unable to sign in to Claude (${account.label}): ${message}`);
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.claudeAccountSignOut", async (arg?: { accountId?: string } | string) => {
+			const requested = typeof arg === "string" ? arg : arg?.accountId;
+			const account = findClaudeAccount(claudeAccounts, requested);
+			if (!account) {
+				await vscode.commands.executeCommand("llamacpp.claudeSignOut");
+				return;
+			}
+			const confirmed = await vscode.window.showWarningMessage(
+				account.id
+					? `Sign out of the Claude account "${account.label}"? The other accounts stay signed in.`
+					: "Sign out of the built-in Claude account? This signs Claude Code out on this computer, the Claude Code extension included.",
+				{ modal: true },
+				"Sign Out"
+			);
+			if (confirmed !== "Sign Out") {
+				return;
+			}
+			try {
+				await claudeProviderFor(account.id).signOut();
+				quickActionsProvider.refresh();
+				vscode.window.showInformationMessage(`Claude account ${account.label} signed out.`);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				vscode.window.showErrorMessage(`Unable to sign out of Claude (${account.label}): ${message}`);
+			}
 		})
 	);
 
@@ -1804,8 +2070,10 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const next = config.get<boolean>("enableClaudeSubscription", true) === false;
 			await config.update("enableClaudeSubscription", next, vscode.ConfigurationTarget.Global);
-			claudeProvider.refreshLanguageModelChatInformation();
-			await claudeProvider.refreshStatus();
+			refreshAllClaudeCatalogs();
+			for (const provider of claudeProviders.values()) {
+				await provider.refreshStatus();
+			}
 			quickActionsProvider.refresh();
 			vscode.window.showInformationMessage(`Claude subscription source ${next ? "enabled" : "disabled"}.`);
 		})
@@ -1817,6 +2085,9 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 			const next = config.get<boolean>("claudeCacheKeepAliveEnabled", true) === false;
 			await config.update("claudeCacheKeepAliveEnabled", next, vscode.ConfigurationTarget.Global);
 			quickActionsProvider.refresh();
+			for (const provider of claudeProviders.values()) {
+				provider.refreshCacheKeepAliveStatus();
+			}
 			vscode.window.showInformationMessage(
 				`Claude cache keep-alive ${next ? "enabled" : "disabled"}.`
 			);
@@ -1829,7 +2100,9 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 			const next = config.get<boolean>("claudeCacheKeepAliveIgnoreUsageLimit", false) === false;
 			await config.update("claudeCacheKeepAliveIgnoreUsageLimit", next, vscode.ConfigurationTarget.Global);
 			quickActionsProvider.refresh();
-			claudeProvider.refreshCacheKeepAliveStatus();
+			for (const provider of claudeProviders.values()) {
+				provider.refreshCacheKeepAliveStatus();
+			}
 			vscode.window.showInformationMessage(
 				`Claude cache keep-alive usage-limit pause ${next ? "ignored" : "respected"}.`
 			);
@@ -1839,7 +2112,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.claudeSignIn", async () => {
 			try {
-				await claudeProvider.signIn();
+				await activeClaude().signIn();
 				quickActionsProvider.refresh();
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -1850,8 +2123,11 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.claudeSignOut", async () => {
+			const account = activeClaude().account;
 			const confirmed = await vscode.window.showWarningMessage(
-				"Sign out of Claude? This signs Claude Code out on this computer, the Claude Code extension included.",
+				account.id
+					? `Sign out of the Claude account "${account.label}"? The other accounts stay signed in.`
+					: "Sign out of Claude? This signs Claude Code out on this computer, the Claude Code extension included.",
 				{ modal: true },
 				"Sign Out"
 			);
@@ -1859,7 +2135,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 				return;
 			}
 			try {
-				await claudeProvider.signOut();
+				await activeClaude().signOut();
 				quickActionsProvider.refresh();
 				vscode.window.showInformationMessage("Claude signed out.");
 			} catch (error) {
@@ -1872,7 +2148,7 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.claudeShowStatus", async () => {
 			try {
-				await claudeProvider.showStatus();
+				await activeClaude().showStatus();
 				quickActionsProvider.refresh();
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -2058,13 +2334,19 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.refreshModels", async () => {
 			llamaProvider.refreshLanguageModelChatInformation();
+			providerDirectory.resetLocalProbeBackoff();
+			void providerDirectory.recheck().catch(error =>
+				logService.logError("providers.refresh_models_recheck.failed", error)
+			);
 			refreshAllCodexCatalogs();
-			claudeProvider.refreshLanguageModelChatInformation();
+			refreshAllClaudeCatalogs();
 			cocoProvider.refreshLanguageModelChatInformation();
 			for (const provider of codexProviders.values()) {
 				void provider.refreshStatus();
 			}
-			void claudeProvider.refreshStatus();
+			for (const provider of claudeProviders.values()) {
+				void provider.refreshStatus();
+			}
 			quickActionsProvider.refresh();
 			vscode.window.showInformationMessage("Local, DeepSeek, Codex, Claude, and Coco models refreshed.");
 		})
@@ -2178,14 +2460,24 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 					refreshAllCodexCatalogs();
 					quickActionsProvider.refresh();
 				}
+				if (event.affectsConfiguration("llamacpp.claudeAccounts")) {
+					// Provider instances and their registry entries are created at activation.
+					void vscode.window.showInformationMessage("Reload the window to apply the updated Claude account list.");
+				}
+				if (event.affectsConfiguration("llamacpp.claudeActiveAccount")) {
+					refreshAllClaudeCatalogs();
+					quickActionsProvider.refresh();
+				}
 				if (
 					event.affectsConfiguration("llamacpp.enableClaudeSubscription") ||
 					event.affectsConfiguration("llamacpp.claudeContextLength") ||
 					event.affectsConfiguration("llamacpp.claudeMaxOutputTokens") ||
 					event.affectsConfiguration("llamacpp.claudeReasoningEffort")
 				) {
-					claudeProvider.refreshLanguageModelChatInformation();
-					void claudeProvider.refreshStatus();
+					refreshAllClaudeCatalogs();
+					for (const provider of claudeProviders.values()) {
+						void provider.refreshStatus();
+					}
 				}
 				if (
 					event.affectsConfiguration("llamacpp.enableCoco") ||
@@ -2205,7 +2497,9 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 					// One working context for Codex, Claude, Coco and Cursor.
 					llamaProvider.notifyModelLimitsChanged();
 					refreshAllCodexCatalogs();
-					claudeProvider.refreshLanguageModelChatInformation();
+					for (const provider of claudeProviders.values()) {
+						provider.refreshLanguageModelChatInformation();
+					}
 					cocoProvider.refreshLanguageModelChatInformation();
 				}
 				if (
@@ -2215,7 +2509,9 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 					event.affectsConfiguration("llamacpp.claudeCacheKeepAliveIgnoreUsageLimit")
 				) {
 					quickActionsProvider.refresh();
-					claudeProvider.refreshCacheKeepAliveStatus();
+					for (const provider of claudeProviders.values()) {
+						provider.refreshCacheKeepAliveStatus();
+					}
 				}
 				if (
 					event.affectsConfiguration("llamacpp.enableLocalServer") ||
@@ -2225,6 +2521,12 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 					event.affectsConfiguration("llamacpp.enableCodexSubscription") ||
 					event.affectsConfiguration("llamacpp.enableClaudeSubscription")
 				) {
+					if (
+						event.affectsConfiguration("llamacpp.enableLocalServer") ||
+						event.affectsConfiguration("llamacpp.localServerUrl")
+					) {
+						providerDirectory.resetLocalProbeBackoff();
+					}
 					void providerDirectory.recheck();
 				}
 				if (

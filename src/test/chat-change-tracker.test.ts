@@ -82,6 +82,37 @@ suite("chat change tracker", () => {
 		assert.deepStrictEqual(reloaded.files.map(entry => entry.id).sort(), set.files.map(entry => entry.id).sort());
 	});
 
+	test("diff shows the running turn, the pending set, a path filter and a length limit", async () => {
+		const current = tracker();
+		await turn(current, 1, async () => fs.writeFile(file("b.txt"), "turn one\n"));
+		const begin = await current.beginTurn();
+		assert.ok(begin, "the turn snapshot must exist");
+		assert.strictEqual(await current.diff(SESSION, begin, [], { scope: "turn" }), "No files changed in this turn.");
+		await fs.writeFile(file("a.txt"), "one\r\nTWO\r\n");
+		await fs.rm(file("c.txt"));
+
+		const turnDiff = await current.diff(SESSION, begin, [], { scope: "turn" });
+		assert.match(turnDiff, /^2 files changed in this turn \(\+1 -2\):\n- a\.txt \(modified, \+1 -1\)\n- c\.txt \(deleted, \+0 -1\)\n/);
+		assert.match(turnDiff, /=== a\.txt \(modified, \+1 -1\)\n@@ -1,2 \+1,2 @@\n one\n-two\n\+TWO/);
+		assert.match(turnDiff, /=== c\.txt \(deleted, \+0 -1\)\nFile deleted \(1 line\)\./);
+		assert.ok(!turnDiff.includes("b.txt"), "an earlier turn is not this turn");
+
+		const pending = await current.diff(SESSION, begin, [], { scope: "pending" });
+		assert.match(pending, /^3 files changed waiting for Keep or Undo/);
+		assert.match(pending, /=== b\.txt \(added, \+1 -0\)\n@@ -0,0 \+1 @@\n\+turn one/);
+		assert.strictEqual(await current.diff(SESSION, undefined, [], { scope: "turn" }), "No files changed in this turn.", "no write yet, no snapshot");
+
+		const only = await current.diff(SESSION, begin, [], { scope: "pending", paths: [file("b.txt")] });
+		assert.match(only, /^1 file changed/);
+		assert.match(await current.diff(SESSION, begin, [], { scope: "turn", paths: ["missing.txt"] }), /^None of the 2 changed files in this turn matches missing\.txt\./);
+
+		await fs.writeFile(file("a.txt"), Array.from({ length: 600 }, (_, index) => `line ${index} ${"x".repeat(20)}`).join("\n"));
+		const cut = await current.diff(SESSION, begin, [], { scope: "turn", maxChars: 2_000 });
+		assert.ok(cut.length <= 2_200, `${cut.length} characters`);
+		assert.match(cut, /more diff lines? of this file not shown|not shown: /);
+		await current.endTurn(SESSION, 2, begin);
+	});
+
 	test("a live change set merges the running turn with pending files and saves nothing", async () => {
 		const current = tracker();
 		await turn(current, 1, async () => fs.writeFile(file("b.txt"), "turn one\n"));

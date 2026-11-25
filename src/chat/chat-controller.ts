@@ -6,8 +6,9 @@ import { runAgentTurn, type AgentTurnSink, type ChatToolExecutor } from "./agent
 import { renderAttachments, type AttachmentContent } from "./attachments";
 import { interruptedAnswerDigest } from "./retry-digest";
 import type { ChatWebviewBridge } from "./chat-view";
-import { compactChatHistory, estimateTextTokens, planChatCompaction, previousModelId, type ChatCompactionLimits, type ChatSummarizer, type ChatSummaryWriter } from "./compaction";
-import { activeCompaction, systemMessage } from "./lm-messages";
+import { compactChatHistory, estimateTextTokens, pickLocalSummaryModel, planChatCompaction, previousModelId, withSummaryTimeout, type ChatCompactionLimits, type ChatSummarizer, type ChatSummaryWriter } from "./compaction";
+import { cleaningPaysOff, CONTEXT_CLEANING_REPLAY_RATIO, planContextCleaning, staleOnlyCompaction, type ChatCleaningEvent } from "./context-cleaning";
+import { activeCompaction, systemMessage, type ChatCompactionPart } from "./lm-messages";
 import { MEMORY_INDEX_ID, type ChatMemoryContext, type ChatMemorySource } from "./memory-context";
 import type { ChatMemoryStore } from "./memory-store";
 import { CHAT_MAX_REQUESTS, DEFAULT_CHAT_TITLE, titleFromParts, type ChatSessionStore, type StoredSubagent } from "./session-store";
@@ -15,7 +16,7 @@ import { chatExportFileName, renderChatMarkdown } from "./chat-export";
 import { runChatSubagent } from "./subagent-runner";
 import { SubagentFiles } from "./subagent-files";
 import { ASK_QUESTIONS_TOOL_NAME, TODO_TOOL_NAME } from "./tools/interaction-tools";
-import { CLOSE_SUBAGENT_TOOL_NAME, SUBAGENT_TOOL_NAME, WAIT_SUBAGENTS_TOOL_NAME } from "./tools/subagent-tool";
+import { CLOSE_SUBAGENT_TOOL_NAME, SUBAGENT_TOOL_NAME, subagentLimitMessage, WAIT_SUBAGENTS_TOOL_NAME } from "./tools/subagent-tool";
 import { LIST_TOOLS_TOOL_NAME, MAX_REQUESTED_TOOLS, REQUEST_TOOLS_TOOL_NAME, shortToolDescription, toolsArriveMidTurn } from "./tools/tool-access-tools";
 import { groupModels, modelProvider, thinkingOptions } from "./shared/model-groups";
 import {
@@ -28,6 +29,7 @@ import {
 	WEBVIEW_TOOL_RESULT_PREVIEW_CHARS,
 } from "./shared/protocol";
 import type {
+	ChatApprovalKind,
 	ChatApprovalRequest,
 	ChatAttachment,
 	ChatChangeSet,
@@ -63,8 +65,9 @@ import type {
 	WebviewMessage,
 } from "./shared/protocol";
 import type { ChatChangeTrackerLike, TurnSnapshot } from "./changes/change-tracker";
+import { approvalKindLabel, isAlwaysAllowed, type AlwaysAllowStore } from "./approvals";
 import type { ChatToolSource } from "./tool-executor";
-import type { ChatToolConfirmation, ChatToolRequestResult, SubagentRequest } from "./tools/types";
+import type { ChatChangesDiffRequest, ChatToolConfirmation, ChatToolRequestResult, SubagentModelOption, SubagentRequest, UnavailableSubagentModel } from "./tools/types";
 
 export interface ChatControllerDeps {
 	backend: Pick<vscode.LanguageModelChatProvider, "provideLanguageModelChatResponse" | "provideLanguageModelChatInformation">;
@@ -98,8 +101,8 @@ export interface ChatControllerDeps {
 	confirm?: (message: string, action: string) => Promise<boolean>;
 	/** Non-modal notice with one action; resolves true when the user picks it. */
 	notify?: (message: string, action: string) => Promise<boolean>;
-	/** Opens VS Code's tool approval settings, which decide whether external tools run without its dialog. */
-	manageToolApprovals?: () => Promise<void>;
+	/** Kinds of actions that run without an approval card; without it every held call asks. */
+	alwaysAllow?: AlwaysAllowStore;
 	/** Shows an operating-system notification about a chat; the host decides whether the window needs one. */
 	osNotify?: (title: string, body: string, sessionId: string) => void;
 	/** Clock of auto-continue after a limit; tests replace it. */
@@ -120,6 +123,10 @@ export interface ChatControllerDeps {
 	memoryStore?: ChatMemoryStore;
 	/** The same model on another subscription when the one an open subagent runs on is used up. */
 	subagentStandIn?(modelId: string): string | undefined;
+	/** An open subagent's model whose limit is used up with no stand-in; its next task is answered at once. */
+	subagentBlocked?(modelId: string): UnavailableSubagentModel | undefined;
+	/** Models a new subagent may start with now, for the answer to a blocked one. */
+	subagentModels?(): readonly SubagentModelOption[];
 }
 
 export interface ChatAttachmentsDeps {
@@ -159,6 +166,10 @@ export interface ChatPromptProvider {
 export interface ChatCompactionDeps {
 	summarize: ChatSummarizer;
 	limits(): Omit<ChatCompactionLimits, "fixedTokens">;
+	/** The chat context budget in provider tokens; zero turns self-cleaning off. */
+	cleaningBudget?(): number;
+	/** Told about every finished cleaning. */
+	onCleaned?(event: ChatCleaningEvent): void;
 }
 
 const ACTIVE_SESSION_KEY = "llamacpp.chat.activeSession";
@@ -178,6 +189,7 @@ const MEMORY_ID_MAX_CHARS = 80;
 const NO_MODEL_NOTICE = "No model is available. Configure a provider first.";
 const INTERRUPTED_NOTICE = "This answer was interrupted: VS Code closed or reloaded while it was running.";
 const COMPACTING_DETAIL = "Compacting context…";
+const CLEANING_DETAIL = "Cleaning context…";
 const STOPPING_DETAIL = "Stopping…";
 /** Longest file reference a message may ask to open. */
 const FILE_REFERENCE_MAX_CHARS = 2048;
@@ -547,6 +559,10 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			};
 		}
 		case "retryTurn": return typeof value.messageId === "string" ? { type: "retryTurn", messageId: value.messageId } : undefined;
+		case "continueOnModel":
+			return typeof value.messageId === "string" && typeof value.modelId === "string" && value.modelId.length > 0 && value.modelId.length <= 512
+				? { type: "continueOnModel", messageId: value.messageId, modelId: value.modelId }
+				: undefined;
 		case "closeSubagent":
 			return typeof value.sessionId === "string" && typeof value.subagentId === "string"
 				? { type: "closeSubagent", sessionId: value.sessionId, subagentId: value.subagentId }
@@ -592,9 +608,12 @@ function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
 			return Array.isArray(value.names) && value.names.every(name => typeof name === "string") && typeof value.enabled === "boolean"
 				? { type: "setToolsEnabled", names: value.names as string[], enabled: value.enabled }
 				: undefined;
-		case "manageToolApprovals": return { type: "manageToolApprovals" };
 		case "approve":
-			return typeof value.id === "string" && typeof value.allow === "boolean" ? { type: "approve", id: value.id, allow: value.allow } : undefined;
+			return typeof value.id === "string" && typeof value.allow === "boolean"
+				? { type: "approve", id: value.id, allow: value.allow, ...(value.always === true ? { always: true } : {}) }
+				: undefined;
+		case "revokeAlwaysAllow":
+			return typeof value.key === "string" && value.key ? { type: "revokeAlwaysAllow", key: value.key } : undefined;
 		case "answerQuestions": {
 			if (typeof value.id !== "string") {
 				return undefined;
@@ -740,6 +759,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	private readonly _memorySubscription: vscode.Disposable | undefined;
 	private readonly _accountSubscription: vscode.Disposable | undefined;
 	private readonly _contextSettingsSubscription: vscode.Disposable | undefined;
+	private readonly _alwaysAllowSubscription: vscode.Disposable | undefined;
 	private _memoryTimer: ReturnType<typeof setTimeout> | undefined;
 	private _lastQuota: string | undefined;
 	private _lastActivity: string | undefined;
@@ -759,6 +779,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			}
 		});
 		this._contextSettingsSubscription = deps.contextSettings?.onDidChange?.(() => this._broadcastContextSettings());
+		// Settings edited by hand or in another window reach the Tools list and settle cards that no longer need asking.
+		this._alwaysAllowSubscription = deps.alwaysAllow?.onDidChange?.(() => this._onAlwaysAllowChanged());
 		// Continuations that were pending when VS Code closed come back without the chat view being opened.
 		void this._restoreAutoContinue().catch(error => {
 			this._log("chat.auto_continue.restore_failed", { message: errorMessage(error) });
@@ -1090,6 +1112,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		this._quotaSubscription?.dispose();
 		this._accountSubscription?.dispose();
 		this._contextSettingsSubscription?.dispose();
+		this._alwaysAllowSubscription?.dispose();
 		if (this._quotaTimer) {
 			clearTimeout(this._quotaTimer);
 			this._quotaTimer = undefined;
@@ -1178,6 +1201,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			case "retryTurn":
 				await this._retryTurn(message.messageId);
 				return;
+			case "continueOnModel":
+				await this._continueOnModel(message.messageId, message.modelId);
+				return;
 			case "setAutoContinue":
 				await this._setAutoContinueEnabled(message.sessionId, message.messageId, message.enabled);
 				return;
@@ -1239,16 +1265,39 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				await this._deps.tools.setEnabled?.(message.names, message.enabled);
 				this._broadcast({ type: "tools", tools: this._toolGroups() });
 				return;
-			case "manageToolApprovals":
-				await this._deps.manageToolApprovals?.();
-				return;
 			case "approve":
 				for (const runtime of this._runtimes.values()) {
 					const approval = runtime.approvals.get(message.id);
 					if (approval) {
-						approval.settle(message.allow);
+						const kinds = approval.request.kinds ?? [];
+						if (message.allow && message.always && kinds.length > 0 && this._deps.alwaysAllow) {
+							this._log("chat.tool.always_allow", { tool: approval.request.toolName, kinds: kinds.map(kind => kind.key) });
+							// Saved before the call runs, so the agent's next call of this kind already finds it.
+							try {
+								await this._deps.alwaysAllow.add(kinds.map(kind => kind.key));
+							} catch (error) {
+								// The call still runs once: the user allowed it.
+								this._log("chat.always_allow.save_failed", { message: errorMessage(error) });
+								void this._deps.notify?.(`Always allow was not saved, so this action will ask again: ${errorMessage(error)}`, "Open Settings").then(open => {
+									if (open) {
+										void vscode.commands.executeCommand("workbench.action.openSettings", "llamacpp.chat.alwaysAllow");
+									}
+								}, () => undefined);
+							}
+							approval.settle(true);
+							this._onAlwaysAllowChanged();
+						} else {
+							approval.settle(message.allow);
+						}
 						break;
 					}
+				}
+				return;
+			case "revokeAlwaysAllow":
+				if (this._deps.alwaysAllow) {
+					this._log("chat.tool.always_allow_revoked", { kind: message.key });
+					await this._deps.alwaysAllow.remove(message.key);
+					this._onAlwaysAllowChanged();
 				}
 				return;
 			case "answerQuestions":
@@ -1486,6 +1535,26 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		await this._continueAnswer(runtime, messageId);
 	}
 
+	/**
+	 * The limit card's "Continue on Claude 2": the chat takes the same model of the other subscription
+	 * for this and later turns and continues the stopped answer there, like Retry.
+	 */
+	private async _continueOnModel(messageId: string, modelId: string): Promise<void> {
+		await this._ensureSession();
+		const runtime = this._active();
+		if (!runtime || runtime.busy || runtime.running || runtime.messages.at(-1)?.id !== messageId) {
+			return;
+		}
+		await this._ensureModels();
+		if (!this._models.some(model => model.id === modelId)) {
+			this._log("chat.limit.continue_on_skipped", { reason: "no-model" });
+			return;
+		}
+		await this._selectModel(modelId);
+		this._log("chat.limit.continue_on", { model: modelId });
+		await this._continueAnswer(runtime, messageId, modelId);
+	}
+
 	/** Sends the continuation of the chat's last answer; the chat may be in the background. */
 	private async _continueAnswer(runtime: SessionRuntime, messageId: string, modelId?: string): Promise<void> {
 		const failed = runtime.messages.at(-1);
@@ -1664,6 +1733,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		const tracker = this._deps.changes;
 		let begin: Promise<TurnSnapshot | undefined> | undefined;
 		const claimed = new Set<string>();
+		const readDiff = tracker?.diff?.bind(tracker);
+		// The agent and its reviewer subagents see this turn's changes as the Keep/Undo list will show them.
+		const changesDiff = readDiff
+			? { changesDiff: async (options: ChatChangesDiffRequest) => readDiff(running.sessionId, begin ? await begin : undefined, [...claimed], options) }
+			: {};
 		let liveRun: Promise<void> | undefined;
 		let liveQueued = false;
 		let finalizing = false;
@@ -1732,6 +1806,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				const result = await source.invoke(name, input, token, {
 					callId,
 					terminalOwner,
+					...changesDiff,
 					approve: confirmation => this._requestApproval(running, name, callId, confirmation, token),
 					...(nested ? {} : {
 						runSubagent: (request: SubagentRequest, subagentToken: vscode.CancellationToken) => {
@@ -1791,7 +1866,10 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			// Subagents get the prompt without the delegation guide: they cannot start subagents.
 			const system = await this._systemPrompt({ subagents: source.tools.some(tool => tool.name === SUBAGENT_TOOL_NAME) });
 			const thinking = this._thinkingFor(model.id);
-			const initialParts = await this._compactForModel(running, model, history, system);
+			const cleaned = await this._cleanContext(running, model, history, system);
+			// A model switch compacts the cleaned history, and only when it is still over the switch limit.
+			const current: ChatMessage = { id: running.message.id, role: "assistant", turn, createdAt: running.message.createdAt, parts: [...cleaned] };
+			const initialParts = [...cleaned, ...await this._compactForModel(running, model, cleaned.length > 0 ? [...history, current] : history, system)];
 			await runAgentTurn({
 				backend: this._deps.backend,
 				model,
@@ -1977,6 +2055,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			if (entry.running) {
 				throw new Error(`Subagent ${entry.id} is still working on a task; wait for its report.`);
 			}
+			// No run is started that the provider would only stop at its limit.
+			const blocked = this._deps.subagentBlocked?.(entry.modelId);
+			if (blocked) {
+				throw new Error(`${subagentLimitMessage(blocked, this._deps.subagentModels?.() ?? [])} Subagent ${entry.id} stays open; send it the task again after the reset, or close it.`);
+			}
 			// Its history is ours, so it carries over to another subscription of the same model.
 			const standIn = this._deps.subagentStandIn?.(entry.modelId);
 			const moved = standIn ? this._models.find(candidate => candidate.id === standIn) : undefined;
@@ -2095,7 +2178,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		const last = answer.parts.at(-1);
 		const resetAt = last?.kind === "notice" && last.limit?.kind === "limit" ? last.limit.resetAt : undefined;
 		const now = this._now();
-		if (resetAt === undefined || resetAt - now > AUTO_CONTINUE_HORIZON_MS) {
+		if (resetAt === undefined) {
 			this._clearAutoTimer(sessionId);
 			if (runtime.meta.autoContinue) {
 				await this._storeAutoContinue(sessionId, null);
@@ -2103,7 +2186,9 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			return;
 		}
 		const attempts = previous === undefined ? 0 : Math.min(previous + 1, AUTO_CONTINUE_MAX_ATTEMPTS);
-		const enabled = attempts < AUTO_CONTINUE_MAX_ATTEMPTS;
+		// A reset within hours continues on its own; a weekly one days away waits until the user ticks the box.
+		const soon = resetAt - now <= AUTO_CONTINUE_HORIZON_MS;
+		const enabled = soon && attempts < AUTO_CONTINUE_MAX_ATTEMPTS;
 		const entry = { messageId: answer.id, at: Math.max(resetAt, now) + AUTO_CONTINUE_DELAY_MS, enabled, attempts };
 		await this._storeAutoContinue(sessionId, entry);
 		if (enabled) {
@@ -2111,7 +2196,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			this._log("chat.auto_continue.scheduled", { at: entry.at, attempts });
 		} else {
 			this._clearAutoTimer(sessionId);
-			this._log("chat.auto_continue.cancelled", { reason: "attempts", attempts });
+			this._log("chat.auto_continue.cancelled", { reason: soon ? "attempts" : "far-reset", attempts, at: entry.at });
 		}
 	}
 
@@ -2303,6 +2388,116 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	}
 
 	/**
+	 * A new request over the chat context budget first cleans the history: stale tool results become stubs, then
+	 * older turns are summarized until the chat is at CONTEXT_CLEANING_TARGET_RATIO of the budget. The next request
+	 * starts the provider's session again from the cleaned history, so the cache is rebuilt once per cleaning.
+	 */
+	private async _cleanContext(
+		running: RunningTurn,
+		model: vscode.LanguageModelChatInformation,
+		history: readonly ChatMessage[],
+		system: string | undefined,
+	): Promise<ChatPart[]> {
+		const compaction = this._deps.compaction;
+		const budget = compaction?.cleaningBudget?.() ?? 0;
+		if (!compaction || budget <= 0) {
+			return [];
+		}
+		const fixedTokens = system ? estimateTextTokens(system) : 0;
+		// The first request after a cleaning replays the history into a new session, within the switch limit.
+		const replayTokens = Math.floor(compaction.limits().triggerTokens * CONTEXT_CLEANING_REPLAY_RATIO);
+		const plan = planContextCleaning(history, { budgetTokens: budget, fixedTokens, replayTokens });
+		if (!plan) {
+			return [];
+		}
+		const token = running.cts.token;
+		const startedAt = Date.now();
+		const scaled = (tokens: number): number => Math.round(tokens * plan.scale);
+		let part: ChatCompactionPart | undefined;
+		if (plan.tokensAfterStubs > plan.targetTokens) {
+			const limits: ChatCompactionLimits = { triggerTokens: plan.targetTokens, targetTokens: plan.targetTokens, fixedTokens };
+			const summaryPlan = planChatCompaction(plan.stubbed, limits);
+			if (summaryPlan) {
+				this._emit(running.runtime, { type: "run", run: { running: true, detail: CLEANING_DETAIL } });
+				try {
+					const summary = await compactChatHistory(plan.stubbed, {
+						limits, summarize: compaction.summarize, token, plan: summaryPlan,
+						writer: this._summaryWriters(model),
+						transcriptPath: this._deps.store.logPath(running.sessionId),
+						staleResults: plan.staleResults,
+					});
+					if (summary) {
+						const before = activeCompaction(history)?.part.summarizedMessages ?? 0;
+						const fresh = new Set(plan.freshResults);
+						part = {
+							...summary,
+							tokensBefore: scaled(plan.tokensBefore),
+							tokensAfter: scaled(summary.tokensAfter),
+							// Results of the summarized messages reach the model as the summary, not as stubs.
+							cleaning: { staleResults: (summary.staleResults ?? []).filter(callId => fresh.has(callId)).length, summary: true, summarizedMessages: Math.max(0, summary.summarizedMessages - before), budgetTokens: budget },
+						};
+					}
+				} catch (error) {
+					if (error instanceof vscode.CancellationError || token.isCancellationRequested) {
+						throw error instanceof vscode.CancellationError ? error : new vscode.CancellationError();
+					}
+					this._log("chat.cleaning.summary_failed", { message: errorMessage(error) });
+				} finally {
+					if (!token.isCancellationRequested) {
+						this._emit(running.runtime, { type: "run", run: { running: true } });
+					}
+				}
+			}
+		}
+		part ??= plan.newStale > 0 ? staleOnlyCompaction(history, plan) : undefined;
+		if (!part || !cleaningPaysOff(part, budget)) {
+			this._log("chat.cleaning.skipped", {
+				reason: part ? "small_saving" : "nothing_to_clean",
+				budget,
+				tokensBefore: scaled(plan.tokensBefore),
+				...(part ? { tokensAfter: part.tokensAfter } : {}),
+				staleResults: plan.newStale,
+			});
+			return [];
+		}
+		this._log("chat.cleaning.done", {
+			model: model.id,
+			budget,
+			scale: Number(plan.scale.toFixed(3)),
+			tokensBefore: part.tokensBefore,
+			tokensAfter: part.tokensAfter,
+			estimateBefore: plan.tokensBefore,
+			estimateAfterStubs: plan.tokensAfterStubs,
+			staleResults: part.cleaning?.staleResults ?? 0,
+			stubbedTotal: part.staleResults?.length ?? 0,
+			summary: part.cleaning?.summary ?? false,
+			summarizedMessages: part.cleaning?.summarizedMessages ?? 0,
+			trimmedRounds: part.cleaning?.summary ? part.trimmedTurn?.rounds ?? 0 : 0,
+			method: part.method,
+			durationMs: Date.now() - startedAt,
+			...(part.fallbackReason && part.cleaning?.summary ? { fallbackReason: part.fallbackReason } : {}),
+		});
+		try {
+			compaction.onCleaned?.({
+				conversationId: running.sessionId,
+				modelId: model.id,
+				budgetTokens: budget,
+				tokensBefore: part.tokensBefore,
+				tokensAfter: part.tokensAfter,
+				staleResults: part.cleaning?.staleResults ?? 0,
+				summary: part.cleaning?.summary ?? false,
+				summarizedMessages: part.cleaning?.summarizedMessages ?? 0,
+				durationMs: Date.now() - startedAt,
+				at: Date.now(),
+			});
+		} catch (error) {
+			this._log("chat.cleaning.metrics_failed", { message: errorMessage(error) });
+		}
+		this._addPart(running, part);
+		return [part];
+	}
+
+	/**
 	 * When another model takes over a chat that is over the switch limit, older turns are summarized first,
 	 * so the new model starts from a compact history instead of a cut one.
 	 */
@@ -2331,7 +2526,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		try {
 			const part = await compactChatHistory(history, {
 				limits, summarize: compaction.summarize, token, plan,
-				writer: this._summaryWriter(model),
+				writer: this._summaryWriters(model),
 				transcriptPath: this._deps.store.logPath(running.sessionId),
 			});
 			if (!part) {
@@ -2365,7 +2560,16 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
-	/** The model taking a chat over writes its summary when DeepSeek cannot; it gets no tools and no history. */
+	/** The writers of this chat's summary in order: a local llama.cpp model with room for the evidence, then the model taking the chat over. */
+	private _summaryWriters(model: vscode.LanguageModelChatInformation): ChatSummaryWriter[] {
+		const local = pickLocalSummaryModel(this._models, model.id);
+		return [
+			...(local ? [withSummaryTimeout(this._summaryWriter(local))] : []),
+			this._summaryWriter(model),
+		];
+	}
+
+	/** A model as a summary writer: it gets the compaction prompt, no tools and no history. */
 	private _summaryWriter(model: vscode.LanguageModelChatInformation): ChatSummaryWriter {
 		return {
 			name: model.name,
@@ -2504,6 +2708,10 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		if (token.isCancellationRequested || this._disposed) {
 			return Promise.resolve(false);
 		}
+		if (isAlwaysAllowed(confirmation.kinds, this._alwaysAllowedKeys())) {
+			this._log("chat.tool.approval", { tool: toolName, allowed: true, always: true });
+			return Promise.resolve(true);
+		}
 		this._flushDelta(running);
 		const runtime = running.runtime;
 		const request: ChatApprovalRequest = {
@@ -2514,6 +2722,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			title: confirmation.title,
 			detail: confirmation.detail,
 			reason: confirmation.reason,
+			...(confirmation.kinds && confirmation.kinds.length > 0 ? { kinds: confirmation.kinds.map(kind => ({ ...kind })) } : {}),
 		};
 		return new Promise<boolean>(resolve => {
 			const subscriptions: vscode.Disposable[] = [];
@@ -3018,7 +3227,37 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			...(contextSettings ? { contextSettings } : {}),
 			favoriteModels: this._favoriteModels(),
 			subagents: this._subagentViews(runtime),
+			alwaysAllowed: this._alwaysAllowedKinds(),
 		};
+	}
+
+	private _alwaysAllowedKeys(): ReadonlySet<string> {
+		try {
+			return new Set(this._deps.alwaysAllow?.keys() ?? []);
+		} catch (error) {
+			this._log("chat.always_allow.read_failed", { message: errorMessage(error) });
+			return new Set();
+		}
+	}
+
+	private _alwaysAllowedKinds(): ChatApprovalKind[] {
+		return [...this._alwaysAllowedKeys()].map(key => ({ key, label: approvalKindLabel(key) }));
+	}
+
+	/** Updates the Tools list and lets through every waiting call whose kinds are now all allowed, in every chat. */
+	private _onAlwaysAllowChanged(): void {
+		if (this._disposed) {
+			return;
+		}
+		const allowed = this._alwaysAllowedKeys();
+		for (const runtime of this._runtimes.values()) {
+			for (const approval of [...runtime.approvals.values()]) {
+				if (isAlwaysAllowed(approval.request.kinds, allowed)) {
+					approval.settle(true);
+				}
+			}
+		}
+		this._broadcast({ type: "alwaysAllowed", kinds: this._alwaysAllowedKinds() });
 	}
 
 	private _contextSettings(): ChatContextSettings | undefined {

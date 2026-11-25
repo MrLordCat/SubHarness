@@ -5,15 +5,18 @@ import { CocoTerminalManager } from "../coco/terminal-manager";
 import { CONFIG_SECTION, EXTENSION_ID } from "../constants";
 import { createOsNotifier, vscodeToastAppId } from "../os-notification";
 import { resolveProviderSwitchContextTokens } from "../context/provider-handoff";
+import type { SessionQualityTracker } from "../diagnostics/session-report";
 import { getCurrentWorkspaceScopeId, getCurrentWorkspaceScopeLabel } from "../memory/scope";
 import type { SharedMemoryService } from "../memory/shared-memory-service";
 import { createMemoryTools } from "../memory/tools";
 import { ChatAttachmentSource } from "./attachment-source";
+import { approvalKindLabel, createAlwaysAllowStore } from "./approvals";
 import { ChatChangeTracker } from "./changes/change-tracker";
 import { findGitExecutable } from "./changes/shadow-git";
 import { ChatController, type ChatAccountSource, type ChatQuotaSource } from "./chat-controller";
 import { ChatViewHost, registerChatView } from "./chat-view";
 import { CHAT_COMPACTION_TARGET_TOKENS, createChatSummarizer } from "./compaction";
+import { resolveChatContextBudget } from "./context-cleaning";
 import { createChatContextSettingsSource } from "./context-settings";
 import { createVscodeFileReferenceOpener, openFileReference } from "./file-opener";
 import { createChatMemorySource } from "./memory-context";
@@ -23,8 +26,24 @@ import { ChatPromptSource } from "./prompt/instructions";
 import { ChatSessionStore } from "./session-store";
 import { createChatToolSource } from "./tool-executor";
 import { ChatToolCatalog } from "./tools/catalog";
-import { availableSubagentModelProfiles, subagentStandIn } from "../subagent-guidance";
+import { availableSubagentModelProfiles, blockedSubagentModel, subagentStandIn, unavailableSubagentModelProfiles, type SubagentModelProfile } from "../subagent-guidance";
+import type { SubagentModelOption, UnavailableSubagentModel } from "./tools/types";
+
+function subagentModelOptions(): SubagentModelOption[] {
+	return availableSubagentModelProfiles().map(profile => ({ id: profile.id, label: profile.label, useWhen: profile.useWhen }));
+}
+
+function unavailableSubagentModel(profile: SubagentModelProfile): UnavailableSubagentModel {
+	const until = profile.unavailableUntil ? Date.parse(profile.unavailableUntil) : Number.NaN;
+	return {
+		id: profile.id,
+		label: profile.label,
+		reason: profile.availabilityReason || "its subscription limit is used up",
+		...(Number.isFinite(until) ? { until } : {}),
+	};
+}
 import { createCoreTools } from "./tools/core-tools";
+import { createChangesDiffTool } from "./tools/changes-tools";
 import { createAskQuestionsTool, createTodoTool } from "./tools/interaction-tools";
 import { createCloseSubagentTool, createSubagentTool, createWaitSubagentsTool } from "./tools/subagent-tool";
 import { createSymbolTools } from "./tools/symbol-tools";
@@ -49,6 +68,8 @@ export interface ChatWindowDeps {
 	accounts?: ChatAccountSource;
 	/** Shared durable memory the chat shows to every provider. */
 	memory?: SharedMemoryService;
+	/** Session Quality tracker that records finished context cleanings. */
+	sessionQuality?: Pick<SessionQualityTracker, "recordCleaning">;
 }
 
 const DEEPSEEK_KEY_SECRET = "llamacpp.deepSeekApiKey";
@@ -178,34 +199,44 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 			...createWebTools(),
 			...createSymbolTools(),
 			createTodoTool(),
+			createChangesDiffTool(),
 			createAskQuestionsTool(),
 			...createToolAccessTools(),
 			...(deps.memory ? createMemoryTools(deps.memory) : []),
 			...createChatTerminalTools({ manager: terminals, rules: () => configuredDangerousCommandRules(reportInvalidRule) }),
 			createCheckTool({ logDir: path.join(storage, "chat-checks"), rules: () => configuredDangerousCommandRules(reportInvalidRule) }),
 			createSubagentTool({
-				// The bridge's subagent catalog: cheapest first, premium flagships and exhausted subscriptions left out.
-				models: () => availableSubagentModelProfiles().map(profile => ({ id: profile.id, label: profile.label, useWhen: profile.useWhen })),
+				// The bridge's subagent catalog: cheapest first, premium flagships left out; exhausted subscriptions are
+				// listed apart, so a call to one is answered with its limit instead of "unknown model".
+				models: subagentModelOptions,
+				unavailable: () => unavailableSubagentModelProfiles().map(unavailableSubagentModel),
 			}),
-			createWaitSubagentsTool({ models: () => availableSubagentModelProfiles().map(profile => ({ id: profile.id, label: profile.label, useWhen: profile.useWhen })) }),
-			createCloseSubagentTool({ models: () => availableSubagentModelProfiles().map(profile => ({ id: profile.id, label: profile.label, useWhen: profile.useWhen })) }),
+			createWaitSubagentsTool({ models: subagentModelOptions }),
+			createCloseSubagentTool({ models: subagentModelOptions }),
 		],
 		state: context.globalState,
 	});
 	const attachments = new ChatAttachmentSource({ log: deps.log, pasteDir: vscode.Uri.file(path.join(storage, "chat-attachments")) });
 	const contextSettings = createChatContextSettingsSource();
-	const manageToolApprovals = async (): Promise<void> => {
-		try {
-			// Always-allow choices made here at profile scope also cover the calls this chat makes.
-			await vscode.commands.executeCommand("workbench.action.chat.editToolApproval", "profile");
-		} catch (error) {
-			deps.log?.("chat.tool_approvals.failed", { message: error instanceof Error ? error.message : String(error) });
-			void vscode.window.showWarningMessage("VS Code's tool approval is unavailable. It needs VS Code's chat features enabled (chat.disableAIFeatures off).");
+	const alwaysAllow = createAlwaysAllowStore();
+	/** Lists what runs without an approval card and takes the picked kinds off the list. */
+	const manageAlwaysAllowed = async (): Promise<void> => {
+		const keys = alwaysAllow.keys();
+		if (keys.length === 0) {
+			void vscode.window.showInformationMessage("Nothing is always allowed. Choose Always allow on an approval card in the SubHarness chat.");
+			return;
+		}
+		const picked = await vscode.window.showQuickPick(
+			keys.map(key => ({ label: approvalKindLabel(key), description: key, key })),
+			{ title: "SubHarness: Always Allowed Actions", placeHolder: "Pick the actions that should ask again", canPickMany: true }
+		);
+		for (const item of picked ?? []) {
+			await alwaysAllow.remove(item.key);
 		}
 	};
 	const osNotifier = createOsNotifier({ appId: process.platform === "win32" ? vscodeToastAppId(vscode.env.appRoot) : undefined, log: deps.log });
 	const controller = new ChatController({
-		manageToolApprovals,
+		alwaysAllow,
 		osNotify: (title, body, sessionId) => {
 			if (!vscode.window.state.focused && vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>("chat.systemNotifications", true) !== false) {
 				// Only a Windows toast can carry a click target.
@@ -268,6 +299,11 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		memory,
 		memoryStore,
 		subagentStandIn,
+		subagentBlocked: modelId => {
+			const profile = blockedSubagentModel(modelId);
+			return profile ? unavailableSubagentModel(profile) : undefined;
+		},
+		subagentModels: subagentModelOptions,
 		abandonConversation: async id => { await deps.composite.abandonConversation?.(id); },
 		confirm: async (message, action) => (await vscode.window.showWarningMessage(message, { modal: true }, action)) === action,
 		notify: async (message, action) => {
@@ -292,6 +328,8 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 				// A lowered switch limit lowers the target too, so the compacted chat stays well under it.
 				return { triggerTokens: trigger, targetTokens: Math.min(CHAT_COMPACTION_TARGET_TOKENS, Math.floor(trigger / 2)) };
 			},
+			cleaningBudget: () => resolveChatContextBudget(),
+			onCleaned: event => deps.sessionQuality?.recordCleaning(event),
 		},
 	});
 	const host = registerChatView(context, controller);
@@ -302,6 +340,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 	context.subscriptions.push(
 		terminals,
 		controller,
+		alwaysAllow,
 		contextSettings,
 		vscode.window.registerUriHandler({
 			handleUri: async uri => {
@@ -316,7 +355,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		}),
 		vscode.commands.registerCommand("llamacpp.chat.new", () => controller.newChat()),
 		vscode.commands.registerCommand("llamacpp.chat.history", () => controller.showSessions()),
-		vscode.commands.registerCommand("llamacpp.chat.manageToolApprovals", manageToolApprovals),
+		vscode.commands.registerCommand("llamacpp.chat.manageToolApprovals", manageAlwaysAllowed),
 		vscode.commands.registerCommand("llamacpp.chat.openInEditor", () => host.openInEditor()),
 		vscode.commands.registerCommand("llamacpp.chat.addSelection", async () => {
 			const selection = attachments.selection();

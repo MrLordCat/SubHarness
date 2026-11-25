@@ -4,11 +4,13 @@ import { ApiSourceRouter } from "./providers/api-source-router";
 import { CursorSourceAdapter } from "./providers/api-source-router";
 import { detectBalanceError, detectBalanceFailure, ProviderBalanceError } from "./providers/balance-errors";
 import { reportBalanceNotice } from "./providers/limit-signal";
+import { isHistoryReset } from "./providers/provider-switch";
 import { CursorSdkTransport, type CursorSdkDependencies } from "./cursor/sdk-transport";
 import { CursorProfileTransport } from "./cursor/profile-transport";
 import type { CursorRecordedUsage, CursorLiveTurn } from "./cursor/turn-metrics";
 import { modelInformation } from "./providers/model-descriptor";
 import { AsyncResourceCache } from "./providers/async-resource-cache";
+import { ProbeBackoff } from "./providers/probe-backoff";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -558,6 +560,18 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
      * is asked again only after this pause (15 s, doubling up to 60 s).
      */
     private readonly unreachableSources = new Map<string, { retryAt: number; delayMs: number }>();
+    /**
+     * Background probes of the local llama.cpp server while it is off:
+     * 15 s, 30 s, 1 min, 2 min, 5 min, then 5 min. Chat requests are never
+     * deferred; a successful local request or probe clears the pause.
+     */
+    private readonly localProbeBackoff = new ProbeBackoff({
+        onChange: state => this.log("local.probe.backoff", {
+            failures: state.failureCount,
+            nextDelayMs: state.delayMs,
+            nextProbeAt: state.nextProbeAt === undefined ? undefined : new Date(state.nextProbeAt).toISOString(),
+        }),
+    });
     /** `/slots` probes that returned nothing, so they are not repeated on every poll. */
     private readonly runtimeContextMisses = new Map<string, number>();
     private readonly cachePrefixSnapshots = new BoundedMap<string, CachePrefixSnapshot>(32);
@@ -675,6 +689,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         this.runtimeContextCache.clear();
         this.unreachableSources.clear();
         this.runtimeContextMisses.clear();
+        this.localProbeBackoff.reset();
         this.serverTokenCounter.clear();
         this.log("models.refresh.requested");
         this._onDidChangeLanguageModelChatInformation.fire();
@@ -751,6 +766,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     }
 
     async runHealthCheck(extensionVersion: string, token: CancellationToken): Promise<ProviderHealthReport> {
+        // An explicit health check must probe the local server even while its
+        // background pause is active.
+        this.localProbeBackoff.reset();
         const cfg = this.getConfig();
         const configurationChecks: HealthCheckItem[] = [
             {
@@ -805,6 +823,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             let models: LlamaCppModelInfo[] = [];
             try {
                 models = await this.fetchModels(source.serverUrl, source.apiKey);
+                if (this.isLocalServerSource(source)) {
+                    this.localProbeBackoff.succeeded();
+                }
                 checks.push({
                     id: "model-discovery",
                     label: "Model discovery",
@@ -812,6 +833,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     detail: models.length > 0 ? `${models.length} model(s) returned.` : "The endpoint returned no models.",
                 });
             } catch (error) {
+                if (this.isLocalServerSource(source)) {
+                    this.localProbeBackoff.failed();
+                }
                 checks.push({
                     id: "model-discovery",
                     label: "Model discovery",
@@ -3752,6 +3776,10 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 },
                 this.getModelDiscoveryTimeoutMs()
             );
+            if (this.isLocalServerSource(source)) {
+                // Any HTTP answer means the server is up, even when it has no usable /slots.
+                this.localProbeBackoff.succeeded();
+            }
             this.failureLog.clear(`runtime_context:${serverUrl}`);
 
             if (!response.ok) {
@@ -3808,6 +3836,10 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             });
             return runtimeContextLength;
         } catch (error) {
+            if (this.isLocalServerSource(source)) {
+                // No answer at all: the local server is off, so /slots backs off with the catalog.
+                this.localProbeBackoff.failed();
+            }
             this.logRepeatedFailure(`runtime_context:${serverUrl}`, "models.runtime_context.failed", error, {
                 endpoint: `${serverUrl}/slots`,
             });
@@ -3819,11 +3851,16 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         source: ChatModelSource,
         apiKey: string | undefined,
         apiKeyPresent: boolean,
-        ttlMs: number
+        ttlMs: number,
+        probeDespiteBackoff = false
     ): Promise<number | undefined> {
         const cached = this.getFreshCachedRuntimeContextLength(source, apiKeyPresent, ttlMs);
         if (cached !== undefined) {
             return cached;
+        }
+        if (!probeDespiteBackoff && this.isLocalServerSource(source) && !this.localProbeBackoff.canProbe()) {
+            // The local server is off: background catalog polling and /slots share one pause.
+            return undefined;
         }
         const missKey = this.getSourceCacheKey(source.key, source.serverUrl, apiKeyPresent);
         const missedAt = this.runtimeContextMisses.get(missKey);
@@ -3841,12 +3878,37 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         return runtimeContextLength;
     }
 
-    private isSourceRetryDeferred(cacheKey: string): boolean {
-        const entry = this.unreachableSources.get(cacheKey);
+    /**
+     * The dedicated `local` source, or the `primary` source when it points at
+     * `llamacpp.localServerUrl`. With the default settings both URLs are
+     * `http://localhost:8000` and the created sources deduplicate to `primary`,
+     * so the backoff must cover that name too.
+     */
+    private isLocalServerSource(source: ChatModelSource): boolean {
+        if (source.key === "local") {
+            return true;
+        }
+        const cfg = this.getConfig();
+        if (cfg.get<boolean>("enableLocalServer", true) === false) {
+            return false;
+        }
+        return this.normalizeServerUrl(source.serverUrl) === this.getConfiguredLocalServerUrl();
+    }
+
+    private isSourceRetryDeferred(source: ChatModelSource): boolean {
+        if (this.isLocalServerSource(source)) {
+            return !this.localProbeBackoff.canProbe();
+        }
+        const entry = this.unreachableSources.get(this.getCatalogCacheKey(source));
         return entry !== undefined && Date.now() < entry.retryAt;
     }
 
-    private recordSourceFailure(cacheKey: string): void {
+    private recordSourceFailure(source: ChatModelSource): void {
+        if (this.isLocalServerSource(source)) {
+            this.localProbeBackoff.failed();
+            return;
+        }
+        const cacheKey = this.getCatalogCacheKey(source);
         const previous = this.unreachableSources.get(cacheKey);
         if (previous && Date.now() < previous.retryAt) {
             // Concurrent callers of one failed load count as one failure.
@@ -3858,6 +3920,13 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         this.unreachableSources.set(cacheKey, { retryAt: Date.now() + delayMs, delayMs });
     }
 
+    private recordSourceSuccess(source: ChatModelSource): void {
+        this.unreachableSources.delete(this.getCatalogCacheKey(source));
+        if (this.isLocalServerSource(source)) {
+            this.localProbeBackoff.succeeded();
+        }
+    }
+
     private async fetchModelsWithInflightCache(
         source: ChatModelSource,
         apiKey: string | undefined,
@@ -3865,7 +3934,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     ): Promise<LlamaCppModelInfo[]> {
         void apiKeyPresent;
         const cacheKey = this.getCatalogCacheKey(source);
-        if (this.isSourceRetryDeferred(cacheKey)) {
+        if (this.isSourceRetryDeferred(source)) {
             throw new SourceRetryDeferredError(`${source.label} was unreachable; the next attempt is deferred.`);
         }
         let models: LlamaCppModelInfo[] | undefined;
@@ -3873,12 +3942,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             models = await this.modelListCache.get(cacheKey, () => this.fetchModels(source.serverUrl, apiKey), { ttlMs: 0 });
         } catch (error) {
             if (!(error instanceof vscode.CancellationError)) {
-                this.recordSourceFailure(cacheKey);
+                this.recordSourceFailure(source);
             }
             throw error;
         }
         if (!models) { throw new vscode.CancellationError(); }
-        this.unreachableSources.delete(cacheKey);
+        this.recordSourceSuccess(source);
         return models;
     }
 
@@ -4048,7 +4117,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 return;
             }
 
-            const retryDeferred = this.isSourceRetryDeferred(this.getCatalogCacheKey(source));
+            const retryDeferred = this.isSourceRetryDeferred(source);
             if (!retryDeferred) {
                 this.log("models.request.start", {
                     source: source.key,
@@ -4216,6 +4285,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         // Reasoning must be looked up and stored per conversation so a parallel chat
         // cannot evict entries that this conversation's cached prefix depends on.
         const conversationScope = this.cachePrefixScope(requestModelId, options);
+        // The chat compacted or cleaned its history: a snapshot of the old one must not be chained onto it.
+        if (conversationScope && isHistoryReset(options.modelOptions as Record<string, unknown> | undefined)
+            && this.getConversationMessageSnapshot(conversationScope)) {
+            this.deleteConversationMessageSnapshot(conversationScope);
+            this.log("chat.messages.snapshot_reset", { requestId, reason: "history_reset" });
+        }
         const manualCompactionRequested = this.consumeManualCompaction(
             (options.modelOptions as Record<string, unknown> | undefined)?._conversationId,
             messages
@@ -4298,7 +4373,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             source,
             apiKey,
             apiKeyPresent,
-            this.getModelListCacheTtlMs()
+            this.getModelListCacheTtlMs(),
+            true
         );
         const contextLength = this.resolveRuntimeContextLengthForRequest(model, runtimeContextLength, source);
         const contextUtil = this.clampNumber(cfg.get("contextUtilization", 0.94), 0.5, 0.95, 0.94);
@@ -6271,6 +6347,10 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 metrics,
             });
 
+            if (this.isLocalServerSource(source)) {
+                // A served request is the strongest proof the server is back.
+                this.localProbeBackoff.succeeded();
+            }
             this._onDidCompleteChatTurn.fire(metrics);
             if (conversationScope) {
                 this.lastResponseEndedAtByScope.set(conversationScope, Date.now());

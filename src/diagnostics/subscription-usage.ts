@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-export type SubscriptionProvider = "claude" | "codex" | `codex:${string}`;
+export type SubscriptionProvider = "claude" | "codex" | `codex:${string}` | `claude:${string}`;
 export type SubscriptionWindowKind = "fiveHour" | "weekly";
 
 export interface SubscriptionWindowObservation {

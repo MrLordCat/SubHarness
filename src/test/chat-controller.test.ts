@@ -3,8 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import type { AlwaysAllowStore } from "../chat/approvals";
 import { renderAttachments, type AttachmentContent } from "../chat/attachments";
-import type { ChatChangeTrackerLike, TurnSnapshot } from "../chat/changes/change-tracker";
+import type { ChatChangeDiffOptions, ChatChangeTrackerLike, TurnSnapshot } from "../chat/changes/change-tracker";
+import { CHANGES_DIFF_TOOL_NAME, createChangesDiffTool } from "../chat/tools/changes-tools";
 import { ChatController, continuationRequest, type ChatAccountSource, type ChatAttachmentsDeps, type ChatControllerDeps, type ChatQuotaSource } from "../chat/chat-controller";
 import { interruptedAnswerDigest } from "../chat/retry-digest";
 import { createChatSummarizer, type ChatCompactionPlan } from "../chat/compaction";
@@ -76,6 +78,18 @@ const MODELS: vscode.LanguageModelChatInformation[] = [
 ];
 
 const NEVER_FIRES: vscode.Event<void> = () => new vscode.Disposable(() => undefined);
+
+/** The always-allow setting in memory; changes fire like a settings edit. */
+function memoryAlwaysAllow(initial: string[] = []): AlwaysAllowStore & { keys(): string[] } {
+	let keys = [...initial];
+	const changes = new vscode.EventEmitter<void>();
+	return {
+		keys: () => [...keys],
+		add: async added => { keys = [...keys, ...added.filter(key => !keys.includes(key))]; changes.fire(); },
+		remove: async key => { keys = keys.filter(entry => entry !== key); changes.fire(); },
+		onDidChange: changes.event,
+	};
+}
 const ACTIVE_SESSION_KEY = "llamacpp.chat.activeSession";
 const LAST_MODEL_KEY = "llamacpp.chat.lastModel";
 const THINKING_KEY = "llamacpp.chat.thinking";
@@ -395,7 +409,7 @@ function fakeTools(handler: (name: string, input: unknown) => { text: string; is
 	};
 }
 
-/** A one-tool catalog whose `guarded` tool always asks for approval. */
+/** A one-tool catalog whose `guarded` tool always asks for approval; input.kinds lists the call's kinds. */
 function guardedCatalog(): { source: ChatToolSource; runs: unknown[]; toggles: Array<{ names: readonly string[]; enabled: boolean }> } {
 	const runs: unknown[] = [];
 	const toggles: Array<{ names: readonly string[]; enabled: boolean }> = [];
@@ -404,7 +418,15 @@ function guardedCatalog(): { source: ChatToolSource; runs: unknown[]; toggles: A
 		description: "Needs approval.",
 		inputSchema: { type: "object", properties: {} },
 		group: "terminal",
-		needsConfirmation: () => ({ title: "Run a dangerous command", detail: "git push --force", reason: "Matches a rule." }),
+		needsConfirmation: input => {
+			const keys = (input as { kinds?: string[] } | undefined)?.kinds;
+			return {
+				title: "Run a dangerous command",
+				detail: "git push --force",
+				reason: "Matches a rule.",
+				...(keys ? { kinds: keys.map(key => ({ key, label: `Label of ${key}` })) } : {}),
+			};
+		},
 		invoke: async input => {
 			runs.push(input);
 			return "ran";
@@ -558,7 +580,7 @@ function createHarness(
 	backend: FakeBackend,
 	tools?: ChatToolSource,
 	changes?: ChatChangeTrackerLike,
-	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "osNotify" | "manageToolApprovals" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState" | "saveExport" | "openImage" | "openFileReference" | "terminals" | "now" | "setTimer" | "maxRequests" | "subagentStandIn">,
+	extra?: Pick<ChatControllerDeps, "prompt" | "compaction" | "abandonConversation" | "quota" | "accounts" | "log" | "confirm" | "notify" | "osNotify" | "alwaysAllow" | "attachments" | "memory" | "memoryStore" | "contextSettings" | "globalState" | "saveExport" | "openImage" | "openFileReference" | "terminals" | "now" | "setTimer" | "maxRequests" | "subagentStandIn" | "subagentBlocked" | "subagentModels">,
 ): Harness {
 	const store = new ChatSessionStore(root);
 	const state = new FakeMemento();
@@ -726,19 +748,50 @@ suite("chat controller", () => {
 		assert.strictEqual(clock.timers[0].disposed, true);
 	});
 
-	test("auto-continue ignores distant limits and balance signals", async () => {
+	test("Continue on another subscription switches the chat to that model and continues the answer", async () => {
 		const clock = autoClock();
+		const models = [...MODELS, { ...MODELS[0], id: "codex::work::fast", name: "Fast (Codex 2)" }];
+		const backend = new FakeBackend([
+			limitRound(clock.now() + 3_600_000),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done on Codex 2")),
+		], models);
+		const current = createHarness(root, backend, undefined, undefined, clock);
+		harness = current;
+		const id = await startLimited(current);
+		const answer = (await current.store.load(id)).at(-1)!;
+		assert.strictEqual(backend.requests[0].modelId, "codex::fast");
+		current.webview.receive({ type: "continueOnModel", messageId: "another-message", modelId: "codex::work::fast" });
+		current.webview.receive({ type: "continueOnModel", messageId: answer.id, modelId: "codex::gone::fast" });
+		current.webview.receive({ type: "continueOnModel", messageId: answer.id, modelId: "codex::work::fast" });
+		await waitFor(() => backend.requests.length === 2, "continuation");
+		assert.strictEqual(backend.requests[1].modelId, "codex::work::fast", "the other subscription's model continues");
+		await waitForAsync(async () => (await current.store.get(id))?.modelId === "codex::work::fast", "the chat keeps that model");
+		await waitForAsync(async () => (await current.store.load(id)).some(message => message.role === "user" && message.continuation), "a continuation like Retry");
+		await waitForAsync(async () => !(await current.store.get(id))?.autoContinue, "the pending auto-continue is replaced");
+	});
+
+	test("auto-continue offers a weekly reset switched off; a balance signal clears it", async () => {
+		const clock = autoClock();
+		const resetAt = clock.now() + 3 * 24 * 3_600_000;
 		const current = createHarness(root, new FakeBackend([
-			limitRound(clock.now() + 3 * 24 * 3_600_000),
+			limitRound(resetAt),
 			progress => progress.report(limitSignalPart({ kind: "balance", provider: "Codex", text: "Balance exhausted." })),
 		]), undefined, undefined, clock);
 		harness = current;
 		const id = await startLimited(current);
-		assert.strictEqual((await current.store.get(id))?.autoContinue, undefined);
+		await waitForAsync(async () => (await current.store.get(id))?.autoContinue !== undefined, "stored entry");
+		const entry = (await current.store.get(id))!.autoContinue!;
+		assert.deepStrictEqual(entry, { messageId: entry.messageId, at: resetAt + 60_000, enabled: false, attempts: 0 }, "days away: the box is there, unticked");
+		assert.strictEqual(clock.timers.length, 0);
+
+		current.webview.receive({ type: "setAutoContinue", sessionId: id, messageId: entry.messageId, enabled: true });
+		await waitFor(() => clock.timers.length === 1, "timer after ticking the box");
+		assert.strictEqual((await current.store.get(id))?.autoContinue?.at, resetAt + 60_000);
+
 		current.webview.receive({ type: "send", text: "Again" });
 		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "balance turn");
-		assert.strictEqual((await current.store.get(id))?.autoContinue, undefined);
-		assert.strictEqual(clock.timers.length, 0);
+		await waitForAsync(async () => (await current.store.get(id))?.autoContinue === undefined, "cleared by the balance turn");
+		assert.strictEqual(clock.timers[0].disposed, true);
 	});
 
 	test("auto-continue stops after three limited continuations", async () => {
@@ -919,12 +972,15 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(notifications, [[(await current.store.get(id))?.title, "The agent finished.", id]]);
 	});
 
-	test("the tool picker's approval link opens VS Code's tool approval", async () => {
-		let opened = 0;
-		const current = createHarness(root, new FakeBackend([]), undefined, undefined, { manageToolApprovals: async () => { opened++; } });
+	test("init lists the always-allowed kinds with their names", async () => {
+		const current = createHarness(root, new FakeBackend([]), undefined, undefined, { alwaysAllow: memoryAlwaysAllow(["write-outside-workspace", "command:git-restore"]) });
 		harness = current;
-		current.webview.receive({ type: "manageToolApprovals" });
-		await waitFor(() => opened === 1, "tool approval opened");
+		current.webview.receive({ type: "ready" });
+		await waitFor(() => current.webview.ofType("init").length === 1, "init");
+		assert.deepStrictEqual(current.webview.ofType("init")[0].alwaysAllowed, [
+			{ key: "write-outside-workspace", label: "Create, edit and delete files outside the workspace" },
+			{ key: "command:git-restore", label: "git restore" },
+		]);
 	});
 
 	test("stops a running turn with an info notice", async () => {
@@ -2583,6 +2639,100 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(result, { kind: "toolResult", callId: "call-g", text: "ran", isError: false });
 	});
 
+	test("Always allow stores the call's kinds and the next call of that kind runs without a card", async () => {
+		const catalog = guardedCatalog();
+		const store = memoryAlwaysAllow();
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-1", "guarded", { kinds: ["command:git-push-force"] })),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-2", "guarded", { kinds: ["command:git-push-force"] })),
+			progress => progress.report(new vscode.LanguageModelTextPart("pushed twice")),
+		]);
+		const current = createHarness(root, backend, catalog.source, undefined, { alwaysAllow: store });
+		harness = current;
+		current.webview.receive({ type: "send", text: "push" });
+		await waitFor(() => current.webview.ofType("approval").length === 1, "approval request");
+		const request = current.webview.ofType("approval")[0].request;
+		assert.deepStrictEqual(request.kinds, [{ key: "command:git-push-force", label: "Label of command:git-push-force" }]);
+		current.webview.receive({ type: "approve", id: request.id, allow: true, always: true });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(store.keys(), ["command:git-push-force"]);
+		assert.strictEqual(current.webview.ofType("approval").length, 1, "the second call did not ask");
+		assert.deepStrictEqual(catalog.runs.length, 2);
+		assert.deepStrictEqual(current.webview.ofType("alwaysAllowed").at(-1)?.kinds, [{ key: "command:git-push-force", label: "git push --force, --delete, --mirror or --prune" }]);
+	});
+
+	test("a call of two kinds asks until both are allowed, and a revoked kind asks again", async () => {
+		const catalog = guardedCatalog();
+		const store = memoryAlwaysAllow(["command:git-restore"]);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-1", "guarded", { kinds: ["command:git-restore", "command:rm-recursive"] })),
+			progress => progress.report(new vscode.LanguageModelTextPart("done")),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-2", "guarded", { kinds: ["command:git-restore"] })),
+			progress => progress.report(new vscode.LanguageModelTextPart("done again")),
+		]);
+		const current = createHarness(root, backend, catalog.source, undefined, { alwaysAllow: store });
+		harness = current;
+		current.webview.receive({ type: "send", text: "restore and clean" });
+		await waitFor(() => current.webview.ofType("approval").length === 1, "approval for the second rule");
+		current.webview.receive({ type: "approve", id: current.webview.ofType("approval")[0].request.id, allow: true });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "first turn");
+		assert.deepStrictEqual(store.keys(), ["command:git-restore"], "a plain Allow stores nothing");
+
+		current.webview.receive({ type: "revokeAlwaysAllow", key: "command:git-restore" });
+		await waitFor(() => store.keys().length === 0, "revoked");
+		assert.deepStrictEqual(current.webview.ofType("alwaysAllowed").at(-1)?.kinds, []);
+		current.webview.receive({ type: "send", text: "restore" });
+		await waitFor(() => current.webview.ofType("approval").length === 2, "a revoked kind asks again");
+		current.webview.receive({ type: "approve", id: current.webview.ofType("approval")[1].request.id, allow: true });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "second turn");
+		assert.strictEqual(catalog.runs.length, 2);
+	});
+
+	test("Always allow lets through a waiting card of the same kind in another chat", async () => {
+		const catalog = guardedCatalog();
+		const store = memoryAlwaysAllow();
+		const gate = deferred();
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-a", "guarded", { kinds: ["write-outside-workspace"] })),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-b", "guarded", { kinds: ["write-outside-workspace"] })),
+			async progress => { await gate.promise; progress.report(new vscode.LanguageModelTextPart("first done")); },
+			progress => progress.report(new vscode.LanguageModelTextPart("second done")),
+		]);
+		const current = createHarness(root, backend, catalog.source, undefined, { alwaysAllow: store });
+		harness = current;
+		current.webview.receive({ type: "send", text: "write outside" });
+		await waitFor(() => current.webview.ofType("approval").length === 1, "first chat waits");
+		const first = current.webview.ofType("approval")[0].request;
+		await current.controller.newChat();
+		current.webview.receive({ type: "send", text: "write outside too" });
+		await waitFor(() => current.webview.ofType("approval").length === 2, "second chat waits");
+		const second = current.webview.ofType("approval")[1].request;
+		assert.notStrictEqual(first.id, second.id);
+		current.webview.receive({ type: "approve", id: second.id, allow: true, always: true });
+		// The first chat is in the background now: its card settles without a message to this view.
+		gate.resolve();
+		await waitFor(() => catalog.runs.length === 2, "both calls ran");
+		assert.deepStrictEqual(store.keys(), ["write-outside-workspace"]);
+	});
+
+	test("a call that names no kind keeps asking", async () => {
+		const catalog = guardedCatalog();
+		const store = memoryAlwaysAllow(["write-outside-workspace"]);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-1", "guarded", {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("done")),
+		]);
+		const current = createHarness(root, backend, catalog.source, undefined, { alwaysAllow: store });
+		harness = current;
+		current.webview.receive({ type: "send", text: "go" });
+		await waitFor(() => current.webview.ofType("approval").length === 1, "approval request");
+		const request = current.webview.ofType("approval")[0].request;
+		assert.strictEqual(request.kinds, undefined);
+		current.webview.receive({ type: "approve", id: request.id, allow: true, always: true });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn end");
+		assert.deepStrictEqual(store.keys(), ["write-outside-workspace"], "nothing to store");
+	});
+
 	test("a denied or stopped approval never runs the tool", async () => {
 		const catalog = guardedCatalog();
 		const backend = new FakeBackend([
@@ -3397,6 +3547,50 @@ suite("chat controller", () => {
 		assert.deepStrictEqual(backend.requests[1].messages.map(messageText), ["First question", longReply, "Second question"]);
 	});
 
+	test("cleans a chat over its context budget and starts the provider session again once", async () => {
+		const longReply = "x".repeat(2_000);
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelTextPart(longReply)),
+			progress => progress.report(new vscode.LanguageModelTextPart("second reply")),
+			progress => progress.report(new vscode.LanguageModelTextPart("third reply")),
+		]);
+		const plans: ChatCompactionPlan[] = [];
+		const current = createHarness(root, backend, undefined, undefined, {
+			compaction: {
+				summarize: async plan => {
+					plans.push(plan);
+					return { summary: "SUMMARY", method: "deepseek" };
+				},
+				limits: () => ({ triggerTokens: 1_000_000, targetTokens: 1_000_000 }),
+				cleaningBudget: () => 300,
+			},
+		});
+		harness = current;
+		const finished = (): number => current.webview.ofType("run").filter(message => !message.run.running).length;
+		current.webview.receive({ type: "send", text: "First question" });
+		await waitFor(() => finished() === 1, "first turn");
+		current.webview.receive({ type: "send", text: "Second question" });
+		await waitFor(() => finished() === 2, "second turn");
+		current.webview.receive({ type: "send", text: "Third question" });
+		await waitFor(() => finished() === 3, "third turn");
+
+		assert.strictEqual(plans.length, 1, "the third request fits the budget again");
+		assert.ok(current.webview.ofType("run").some(message => message.run.detail === "Cleaning context…"));
+		const assistant2 = current.webview.ofType("messageAdded").map(message => message.message).find(message => message.role === "assistant" && message.turn === 2);
+		assert.ok(assistant2);
+		const cleaning = current.webview.ofType("partAdded").filter(message => message.messageId === assistant2.id).map(message => message.part)[0];
+		if (cleaning?.kind !== "compaction") {
+			throw new Error("expected a cleaning part");
+		}
+		assert.deepStrictEqual(cleaning.cleaning, { staleResults: 0, summary: true, summarizedMessages: 2, budgetTokens: 300 });
+		assert.ok(cleaning.tokensBefore > 300 && cleaning.tokensAfter < cleaning.tokensBefore, "sizes are in provider tokens");
+		assert.strictEqual(messageText(backend.requests[1].messages[0]), compactionSummaryText(cleaning));
+		assert.ok(!backend.requests[1].messages.some(message => messageText(message).includes(longReply)));
+		assert.strictEqual(backend.requests[0].options.modelOptions?._aabHistoryReset, undefined);
+		assert.strictEqual(backend.requests[1].options.modelOptions?._aabHistoryReset, true, "the first request after the cleaning starts a new session");
+		assert.strictEqual(backend.requests[2].options.modelOptions?._aabHistoryReset, undefined, "a model answered since, so its session holds the cleaned history");
+	});
+
 	test("background subagent keeps the turn open and sends an automatic report", async () => {
 		const gate = deferred();
 		const options = { models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] };
@@ -3546,6 +3740,39 @@ suite("chat controller", () => {
 		assert.ok(calls.indexOf("write") < calls.findIndex(call => call.startsWith("end:")));
 	});
 
+	test("changes_diff shows the running turn's changes to the agent and to a reviewer subagent", async () => {
+		const calls: string[] = [];
+		const diffs: string[] = [];
+		class DiffTracker extends FakeTracker {
+			async diff(_sessionId: string, begin: TurnSnapshot | undefined, claimed: readonly string[], options: ChatChangeDiffOptions): Promise<string> {
+				const call = `diff:${options.scope}:${begin?.get("root")?.tree ?? "none"}:${claimed.join(",")}`;
+				diffs.push(call);
+				return call;
+			}
+		}
+		const options = { models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] };
+		const writtenFile = path.join(root, "reviewed.txt");
+		const write: ChatTool = { name: "write_probe", description: "Write", group: "files", inputSchema: { type: "object" }, writes: () => [writtenFile], invoke: async () => "written" };
+		const source = createChatToolSource({ enabledTools: () => [createSubagentTool(options), createChangesDiffTool(), write], groups: () => [], setEnabled: async () => undefined });
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("early", CHANGES_DIFF_TOOL_NAME, {})),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("write", "write_probe", {})),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("review", SUBAGENT_TOOL_NAME, { prompt: "Review the diff", model: "Smart (Claude)" })),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("sub-diff", CHANGES_DIFF_TOOL_NAME, { scope: "pending" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("Looks right")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		const current = createHarness(root, backend, source, new DiffTracker(calls));
+		harness = current;
+		current.webview.receive({ type: "send", text: "Change and review" });
+		await waitFor(() => current.webview.ofType("run").some(message => !message.run.running), "turn ends");
+		assert.deepStrictEqual(diffs, [
+			"diff:turn:none:",
+			`diff:pending:tree-before:${writtenFile}`,
+		], "no snapshot before the first write; the subagent sees the parent turn and its claimed writes");
+		assert.strictEqual(calls.filter(call => call === "begin").length, 1, "a diff alone starts no snapshot");
+	});
+
 	test("open subagent persists its report and can be continued", async () => {
 		const subagent = createSubagentTool({ models: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }] });
 		const source = createChatToolSource({ enabledTools: () => [subagent], groups: () => [], setEnabled: async () => undefined });
@@ -3633,6 +3860,40 @@ suite("chat controller", () => {
 		const [saved] = await current.store.loadSubagents(sessionId);
 		assert.strictEqual(saved.modelId, second.id);
 		assert.strictEqual(saved.modelName, "Fast (Codex 2)");
+	});
+
+	test("an open subagent whose limit is used up answers at once and stays open", async () => {
+		const subagent = createSubagentTool({ models: () => [{ id: "codex::fast", label: "Fast (Codex)", useWhen: "tests" }] });
+		const source = createChatToolSource({ enabledTools: () => [subagent], groups: () => [], setEnabled: async () => undefined });
+		let id = "";
+		let usedUp = false;
+		const backend = new FakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("open", SUBAGENT_TOOL_NAME, { description: "Check", prompt: "First task", model: "Fast (Codex)", keepOpen: true })),
+			progress => progress.report(new vscode.LanguageModelTextPart("First answer")),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+			progress => progress.report(new vscode.LanguageModelToolCallPart("follow", SUBAGENT_TOOL_NAME, { subagentId: id, prompt: "Second task" })),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done again")),
+		]);
+		const current = createHarness(root, backend, source, undefined, {
+			subagentBlocked: modelId => usedUp && modelId === "codex::fast"
+				? { id: modelId, label: "Fast (Codex)", reason: "Codex 1: ChatGPT subscription limit reached (100%)" }
+				: undefined,
+			subagentModels: () => [{ id: "claude::smart", label: "Smart (Claude)", useWhen: "tests" }],
+		});
+		harness = current;
+		current.webview.receive({ type: "send", text: "Delegate" });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 1, "first turn");
+		id = current.webview.ofType("subagents").find(message => message.subagents.some(agent => agent.status === "idle"))!.subagents[0].id;
+
+		usedUp = true;
+		current.webview.receive({ type: "send", text: "Continue" });
+		await waitFor(() => current.webview.ofType("run").filter(message => !message.run.running).length === 2, "second turn");
+		assert.strictEqual(backend.requests.length, 5, "no subagent request was sent");
+		const answer = backend.requests[4].messages.flatMap(message => message.content)
+			.find((part): part is vscode.LanguageModelToolResultPart => part instanceof vscode.LanguageModelToolResultPart && part.callId === "follow");
+		const text = answer?.content.map(part => part instanceof vscode.LanguageModelTextPart ? part.value : "").join("") ?? "";
+		assert.match(text, /"Fast \(Codex\)" cannot start: Codex 1: ChatGPT subscription limit reached \(100%\)\. No subagent was started\. Choose another model: "Smart \(Claude\)"\./);
+		assert.match(text, new RegExp(`Subagent ${id} stays open`));
 	});
 
 	for (const method of ["tool", "webview"] as const) {

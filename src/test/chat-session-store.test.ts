@@ -364,6 +364,21 @@ suite("Chat session store", () => {
 		]);
 	});
 
+	test("round-trips stale-only cleaning metadata", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		const assistant = chatMessage("a1", "assistant", []);
+		const compaction: ChatPart = {
+			kind: "compaction", method: "none", summary: "", keepFromMessageId: "a1",
+			summarizedMessages: 0, tokensBefore: 400, tokensAfter: 120, staleResults: ["call-1"],
+			cleaning: { staleResults: 1, summary: false, summarizedMessages: 0, budgetTokens: 200000 },
+		};
+		await store.appendMessage(session.id, assistant);
+		await store.appendPart(session.id, "a1", compaction);
+		await store.flush();
+		assert.deepStrictEqual(await new ChatSessionStore(root).load(session.id), [{ ...assistant, parts: [compaction] }]);
+	});
+
 	test("round-trips memory context and revisions", async () => {
 		const store = new ChatSessionStore(root);
 		const session = await store.create();

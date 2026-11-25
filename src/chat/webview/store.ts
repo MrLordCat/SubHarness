@@ -1,5 +1,6 @@
 import {
 	applyHostUpdate,
+	type ChatApprovalKind,
 	type ChatApprovalRequest,
 	type ChatAttachment,
 	type ChatAttachmentTarget,
@@ -43,6 +44,7 @@ const HOST_MESSAGE_TYPES = new Set([
 	"usage",
 	"truncated",
 	"run",
+	"alwaysAllowed",
 	"approval",
 	"approvalResolved",
 	"questions",
@@ -113,6 +115,7 @@ export class ChatStore {
 	models: ChatModelGroup[] = [];
 	tools: ChatToolGroup[] = [];
 	approvals: ChatApprovalRequest[] = [];
+	alwaysAllowed: ChatApprovalKind[] = [];
 	/** Question cards the agent waits on. */
 	questionRequests: ChatQuestionRequest[] = [];
 	/** The newest plan the agent kept with manage_todo_list; undefined until it calls the tool. */
@@ -375,6 +378,7 @@ export class ChatStore {
 				this.quota = update.quota;
 				this.activity = update.activity;
 				this.approvals = update.approvals;
+				this.alwaysAllowed = update.alwaysAllowed ?? [];
 				this.questionRequests = update.questions ?? [];
 				this.changes = update.changes;
 				this.selectedModelId = update.selectedModelId;
@@ -446,6 +450,9 @@ export class ChatStore {
 				return;
 			case "tools":
 				this.tools = update.tools;
+				return;
+			case "alwaysAllowed":
+				this.alwaysAllowed = update.kinds;
 				return;
 			case "approval":
 				if (!this.approvals.some(request => request.id === update.request.id)) {

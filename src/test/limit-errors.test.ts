@@ -8,6 +8,7 @@ import { ConversationHistory } from "../providers/conversation-history";
 import {
 	detectLimitError,
 	formatLimitNotice,
+	formatResetClock,
 	formatWait,
 	LimitGate,
 	parseResetTime,
@@ -22,6 +23,7 @@ const model = (id: string) => ({ id, name: id, family: "fixture", version: "1", 
 
 suite("Subscription limit errors", () => {
 	const reference = new Date("2026-11-01T10:00:00.000Z");
+	const fixed = new Date("2026-11-25T10:00:00.000Z");
 
 	test("recognizes the Claude 5-hour window and its reset time", () => {
 		const match = detectLimitError(new Error("Claude API error: You've hit your 5-hour limit · resets 4pm (Europe/Tallinn)"), undefined, reference);
@@ -32,6 +34,76 @@ suite("Subscription limit errors", () => {
 		assert.ok(match.resetAt);
 		assert.strictEqual(match.resetAt.toISOString(), "2026-11-01T14:00:00.000Z",
 			"16:00 in Tallinn (UTC+2 in November) on the same day");
+	});
+
+	test("reads a dated Claude reset instead of a clock time", () => {
+		const weekly = detectLimitError(new Error("You've hit your weekly limit · resets Nov 28, 4pm (Europe/Tallinn)"), undefined, fixed);
+		assert.ok(weekly);
+		assert.strictEqual(weekly.provider, "claude");
+		assert.strictEqual(weekly.window, "weekly");
+		assert.strictEqual(weekly.timeZone, "Europe/Tallinn");
+		assert.strictEqual(weekly.resetAt?.toISOString(), "2026-11-28T14:00:00.000Z",
+			"16:00 in Tallinn, not 04:00 today and not 28:00");
+		const opus = detectLimitError(new Error("You've hit your Opus limit · resets Nov 28, 4:30pm (Europe/Tallinn)"), undefined, fixed);
+		assert.strictEqual(opus?.window, "weekly");
+		assert.strictEqual(opus?.resetAt?.toISOString(), "2026-11-28T14:30:00.000Z");
+		assert.strictEqual(detectLimitError(new Error("You've hit your Sonnet limit · resets Nov 28, 4pm (Europe/Tallinn)"), undefined, fixed)?.window, "weekly");
+		assert.strictEqual(detectLimitError(new Error("You've hit your Fable 5 limit · resets Nov 28, 4pm (Europe/Tallinn)"), undefined, fixed)?.window, "weekly");
+	});
+
+	test("a Claude session limit is the 5-hour window", () => {
+		const match = detectLimitError(new Error("You've hit your session limit · resets 6pm (Europe/Tallinn)"), undefined, fixed);
+		assert.strictEqual(match?.window, "5-hour");
+		assert.strictEqual(match?.resetAt?.toISOString(), "2026-11-25T16:00:00.000Z");
+	});
+
+	test("a dated reset without a year uses the year that keeps it current", () => {
+		const explicit = parseResetTime("resets Jan 2, 2027, 4pm (Europe/Tallinn)", fixed);
+		assert.strictEqual(explicit?.at.toISOString(), "2027-01-02T14:00:00.000Z");
+		const sameYear = parseResetTime("resets Nov 28, 4pm (Europe/Tallinn)", fixed);
+		assert.strictEqual(sameYear?.at.toISOString(), "2026-11-28T14:00:00.000Z");
+		const rollover = parseResetTime("resets Jan 2, 4pm (Europe/Tallinn)", new Date("2026-12-30T10:00:00.000Z"));
+		assert.strictEqual(rollover?.at.toISOString(), "2027-01-02T14:00:00.000Z", "December sees January in the next year");
+		const recent = parseResetTime("resets Nov 28, 4pm (Europe/Tallinn)", new Date("2026-11-29T10:00:00.000Z"));
+		assert.strictEqual(recent?.at.toISOString(), "2026-11-28T14:00:00.000Z", "less than a day past keeps the current year");
+		const past = parseResetTime("resets Nov 28, 4pm (Europe/Tallinn)", new Date("2026-11-30T10:00:00.000Z"));
+		assert.strictEqual(past?.at.toISOString(), "2027-11-28T14:00:00.000Z", "more than a day past means next year");
+	});
+
+	test("reads the Codex month-day form as local time", () => {
+		const match = detectLimitError(new Error(
+			"You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 28th, 2026 4:12 PM."),
+			undefined, fixed);
+		assert.ok(match);
+		assert.strictEqual(match.provider, "codex");
+		assert.strictEqual(match.timeZone, undefined, "Codex reports local time");
+		assert.ok(match.resetAt);
+		assert.strictEqual(match.resetAt.getFullYear(), 2026);
+		assert.strictEqual(match.resetAt.getMonth(), 10, "November");
+		assert.strictEqual(match.resetAt.getDate(), 28);
+		assert.strictEqual(match.resetAt.getHours(), 16);
+		assert.strictEqual(match.resetAt.getMinutes(), 12);
+	});
+
+	test("formats multi-day waits and resets with their date", () => {
+		assert.strictEqual(formatWait(new Date(fixed.getTime() + (2 * 24 + 5) * 3_600_000), fixed), "2 d 5 h");
+		assert.strictEqual(formatWait(new Date(fixed.getTime() + 3 * 24 * 3_600_000), fixed), "3 d");
+		assert.strictEqual(formatWait(new Date(fixed.getTime() + 25 * 3_600_000), fixed), "1 d 1 h");
+		assert.strictEqual(formatWait(new Date(fixed.getTime() + 45 * 60_000), fixed), "45 min", "under a day is unchanged");
+		assert.strictEqual(formatWait(new Date(fixed.getTime() + (3 * 60 + 37) * 60_000), fixed), "3 h 37 min");
+		const reset = { resetAt: new Date("2026-11-28T14:00:00.000Z"), timeZone: "Europe/Tallinn" };
+		const clock = formatResetClock(reset, fixed);
+		assert.ok(clock);
+		assert.match(clock, /28 Nov/);
+		assert.match(clock, /16:00/);
+		assert.match(clock, /EET/);
+		assert.strictEqual(
+			formatLimitNotice("claude", { provider: "claude", window: "weekly", reason: "usage limit", ...reset }, fixed),
+			`Claude weekly limit reached. It resets at ${clock} (in 3 d 4 h). Wait for the reset, then send the message again. No retry was made.`
+		);
+		assert.strictEqual(formatResetClock({ resetAt: new Date("2026-11-25T14:00:00.000Z"), timeZone: "Europe/Tallinn" }, fixed), "16:00 EET",
+			"within a day only the clock is shown");
+		assert.match(formatResetClock({ resetAt: new Date("2027-01-02T14:00:00.000Z"), timeZone: "Europe/Tallinn" }, fixed) ?? "", /2 Jan 2027/);
 	});
 
 	test("recognizes the Codex usage limit and its retry time", () => {
@@ -111,6 +183,12 @@ suite("Subscription limit errors", () => {
 		assert.strictEqual(parseResetTime("2026-11-01T18:00:00.000Z", now)?.at.toISOString(), "2026-11-01T18:00:00.000Z");
 		const past = parseResetTime("resets at 9am", now);
 		assert.ok(past); assert.ok(past.at.getTime() > now.getTime(), "a past clock time means tomorrow");
+		const dated = parseResetTime("resets Nov 28, 4pm", now);
+		assert.ok(dated);
+		assert.strictEqual(dated.at.getMonth(), 10);
+		assert.strictEqual(dated.at.getDate(), 28, "the day is a date, not a clock hour");
+		assert.strictEqual(dated.at.getHours(), 16);
+		assert.strictEqual(dated.at.getMinutes(), 0);
 	});
 
 	test("fails fast while the window is still limited", () => {

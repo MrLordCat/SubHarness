@@ -51,7 +51,8 @@ const BUILTIN_GROUP_LABELS: Record<string, string> = {
 	[CHAT_TOOL_GROUPS.bridge]: "SubHarness",
 };
 const GROUP_ORDER: readonly string[] = Object.keys(BUILTIN_GROUP_LABELS);
-const EXTERNAL_NOTE = "Run through VS Code, which asks in a dialog unless its tool approval allows them.";
+// VS Code skips its saved tool approvals for calls without a chat session of its own, which is how this chat calls them.
+const EXTERNAL_NOTE = "Run through VS Code: tools that may change something (MCP tools not marked read-only) ask in VS Code's own dialog every time. SubHarness cannot skip that dialog.";
 
 export interface ToolRegistry {
 	tools(): readonly vscode.LanguageModelToolInformation[];

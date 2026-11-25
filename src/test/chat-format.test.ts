@@ -1,6 +1,6 @@
 import * as assert from "node:assert";
 import type { ChatMessage, ChatPart, ChatProviderQuota, ChatUsageTotals } from "../chat/shared/protocol";
-import { answerStart, contextIndicator, contextIndicatorTitle, describeToolCall, exhaustedWindow, formatAge, formatCacheHit, formatQuotaExhausted, formatQuotaSummary, formatReset, modelCacheStats, parseUriList, selectedModelProvider, sessionGroup } from "../chat/webview/format";
+import { answerStart, contextIndicator, contextIndicatorTitle, describeToolCall, exhaustedWindow, formatAge, formatCacheHit, formatQuotaExhausted, formatQuotaSummary, formatReset, modelCacheStats, otherSubscriptionModels, parseUriList, selectedModelProvider, sessionGroup } from "../chat/webview/format";
 import { groupModels } from "../chat/shared/model-groups";
 
 function time(date: Date): string {
@@ -41,6 +41,35 @@ suite("Chat webview formatting", () => {
 		assert.strictEqual(formatReset(whole.getTime(), now), `${time(whole)} (in 2 h)`);
 		const mixed = new Date(2026, 10, 18, 11, 5);
 		assert.strictEqual(formatReset(mixed.getTime(), now), `${time(mixed)} (in 2 h 5 min)`);
+	});
+
+	test("a reset a day or more away counts days and hours", () => {
+		const now = new Date(2026, 10, 18, 9, 0).getTime();
+		const weekly = new Date(2026, 10, 20, 14, 30);
+		assert.strictEqual(formatReset(weekly.getTime(), now), `${dateTime(weekly)} (in 2 d 5 h)`);
+		const whole = new Date(2026, 10, 21, 9, 10);
+		assert.strictEqual(formatReset(whole.getTime(), now), `${dateTime(whole)} (in 3 d)`);
+		const day = new Date(2026, 10, 19, 9, 0);
+		assert.strictEqual(formatReset(day.getTime(), now), `${dateTime(day)} (in 1 d)`);
+	});
+
+	test("finds the same model on the provider's other subscriptions with room", () => {
+		const now = Date.UTC(2026, 10, 25, 10, 0);
+		const models = groupModels([
+			{ id: "claude::claude-opus-5-5", name: "Opus 5.5 (Claude 1)", maxInputTokens: 1 },
+			{ id: "claude::work::claude-opus-5-5", name: "Opus 5.5 (Claude 2)", maxInputTokens: 1 },
+			{ id: "claude::work::claude-opus-5", name: "Opus 5 (Claude 2)", maxInputTokens: 1 },
+			{ id: "codex::gpt-6.2-sol", name: "GPT-6.2-Sol (Codex 1)", maxInputTokens: 1 },
+			{ id: "codex::home::gpt-6.2-sol", name: "GPT-6.2-Sol (Codex 2)", maxInputTokens: 1 },
+			{ id: "deepseek::deepseek-flash", name: "Flash (DeepSeek)", maxInputTokens: 1 },
+		]);
+		const full = (provider: string): ChatProviderQuota => ({ provider, windows: [{ label: "5h", percent: 100, resetsAt: now + 3_600_000 }] });
+		assert.deepStrictEqual(otherSubscriptionModels("claude::claude-opus-5-5", models, [full("Claude 1")], now), [{ modelId: "claude::work::claude-opus-5-5", provider: "Claude 2" }]);
+		assert.deepStrictEqual(otherSubscriptionModels("claude::work::claude-opus-5-5", models, [], now), [{ modelId: "claude::claude-opus-5-5", provider: "Claude 1" }]);
+		assert.deepStrictEqual(otherSubscriptionModels("claude::claude-opus-5-5", models, [full("Claude 2")], now), [], "a used-up subscription offers nothing");
+		assert.deepStrictEqual(otherSubscriptionModels("codex::home::gpt-6.2-sol", models, [], now), [{ modelId: "codex::gpt-6.2-sol", provider: "Codex 1" }]);
+		assert.deepStrictEqual(otherSubscriptionModels("deepseek::deepseek-flash", models, [], now), [], "only Codex and Claude have subscriptions");
+		assert.deepStrictEqual(otherSubscriptionModels(undefined, models, [], now), []);
 	});
 
 	test("a reset already in the past reads as now", () => {

@@ -8,8 +8,10 @@ import {
 } from "../context/deepseek-compaction-summary";
 import { buildSummaryContent } from "../context/message-compaction";
 import { estimateSharedMessageTokens } from "../context/provider-handoff";
+import { parseProviderModelId } from "../model-sources/source-routing";
+import { detectBalanceError } from "../providers/balance-errors";
 import type { OpenAIChatMessage, OpenAIToolCall } from "../types";
-import { compactionSummaryText, compactionWindow, renderChatMessage, shortenToolResults, type ChatCompactionPart } from "./lm-messages";
+import { activeCompaction, compactionSummaryText, compactionWindow, hasCompactionSummary, renderChatMessage, shortenToolResults, type ChatCompactionPart } from "./lm-messages";
 import type { ChatMessage, ChatPart } from "./shared/protocol";
 
 /** Size a chat is cut down to before another model takes it over. */
@@ -27,6 +29,8 @@ const REQUEST_MAX_CHARS = 2_000;
 const REQUESTS_TOTAL_CHARS = 12_000;
 const FAILURE_MAX_CHARS = 300;
 const EXTRACTIVE_LABEL = "Conversation summary (chat compaction)";
+/** How long an empty DeepSeek balance is remembered: every compaction in between would fail the same way. */
+const DEEPSEEK_BALANCE_SKIP_MS = 30 * 60_000;
 
 export interface ChatCompactionLimits {
 	/** Compaction starts only above this estimate. */
@@ -59,19 +63,24 @@ export interface ChatCompactionPlan {
 export interface ChatCompactionSummary {
 	summary: string;
 	method: ChatCompactionPart["method"];
-	/** The chat model that wrote a "model" summary. */
+	/** The writer that wrote a "model" summary. */
 	summaryModel?: string;
-	/** Why DeepSeek, and then the chat model, did not write it. */
+	/** Why DeepSeek and the earlier writers did not write it. */
 	fallbackReason?: string;
 }
 
-/** A chat model that writes the summary when DeepSeek cannot: the model taking the chat over. */
+/** A model that writes the summary when DeepSeek cannot: a local llama.cpp model, then the model taking the chat over. */
 export interface ChatSummaryWriter {
 	name: string;
 	write(prompt: CompactionSummaryPrompt, token: vscode.CancellationToken): Promise<string>;
 }
 
-export type ChatSummarizer = (plan: ChatCompactionPlan, token: vscode.CancellationToken, writer?: ChatSummaryWriter) => Promise<ChatCompactionSummary>;
+export type ChatSummarizer = (
+	plan: ChatCompactionPlan,
+	token: vscode.CancellationToken,
+	/** Writers tried in order; a single writer is a list of one. */
+	writer?: ChatSummaryWriter | readonly ChatSummaryWriter[],
+) => Promise<ChatCompactionSummary>;
 
 export function estimateTextTokens(text: string): number {
 	return estimateSharedMessageTokens(vscode.LanguageModelChatMessage.User(text));
@@ -79,6 +88,67 @@ export function estimateTextTokens(text: string): number {
 
 export function estimateChatMessageTokens(message: ChatMessage): number {
 	return renderChatMessage(message).reduce((sum, rendered) => sum + estimateSharedMessageTokens(rendered), 0);
+}
+
+/** Room a local model needs for the summary evidence: a smaller window cannot hold the compaction prompt. */
+export const LOCAL_SUMMARY_MIN_INPUT_TOKENS = 32_000;
+/** A local llama.cpp model that has not written the summary by then is skipped for the chat model. */
+export const LOCAL_SUMMARY_TIMEOUT_MS = 120_000;
+
+/** The llama.cpp sources: `local`, and `primary`, which the default settings leave as the only one (both URLs are localhost:8000). */
+const LLAMA_CPP_SOURCE_KEYS = new Set(["local", "primary"]);
+
+/**
+ * The first llama.cpp model with room for the evidence, other than the chat model itself: a local chat model is
+ * already the chat model writer.
+ */
+export function pickLocalSummaryModel<T extends { id: string; maxInputTokens: number }>(models: readonly T[], chatModelId: string): T | undefined {
+	return models.find(model =>
+		model.id !== chatModelId
+		&& LLAMA_CPP_SOURCE_KEYS.has(parseProviderModelId(model.id).sourceKey ?? "")
+		&& model.maxInputTokens >= LOCAL_SUMMARY_MIN_INPUT_TOKENS
+	);
+}
+
+function durationLabel(timeoutMs: number): string {
+	return timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${Math.max(1, Math.round(timeoutMs))} ms`;
+}
+
+/**
+ * A writer that gives up when the model does not answer in time: the model sees a linked token, cancelled by the
+ * timer or by the outer token. A timeout fails this writer only; an outer cancellation throws CancellationError.
+ */
+export function withSummaryTimeout(writer: ChatSummaryWriter, timeoutMs: number = LOCAL_SUMMARY_TIMEOUT_MS): ChatSummaryWriter {
+	return {
+		name: writer.name,
+		write: async (prompt, token) => {
+			if (token.isCancellationRequested) {
+				throw new vscode.CancellationError();
+			}
+			const source = new vscode.CancellationTokenSource();
+			let timedOut = false;
+			const timer = setTimeout(() => {
+				timedOut = true;
+				source.cancel();
+			}, Math.max(1, timeoutMs));
+			const linked = token.onCancellationRequested(() => source.cancel());
+			try {
+				return await writer.write(prompt, source.token);
+			} catch (error) {
+				if (token.isCancellationRequested) {
+					throw new vscode.CancellationError();
+				}
+				if (timedOut) {
+					throw new Error(`did not answer within ${durationLabel(timeoutMs)}`, { cause: error });
+				}
+				throw error;
+			} finally {
+				clearTimeout(timer);
+				linked.dispose();
+				source.dispose();
+			}
+		},
+	};
 }
 
 /** The model that answered last; a different model now means the chat changes hands. */
@@ -173,7 +243,7 @@ export function planChatCompaction(history: readonly ChatMessage[], limits: Chat
 	const start = active?.start ?? 0;
 	const window = view.messages;
 	const fixed = limits.fixedTokens ?? 0;
-	const summaryCost = active ? estimateTextTokens(compactionSummaryText(active.part)) : 0;
+	const summaryCost = active && hasCompactionSummary(active.part) ? estimateTextTokens(compactionSummaryText(active.part)) : 0;
 	const tokensBefore = fixed + summaryCost + window.reduce((sum, message) => sum + estimateChatMessageTokens(message), 0);
 	if (tokensBefore <= limits.triggerTokens) {
 		return undefined;
@@ -234,7 +304,7 @@ export function planChatCompaction(history: readonly ChatMessage[], limits: Chat
 	return {
 		keepFrom: start + keepFrom,
 		dropped,
-		previousSummary: active?.part.summary,
+		previousSummary: active && hasCompactionSummary(active.part) ? active.part.summary : undefined,
 		summarizedMessages: (active?.part.summarizedMessages ?? 0) + keepFrom,
 		tokensBefore,
 		keptTokens: fixed + keptCost,
@@ -317,6 +387,8 @@ export interface ChatSummarizerDeps {
 	apiKey: () => Promise<string | undefined>;
 	userAgent: string;
 	log?: (event: string, data: Record<string, unknown>) => void;
+	/** Clock behind the DeepSeek balance memo; tests replace it. */
+	now?: () => number;
 	/** Test hook; defaults to the DeepSeek request. */
 	request?: typeof requestDeepSeekCompactionSummary;
 }
@@ -325,13 +397,30 @@ function failureText(error: unknown): string {
 	return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim().slice(0, FAILURE_MAX_CHARS);
 }
 
+function clockTime(timestamp: number): string {
+	const date = new Date(timestamp);
+	return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function writerList(writers: ChatSummaryWriter | readonly ChatSummaryWriter[] | undefined): readonly ChatSummaryWriter[] {
+	if (!writers) {
+		return [];
+	}
+	return Array.isArray(writers) ? writers : [writers as ChatSummaryWriter];
+}
+
 /**
- * DeepSeek writes the summary when a key is set. When it cannot (no key, an error, an empty balance), the chat model
- * taking the chat over writes it from the same prompt; the extractive summary is the last resort. The result says why.
+ * DeepSeek writes the summary when a key is set. When it cannot (no key, an error, an empty balance), the writers
+ * tried next in order (a local llama.cpp model, then the chat model taking the chat over); the extractive summary
+ * is the last resort. An empty DeepSeek balance is remembered for 30 minutes instead of retried every compaction.
+ * The result says why.
  */
 export function createChatSummarizer(deps: ChatSummarizerDeps): ChatSummarizer {
 	const request = deps.request ?? requestDeepSeekCompactionSummary;
-	return async (plan, token, writer) => {
+	const now = deps.now ?? Date.now;
+	/** Per API key: until when its empty balance is not asked again. */
+	const balanceSkips = new Map<string, number>();
+	return async (plan, token, writers) => {
 		const dropped = toOpenAIMessages(plan.dropped);
 		const input: DeepSeekCompactionRequestInput = {
 			previousSummary: plan.previousSummary,
@@ -343,20 +432,32 @@ export function createChatSummarizer(deps: ChatSummarizerDeps): ChatSummarizer {
 		const failures: string[] = [];
 		const apiKey = await deps.apiKey().catch(() => undefined);
 		if (apiKey) {
-			try {
-				const result = await request({ ...input, apiKey, userAgent: deps.userAgent, cancellation: token });
-				return { summary: result.content, method: "deepseek" };
-			} catch (error) {
-				if (token.isCancellationRequested) {
-					throw new vscode.CancellationError();
+			const until = balanceSkips.get(apiKey);
+			if (until !== undefined && now() < until) {
+				const reason = `DeepSeek balance is empty; skipped until ${clockTime(until)}.`;
+				failures.push(reason);
+				deps.log?.("chat.compaction.deepseek_skipped", { until });
+			} else {
+				balanceSkips.delete(apiKey);
+				try {
+					const result = await request({ ...input, apiKey, userAgent: deps.userAgent, cancellation: token });
+					return { summary: result.content, method: "deepseek" };
+				} catch (error) {
+					if (token.isCancellationRequested) {
+						throw new vscode.CancellationError();
+					}
+					const message = failureText(error);
+					failures.push(message);
+					if (detectBalanceError(error, "DeepSeek")) {
+						balanceSkips.set(apiKey, now() + DEEPSEEK_BALANCE_SKIP_MS);
+					}
+					deps.log?.("chat.compaction.deepseek_failed", { message });
 				}
-				failures.push(failureText(error));
-				deps.log?.("chat.compaction.deepseek_failed", { message: failureText(error) });
 			}
 		} else {
 			failures.push("No DeepSeek API key is set.");
 		}
-		if (writer) {
+		for (const writer of writerList(writers)) {
 			try {
 				const text = await writer.write(buildCompactionSummaryPrompt(input), token);
 				if (token.isCancellationRequested) {
@@ -382,10 +483,12 @@ export interface CompactChatOptions {
 	token: vscode.CancellationToken;
 	/** A plan already made for this history with the same limits. */
 	plan?: ChatCompactionPlan;
-	/** Writes the summary when DeepSeek cannot. */
-	writer?: ChatSummaryWriter;
+	/** Writers tried in order when DeepSeek cannot; a single writer is a list of one. */
+	writer?: ChatSummaryWriter | readonly ChatSummaryWriter[];
 	/** The chat log the summary names, so the model can look up details it left out. */
 	transcriptPath?: string;
+	/** Call ids whose results stay stubbed; the active compaction's when absent. */
+	staleResults?: readonly string[];
 }
 
 /** A compaction part for the history, or undefined when the history already fits. */
@@ -398,6 +501,7 @@ export async function compactChatHistory(history: readonly ChatMessage[], option
 	if (options.token.isCancellationRequested) {
 		throw new vscode.CancellationError();
 	}
+	const stale = keptStaleResults(history, plan.keepFrom, options.staleResults ?? activeCompaction(history)?.part.staleResults);
 	const part: ChatCompactionPart = {
 		kind: "compaction",
 		summary: result.summary,
@@ -412,7 +516,25 @@ export async function compactChatHistory(history: readonly ChatMessage[], option
 		...(result.summaryModel ? { summaryModel: result.summaryModel } : {}),
 		...(result.fallbackReason ? { fallbackReason: result.fallbackReason } : {}),
 		...(options.transcriptPath ? { transcriptPath: options.transcriptPath } : {}),
+		...(stale.length > 0 ? { staleResults: stale } : {}),
 	};
 	part.tokensAfter = plan.keptTokens + estimateTextTokens(compactionSummaryText(part));
 	return part;
+}
+
+/** The stale results a new compaction keeps stubbed: those of the messages it keeps. */
+export function keptStaleResults(history: readonly ChatMessage[], keepFrom: number, stale: readonly string[] | undefined): string[] {
+	if (!stale?.length) {
+		return [];
+	}
+	const wanted = new Set(stale);
+	const kept: string[] = [];
+	for (const message of history.slice(keepFrom)) {
+		for (const part of message.parts) {
+			if (part.kind === "toolResult" && wanted.has(part.callId)) {
+				kept.push(part.callId);
+			}
+		}
+	}
+	return kept;
 }

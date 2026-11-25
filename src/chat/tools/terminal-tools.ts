@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { CocoTerminalManager, type CocoTerminalRunInput, type CocoTerminalSnapshot } from "../../coco/terminal-manager";
-import { findDangerousCommand, type DangerousCommandRule } from "./danger";
+import { commandKind } from "../approvals";
+import { findDangerousCommands, type DangerousCommandRule } from "./danger";
 import { CHAT_TOOL_GROUPS, type ChatTool, type ChatToolConfirmation } from "./types";
 
 export interface ChatTerminalToolsOptions {
@@ -57,12 +58,12 @@ function dangerous(text: unknown, cwd: unknown, rules: readonly DangerousCommand
 	if (typeof text !== "string") {
 		return undefined;
 	}
-	const match = findDangerousCommand(text, rules);
-	if (!match) {
+	const matches = findDangerousCommands(text, rules);
+	if (!matches.length) {
 		return undefined;
 	}
 	const directory = typeof cwd === "string" && cwd ? `\n\nDirectory: ${cwd}` : "";
-	return { title, detail: `${text}${directory}`, reason: `Matches the dangerous-command rule for "${match.text}".` };
+	return { title, detail: `${text}${directory}`, reason: matches.map(match => `Matches the dangerous-command rule for "${match.text}".`).join("\n"), kinds: matches.map(commandKind) };
 }
 
 function isInterruptText(value: unknown): boolean {

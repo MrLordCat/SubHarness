@@ -22,7 +22,22 @@ gets a warning. A new sign-in may be another account, so open and durable
 sessions are dropped.
 
 `Sign Out of Claude` runs `claude auth logout`. Claude Code keeps one login
-per computer, so this also signs out the Claude Code extension and the CLI.
+per config folder; for the built-in account (`~/.claude`) this also signs out
+the Claude Code extension and the CLI.
+
+## Several Accounts
+
+`llamacpp.claudeAccounts` adds subscriptions beside the built-in one, each
+with its own `CLAUDE_CONFIG_DIR` (default `~/.claude-<id>`). Every CLI process
+of such an account — chat sessions, usage probes, `claude auth login`, `status`
+and `logout` — runs with that variable, so the login, `.claude.json` and the
+session files stay apart. The extension has one provider per account; the
+built-in account keeps the `claude::<model>` ids and stored sessions, the others
+use `claude::<id>::<model>` and state keys ending in `.account.<id>`. A session
+of one account cannot resume under another, so a chat that moves to the other
+subscription starts a new session from the chat history, as on a provider
+switch. `llamacpp.claudeActiveAccount` names the account subagents try first
+and Quick Access reports.
 
 ## Native VS Code Tool Boundary
 

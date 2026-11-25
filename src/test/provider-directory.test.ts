@@ -81,8 +81,10 @@ suite("provider directory", () => {
 
 	test("local source: offline when probe fails, online when it recovers", async () => {
 		let probeOk = false;
+		let now = 1_000;
 		const directory = new ProviderDirectory(fakeOptions({
 			config: { enableLocalServer: true },
+			now: () => now,
 			probeHttp: async (endpoint, _apiKey, _timeoutMs) => {
 				assert.strictEqual(endpoint, "http://localhost:8000/v1/models");
 				return probeOk ? { ok: true } : { ok: false, error: "ECONNREFUSED" };
@@ -94,6 +96,7 @@ suite("provider directory", () => {
 		assert.match(entry?.detail ?? "", /ECONNREFUSED/);
 
 		probeOk = true;
+		now += 15_000;
 		await directory.recheck();
 		entry = directory.list().find(provider => provider.key === "local");
 		assert.strictEqual(entry?.state, "online");
@@ -227,8 +230,10 @@ suite("provider directory", () => {
 
 	test("fires onDidChange only when a state actually moves", async () => {
 		let probeOk = false;
+		let now = 1_000;
 		const directory = new ProviderDirectory(fakeOptions({
 			config: { enableLocalServer: true },
+			now: () => now,
 			probeHttp: async () => (probeOk ? { ok: true } : { ok: false, error: "down" }),
 		}));
 		const seen: string[] = [];
@@ -237,6 +242,7 @@ suite("provider directory", () => {
 		await directory.refresh();
 		assert.deepStrictEqual(seen, ["offline"]);
 		probeOk = true;
+		now += 15_000;
 		await directory.recheck();
 		assert.deepStrictEqual(seen, ["offline", "online"]);
 	});
@@ -253,5 +259,118 @@ suite("provider directory", () => {
 		config.localServerUrl = "http://localhost:9000";
 		await directory.refresh();
 		assert.strictEqual(directory.stateOf("local"), "checking");
+	});
+
+	test("local probes pause 15 s, 30 s, 1 min, 2 min and 5 min while the server is off", async () => {
+		let now = 1_000;
+		let probes = 0;
+		const logged: Array<{ event: string; data?: unknown }> = [];
+		const directory = new ProviderDirectory(fakeOptions({
+			config: { enableLocalServer: true },
+			now: () => now,
+			log: (event, data) => logged.push({ event, data }),
+			probeHttp: async () => {
+				probes += 1;
+				return { ok: false, error: "ECONNREFUSED" };
+			},
+		}));
+		try {
+			for (const delay of [15_000, 30_000, 60_000, 120_000, 300_000]) {
+				await directory.recheck();
+				const attempts = probes;
+				await directory.recheck();
+				assert.strictEqual(probes, attempts, `a recheck inside the ${delay} ms pause must not probe`);
+				now += delay - 1;
+				await directory.recheck();
+				assert.strictEqual(probes, attempts, `still paused 1 ms before ${delay} ms`);
+				now += 1;
+			}
+			await directory.recheck();
+			assert.strictEqual(probes, 6, "after 5 min the pause repeats at 5 min");
+			assert.deepStrictEqual(
+				logged.map(entry => (entry.data as { nextDelayMs?: number }).nextDelayMs),
+				[15_000, 30_000, 60_000, 120_000, 300_000],
+				"a pause change is logged once, a skipped probe is not logged"
+			);
+		} finally { directory.dispose(); }
+	});
+
+	test("a successful local probe or an explicit reset ends the pause at once", async () => {
+		let now = 1_000;
+		let probeOk = false;
+		let probes = 0;
+		const directory = new ProviderDirectory(fakeOptions({
+			config: { enableLocalServer: true },
+			now: () => now,
+			probeHttp: async () => {
+				probes += 1;
+				return probeOk ? { ok: true } : { ok: false, error: "down" };
+			},
+		}));
+		try {
+			await directory.recheck();
+			assert.strictEqual(probes, 1);
+			await directory.recheck();
+			assert.strictEqual(probes, 1, "paused after the failure");
+
+			probeOk = true;
+			directory.resetLocalProbeBackoff();
+			await directory.recheck();
+			assert.strictEqual(probes, 2);
+			assert.strictEqual(directory.stateOf("local"), "online");
+
+			probeOk = false;
+			await directory.recheck();
+			assert.strictEqual(probes, 3);
+			await directory.recheck();
+			assert.strictEqual(probes, 3, "the 15 s pause applies again after a success");
+			now += 15_000;
+			await directory.recheck();
+			assert.strictEqual(probes, 4);
+		} finally { directory.dispose(); }
+	});
+
+	test("a changed local server URL starts a fresh pause", async () => {
+		const config: Record<string, unknown> = { enableLocalServer: true, localServerUrl: "http://localhost:8000" };
+		let probes = 0;
+		const directory = new ProviderDirectory(fakeOptions({
+			config,
+			probeHttp: async () => {
+				probes += 1;
+				return { ok: false, error: "down" };
+			},
+		}));
+		try {
+			await directory.recheck();
+			await directory.recheck();
+			assert.strictEqual(probes, 1, "paused for the first URL");
+			config.localServerUrl = "http://localhost:9000";
+			await directory.recheck();
+			assert.strictEqual(probes, 2, "a different URL is probed immediately");
+		} finally { directory.dispose(); }
+	});
+
+	test("re-enabling the local source starts a fresh pause", async () => {
+		const config: Record<string, unknown> = { enableLocalServer: true };
+		let probes = 0;
+		const directory = new ProviderDirectory(fakeOptions({
+			config,
+			probeHttp: async () => {
+				probes += 1;
+				return { ok: false, error: "down" };
+			},
+		}));
+		try {
+			await directory.recheck();
+			await directory.recheck();
+			assert.strictEqual(probes, 1, "paused while enabled");
+			config.enableLocalServer = false;
+			await directory.recheck();
+			assert.strictEqual(probes, 1, "a disabled source is not probed");
+			assert.strictEqual(directory.stateOf("local"), "off");
+			config.enableLocalServer = true;
+			await directory.recheck();
+			assert.strictEqual(probes, 2, "the settings change clears the pause");
+		} finally { directory.dispose(); }
 	});
 });

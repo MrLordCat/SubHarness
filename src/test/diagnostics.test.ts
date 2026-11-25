@@ -208,4 +208,41 @@ suite("diagnostics", () => {
 		assert.strictEqual(child?.parentRequestId, "claude-parent");
 		assert.strictEqual(child?.parentToolCallId, "claude-subagent");
 	});
+
+	test("records context cleanings for the session report", () => {
+		const tracker = new SessionQualityTracker();
+		const cleaning = (index: number, tokensBefore: number, tokensAfter: number) => ({
+			conversationId: `chat-${index}`,
+			modelId: "codex::gpt-6",
+			budgetTokens: 200_000,
+			tokensBefore,
+			tokensAfter,
+			staleResults: 2,
+			summary: false,
+			summarizedMessages: 0,
+			durationMs: 120,
+			at: 1_700_000_000_000 + index,
+		});
+
+		tracker.recordCleaning(cleaning(0, 180_000, 120_000));
+		tracker.recordCleaning(cleaning(1, 190_000, 130_000));
+
+		assert.strictEqual(tracker.cleanings.length, 2);
+		assert.strictEqual(tracker.summary.chatCleanings, 2);
+		assert.strictEqual(tracker.summary.chatCleaningSavedTokens, 120_000);
+
+		for (let index = 0; index < 205; index++) {
+			tracker.recordCleaning(cleaning(index + 2, 200_000, 100_000));
+		}
+
+		assert.strictEqual(tracker.cleanings.length, 200);
+		assert.strictEqual(tracker.cleanings[199].conversationId, "chat-206");
+		assert.strictEqual(tracker.summary.chatCleanings, 200);
+
+		tracker.clear();
+
+		assert.strictEqual(tracker.cleanings.length, 0);
+		assert.strictEqual(tracker.summary.chatCleanings, 0);
+		assert.strictEqual(tracker.summary.chatCleaningSavedTokens, 0);
+	});
 });

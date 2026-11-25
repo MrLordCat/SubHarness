@@ -6,7 +6,7 @@ import { SUBAGENT_TOOL_NAME } from "../tools/subagent-tool";
 import { postMessage } from "./api";
 import { EditComposer } from "./edit-composer";
 import { OPEN_MODEL_PICKER_EVENT } from "./events";
-import { answerStart, describeToolCall, formatBytes, formatReset, formatTokens, summarizeInput, toolCommand } from "./format";
+import { answerStart, describeToolCall, formatBytes, formatReset, formatTokens, summarizeInput, toolCommand, type OtherSubscriptionModel } from "./format";
 import { Markdown } from "./markdown";
 import type { ChatStore } from "./store";
 
@@ -28,6 +28,8 @@ export interface MessageItemProps {
 	isLast: boolean;
 	/** The chat's pending continuation after a limit; given to the newest message only, so a change re-renders it. */
 	autoContinue?: ChatSessionMeta["autoContinue"];
+	/** The same model on other subscriptions with room; given to the newest message only. */
+	subscriptionAlternatives?: OtherSubscriptionModel[];
 	/** Files the agent changed at or after this message's turn; used when editing. */
 	changedFilesSinceTurn: number;
 	/** The same context indicator the main composer shows. */
@@ -48,6 +50,7 @@ class MessageItemMemo extends Component<MessageItemProps> {
 			|| next.compactionBoundary !== this.props.compactionBoundary
 			|| next.isLast !== this.props.isLast
 			|| next.autoContinue !== this.props.autoContinue
+			|| next.subscriptionAlternatives !== this.props.subscriptionAlternatives
 			|| next.store !== this.props.store
 			|| (next.editing && (next.changedFilesSinceTurn !== this.props.changedFilesSinceTurn || next.context !== this.props.context));
 	}
@@ -59,7 +62,7 @@ class MessageItemMemo extends Component<MessageItemProps> {
 
 export const MessageItem = MessageItemMemo;
 
-function MessageView({ message, running, editing, compactionBoundary, isLast, autoContinue, changedFilesSinceTurn, context, store, onEdit, liveSubagentRun }: Omit<MessageItemProps, "version">) {
+function MessageView({ message, running, editing, compactionBoundary, isLast, autoContinue, subscriptionAlternatives, changedFilesSinceTurn, context, store, onEdit, liveSubagentRun }: Omit<MessageItemProps, "version">) {
 	const [expanded, setExpanded] = useState(false);
 	const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 	const copyTimer = useRef<number | undefined>(undefined);
@@ -275,6 +278,7 @@ function MessageView({ message, running, editing, compactionBoundary, isLast, au
 										messageId={message.id}
 										sessionId={store.session?.id}
 										autoContinue={isLast && !running && autoContinue?.messageId === message.id ? autoContinue : undefined}
+										alternatives={isLast && !running && part.limit.kind === "limit" ? subscriptionAlternatives ?? [] : []}
 									/>
 								);
 							}
@@ -377,32 +381,67 @@ function markdownFirstLine(text: string | undefined): string {
 	return firstTextLine(text).replace(/^[#*\-`>\s]+/, "").replace(/[*`#\s]+$/, "").trim();
 }
 
-function CompactionCard({ part }: { part: CompactionPart }) {
-	const method = part.method === "deepseek" ? "DeepSeek summary"
+function compactionMethod(part: CompactionPart): string {
+	return part.method === "deepseek" ? "DeepSeek summary"
 		: part.method === "model" ? `summary by ${part.summaryModel ?? "the chat model"}`
 		: "extractive summary";
-	const covered = [
-		...(part.summarizedMessages > 0 || !part.trimmedTurn ? [`${part.summarizedMessages} earlier messages`] : []),
-		...(part.trimmedTurn ? [`${part.trimmedTurn.rounds} tool ${part.trimmedTurn.rounds === 1 ? "round" : "rounds"} of the next answer`] : []),
+}
+
+function summarizedText(summarizedMessages: number, trimmedTurn: CompactionPart["trimmedTurn"]): string {
+	return [
+		...(summarizedMessages > 0 || !trimmedTurn ? [`${summarizedMessages} earlier ${summarizedMessages === 1 ? "message" : "messages"}`] : []),
+		...(trimmedTurn ? [`${trimmedTurn.rounds} tool ${trimmedTurn.rounds === 1 ? "round" : "rounds"} of the next answer`] : []),
 	].join(" and ");
+}
+
+/** What a self-cleaning removed; the messages themselves stay in the chat. */
+function CleaningCard({ part, cleaning }: { part: CompactionPart; cleaning: NonNullable<CompactionPart["cleaning"]> }) {
+	const removed = [
+		...(cleaning.staleResults > 0 ? [`${cleaning.staleResults} stale tool ${cleaning.staleResults === 1 ? "result" : "results"} replaced with a stub`] : []),
+		...(cleaning.summary ? [`${summarizedText(cleaning.summarizedMessages, part.trimmedTurn)} summarized`] : []),
+	].join(" · ");
+	return (
+		<div class="compaction-card">
+			<div class="compaction-line">
+				<span class="compaction-label">Context cleaned:</span>
+				{` ${removed || "older context shortened"} · ${formatTokens(part.tokensBefore)} → ${formatTokens(part.tokensAfter)} tokens, budget ${formatTokens(cleaning.budgetTokens)}`}
+				{cleaning.summary ? <span class="compaction-method">{` (${compactionMethod(part)})`}</span> : null}
+			</div>
+			<div class="compaction-note">The full history stays in this chat; the model starts a new session from the cleaned one.</div>
+			{cleaning.summary && part.fallbackReason ? <div class="compaction-fallback">{`Fallback: ${part.fallbackReason}`}</div> : null}
+			{cleaning.summary ? <CompactionSummary part={part} /> : null}
+		</div>
+	);
+}
+
+function CompactionSummary({ part }: { part: CompactionPart }) {
+	return (
+		<details class="compaction-summary">
+			<summary>Summary</summary>
+			<Markdown text={part.summary} />
+			{part.requests?.length ? (
+				<div class="compaction-requests">
+					<div class="compaction-requests-title">Your requests, kept verbatim</div>
+					{part.requests.map((request, index) => <div class="compaction-request" key={index}>{request}</div>)}
+				</div>
+			) : null}
+		</details>
+	);
+}
+
+function CompactionCard({ part }: { part: CompactionPart }) {
+	if (part.cleaning) {
+		return <CleaningCard part={part} cleaning={part.cleaning} />;
+	}
 	return (
 		<div class="compaction-card">
 			<div class="compaction-line">
 				<span class="compaction-label">Context compacted:</span>
-				{` ${covered} summarized · ${formatTokens(part.tokensBefore)} → ${formatTokens(part.tokensAfter)} tokens`}
-				<span class="compaction-method">{` (${method})`}</span>
+				{` ${summarizedText(part.summarizedMessages, part.trimmedTurn)} summarized · ${formatTokens(part.tokensBefore)} → ${formatTokens(part.tokensAfter)} tokens`}
+				<span class="compaction-method">{` (${compactionMethod(part)})`}</span>
 			</div>
 			{part.fallbackReason ? <div class="compaction-fallback">{`Fallback: ${part.fallbackReason}`}</div> : null}
-			<details class="compaction-summary">
-				<summary>Summary</summary>
-				<Markdown text={part.summary} />
-				{part.requests?.length ? (
-					<div class="compaction-requests">
-						<div class="compaction-requests-title">Your requests, kept verbatim</div>
-						{part.requests.map((request, index) => <div class="compaction-request" key={index}>{request}</div>)}
-					</div>
-				) : null}
-			</details>
+			<CompactionSummary part={part} />
 		</div>
 	);
 }
@@ -415,12 +454,14 @@ interface LimitCardProps {
 	sessionId: string | undefined;
 	/** Present while the chat will continue this answer after the reset, or the user switched that off. */
 	autoContinue: ChatSessionMeta["autoContinue"];
+	/** The same model on the provider's other subscriptions with room: one "Continue on …" button each. */
+	alternatives: OtherSubscriptionModel[];
 }
 
 /** Matches the host: auto-continue gives up after this many continuations that hit the limit again. */
 const AUTO_CONTINUE_MAX_ATTEMPTS = 3;
 
-function LimitCard({ level, text, limit, messageId, sessionId, autoContinue }: LimitCardProps) {
+function LimitCard({ level, text, limit, messageId, sessionId, autoContinue, alternatives }: LimitCardProps) {
 	const heading = limit.kind === "balance"
 		? `${limit.provider} balance is empty`
 		: `${limit.provider} usage limit reached`;
@@ -450,6 +491,17 @@ function LimitCard({ level, text, limit, messageId, sessionId, autoContinue }: L
 					) : null}
 				</>
 			) : null}
+			{alternatives.map(alternative => (
+				<button
+					type="button"
+					class="limit-model-button limit-continue-button"
+					key={alternative.modelId}
+					title="Switches this chat to the same model of that subscription and continues the answer, like Retry"
+					onClick={() => postMessage({ type: "continueOnModel", messageId, modelId: alternative.modelId })}
+				>
+					{`Continue on ${alternative.provider}`}
+				</button>
+			))}
 			<button
 				type="button"
 				class="limit-model-button"

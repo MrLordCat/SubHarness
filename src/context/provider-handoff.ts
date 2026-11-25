@@ -22,6 +22,19 @@ export function sharedImageName(data: Uint8Array, mimeType: string): string {
 /** Common conservative estimate, not a model-specific tokenizer or usage counter. */
 export function estimateSharedTextTokens(text: string): number { return Math.ceil(Buffer.byteLength(text, "utf8") / 2); }
 
+/** The SubHarness chat sends the summary of its compacted turns as a user message opening with this tag. */
+export const CONVERSATION_SUMMARY_TAG = "<conversation_summary>";
+
+/**
+ * The chat's summary of its compacted turns. A replay that drops old messages keeps it: without it a new
+ * session knows nothing of the work before the kept turns.
+ */
+export function isConversationSummaryMessage(message: vscode.LanguageModelChatRequestMessage): boolean {
+	if (message.role !== vscode.LanguageModelChatMessageRole.User) { return false; }
+	const first = message.content[0];
+	return first instanceof vscode.LanguageModelTextPart && first.value.startsWith(CONVERSATION_SUMMARY_TAG);
+}
+
 export const SHARED_CONTEXT_MIN = 32_768;
 export const SHARED_CONTEXT_MAX = 1_048_576;
 const DEFAULT_SHARED_CONTEXT_LENGTH = 258_400;
@@ -125,7 +138,9 @@ export function prepareSharedHandoff(messages: readonly vscode.LanguageModelChat
 	}) });
 	const before = messages.reduce((total, message) => total + estimateSharedMessageTokens(message), 0);
 	const costs = trimmed.map(estimateSharedMessageTokens);
-	const systems = trimmed.map((message, index) => ({ message, index })).filter(({ message }) => message.role !== vscode.LanguageModelChatMessageRole.User && message.role !== vscode.LanguageModelChatMessageRole.Assistant);
+	// Instructions and the chat's own summary are pinned; folding that summary into an excerpt would cut it.
+	const systems = trimmed.map((message, index) => ({ message, index })).filter(({ message }) => (message.role !== vscode.LanguageModelChatMessageRole.User && message.role !== vscode.LanguageModelChatMessageRole.Assistant)
+		|| isConversationSummaryMessage(message));
 	const systemIndices = new Set(systems.map(({ index }) => index));
 	const fixed = systems.reduce((sum, { index }) => sum + costs[index], 0);
 	// Only the request message itself is pinned; a long autonomous turn may compact its older tool rounds.

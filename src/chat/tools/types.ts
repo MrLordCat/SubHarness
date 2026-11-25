@@ -1,5 +1,5 @@
 import type * as vscode from "vscode";
-import type { ChatQuestion, ChatQuestionAnswer, ChatToolGroup, ChatToolImage } from "../shared/protocol";
+import type { ChatApprovalKind, ChatQuestion, ChatQuestionAnswer, ChatToolGroup, ChatToolImage } from "../shared/protocol";
 
 export interface ChatToolOutput {
 	text: string;
@@ -16,6 +16,11 @@ export interface ChatToolConfirmation {
 	detail: string;
 	/** Why the call is held: the matched dangerous-command rule, a path outside the workspace. */
 	reason: string;
+	/**
+	 * Kinds of action the call belongs to. It runs without asking once every kind is always allowed,
+	 * so a command matching two rules needs both. Absent: the call asks every time.
+	 */
+	kinds?: ChatApprovalKind[];
 }
 
 export interface SubagentModelOption {
@@ -23,6 +28,16 @@ export interface SubagentModelOption {
 	/** Name as shown in the model picker; the tool's model enum uses it. */
 	label: string;
 	useWhen: string;
+}
+
+/** A subagent model that cannot start now: its subscription limit is used up on every account. */
+export interface UnavailableSubagentModel {
+	id: string;
+	label: string;
+	/** Why, e.g. "Codex 1: ChatGPT subscription limit reached (100%)". */
+	reason: string;
+	/** When the limit resets, epoch milliseconds, when the provider reports it. */
+	until?: number;
 }
 
 export interface SubagentRequest {
@@ -64,6 +79,20 @@ export interface ChatToolInvokeContext {
 	listTools?(): ChatToolGroup[];
 	/** Asks the user to enable tools; absent inside a subagent. */
 	requestTools?(names: string[], reason: string, token: vscode.CancellationToken): Promise<ChatToolRequestResult>;
+	/**
+	 * Unified diff of the files the chat's agent changed: in the running turn, or everything waiting for Keep or
+	 * Undo. A subagent sees its parent turn's changes, so a reviewer subagent can check them. Absent without
+	 * change tracking.
+	 */
+	changesDiff?(options: ChatChangesDiffRequest): Promise<string>;
+}
+
+/** What a changes_diff call asks for; see ChatChangeDiffOptions. */
+export interface ChatChangesDiffRequest {
+	scope: "turn" | "pending";
+	paths?: string[];
+	contextLines?: number;
+	maxChars?: number;
 }
 
 /** A tool the chat can call; invoke throws on failure and the message becomes an error result. */

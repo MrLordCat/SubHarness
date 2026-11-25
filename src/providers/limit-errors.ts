@@ -43,10 +43,27 @@ const CODEX_PATTERNS: readonly RegExp[] = [
 /** Context and payload limits are not subscription windows; retrying or waiting does not help. */
 const NOT_A_SUBSCRIPTION_LIMIT = /context (?:length|window)|maximum length|too many tokens|input exceeds|tool (?:call|output) limit|message too long/i;
 
-const WINDOW_PATTERNS: readonly RegExp[] = [
-	/\b(\d+-hour)\b/i,
-	/\b(weekly|daily|monthly)\b/i,
-];
+const HOUR_WINDOW_PATTERN = /\b(\d+-hour)\b/i;
+const PERIOD_WINDOW_PATTERN = /\b(weekly|daily|monthly)\b/i;
+/** "session limit" is Claude's name for the 5-hour window; the others are 7-day windows. */
+const NAMED_WINDOW_PATTERN = /\b(session|weekly|opus|sonnet|fable\s*5)\s+limit\b/i;
+
+/** Reads the window from provider text; an explicit "N-hour" wins over everything else. */
+function detectWindow(text: string): string | undefined {
+	const hours = HOUR_WINDOW_PATTERN.exec(text)?.[1];
+	if (hours) {
+		return hours.toLowerCase();
+	}
+	const period = PERIOD_WINDOW_PATTERN.exec(text)?.[1];
+	if (period) {
+		return period.toLowerCase();
+	}
+	const named = NAMED_WINDOW_PATTERN.exec(text)?.[1]?.toLowerCase();
+	if (!named) {
+		return undefined;
+	}
+	return named === "session" ? "5-hour" : "weekly";
+}
 
 export function detectLimitError(error: unknown, provider?: LimitProvider, now = new Date()): LimitMatch | undefined {
 	const text = error instanceof Error ? `${error.message} ${String((error as { cause?: unknown }).cause ?? "")}` : String(error);
@@ -56,7 +73,7 @@ export function detectLimitError(error: unknown, provider?: LimitProvider, now =
 	const candidate: LimitProvider | undefined = provider
 		?? (/claude/i.test(text) ? "claude"
 			: /codex|chatgpt|purchase more credits/i.test(text) ? "codex"
-				: /\b\d+-hour\b|\bweekly\b|\([A-Za-z]+\/[A-Za-z_+-]+\)/i.test(text) ? "claude"
+				: /\b\d+-hour\b|\b(?:weekly|session|opus|sonnet)\b|\bfable\s*5\b|\([A-Za-z]+\/[A-Za-z_+-]+\)/i.test(text) ? "claude"
 					: undefined);
 	if (!candidate) {
 		return undefined;
@@ -65,11 +82,11 @@ export function detectLimitError(error: unknown, provider?: LimitProvider, now =
 	if (!patterns.some(pattern => pattern.test(text))) {
 		return undefined;
 	}
-	const window = WINDOW_PATTERNS.map(pattern => pattern.exec(text)?.[1]).find(Boolean);
+	const window = detectWindow(text);
 	const reset = parseResetTime(text, now);
 	return {
 		provider: candidate,
-		...(window ? { window: window.toLowerCase() } : {}),
+		...(window ? { window } : {}),
 		...(reset ? { resetAt: reset.at, ...(reset.timeZone ? { timeZone: reset.timeZone } : {}) } : {}),
 		reason: /\b429\b|too many requests/i.test(text) && !/hit your/i.test(text) ? "rate limit" : "usage limit",
 		provisional: true,
@@ -84,14 +101,33 @@ interface ParsedReset {
 const ZONE_PATTERN = /\(([A-Za-z]+(?:\/[A-Za-z_+-]+)+)\)/;
 const CLOCK_PATTERN = /(?:resets?|reset|try again|available again|until)\s*(?:at|on|by)?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i;
 const ISO_PATTERN = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})?)/;
+/**
+ * Claude writes a reset more than a day away as "resets Nov 28, 4pm" or
+ * "resets Jan 2, 2027, 4pm"; Codex writes "try again at Nov 28th, 2026 4:12 PM".
+ * The date must be read here, before the bare clock, or "Nov 28, 4pm" would
+ * resolve to the next 04:00 today.
+ */
+const DATED_CLOCK_PATTERN = /(?:resets?|reset|try again|available again|until)\s*(?:at|on|by)?\s*([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s*(?:(\d{4})\s*,?\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
+const MONTH_NUMBERS: Readonly<Record<string, number>> = {
+	jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+	jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
 
-/** Reads "resets 4pm (Europe/Tallinn)", "try again at 2:32 PM" or an ISO timestamp. */
+/** Reads "resets 4pm (Europe/Tallinn)", "resets Nov 28, 4pm", "try again at Nov 28th, 2026 4:12 PM" or an ISO timestamp. */
 export function parseResetTime(text: string, now = new Date()): ParsedReset | undefined {
 	const iso = ISO_PATTERN.exec(text);
 	if (iso) {
 		const parsed = new Date(iso[1]);
 		if (!Number.isNaN(parsed.getTime())) {
 			return { at: parsed };
+		}
+	}
+	const timeZone = ZONE_PATTERN.exec(text)?.[1];
+	const dated = DATED_CLOCK_PATTERN.exec(text);
+	if (dated) {
+		const parsed = parseDatedReset(dated, timeZone, now);
+		if (parsed) {
+			return { at: parsed, ...(timeZone ? { timeZone } : {}) };
 		}
 	}
 	const clock = CLOCK_PATTERN.exec(text);
@@ -109,9 +145,37 @@ export function parseResetTime(text: string, now = new Date()): ParsedReset | un
 	} else if (meridiem === "am" && hour === 12) {
 		hour = 0;
 	}
-	const timeZone = ZONE_PATTERN.exec(text)?.[1];
 	const at = nextOccurrence(hour, minute, timeZone, now);
 	return at ? { at, ...(timeZone ? { timeZone } : {}) } : undefined;
+}
+
+/** Resolves "Nov 28, 4pm" against `now`; without a year, a date over a day past means next year. */
+function parseDatedReset(match: RegExpExecArray, timeZone: string | undefined, now: Date): Date | undefined {
+	const month = MONTH_NUMBERS[match[1].slice(0, 3).toLowerCase()];
+	const day = Number(match[2]);
+	let hour = Number(match[4]);
+	const minute = match[5] ? Number(match[5]) : 0;
+	if (!month || !Number.isFinite(day) || day < 1 || day > 31 || !Number.isFinite(hour) || hour < 1 || hour > 12 || minute > 59) {
+		return undefined;
+	}
+	if (match[6].toLowerCase() === "pm" && hour < 12) {
+		hour += 12;
+	} else if (match[6].toLowerCase() === "am" && hour === 12) {
+		hour = 0;
+	}
+	const wallTime = (year: number): Date | undefined => timeZone
+		? zonedTimeToUtc(year, month, day, hour, minute, timeZone)
+		: new Date(year, month - 1, day, hour, minute, 0, 0);
+	const explicitYear = match[3] ? Number(match[3]) : undefined;
+	if (explicitYear) {
+		return wallTime(explicitYear);
+	}
+	const baseYear = (timeZone ? zonedParts(now, timeZone, 0)?.year : now.getFullYear()) ?? now.getFullYear();
+	const candidate = wallTime(baseYear);
+	if (!candidate) {
+		return undefined;
+	}
+	return candidate.getTime() < now.getTime() - 24 * 3_600_000 ? wallTime(baseYear + 1) : candidate;
 }
 
 /** Resolves a wall-clock time in `timeZone` to the next moment it occurs. */
@@ -198,6 +262,11 @@ export function formatWait(until: Date, now = new Date()): string {
 		return "now";
 	}
 	const minutes = Math.round(ms / 60_000);
+	if (minutes >= 24 * 60) {
+		const days = Math.floor(minutes / (24 * 60));
+		const hours = Math.floor((minutes % (24 * 60)) / 60);
+		return hours ? `${days} d ${hours} h` : `${days} d`;
+	}
 	if (minutes < 60) {
 		return `${minutes} min`;
 	}
@@ -205,14 +274,30 @@ export function formatWait(until: Date, now = new Date()): string {
 	return rest ? `${hours} h ${rest} min` : `${hours} h`;
 }
 
-export function formatResetClock(reset: Pick<LimitMatch, "resetAt" | "timeZone">): string | undefined {
+/** Year of `date` in `timeZone`, or locally when no zone is known. */
+function yearIn(date: Date, timeZone: string | undefined): number | undefined {
+	try {
+		const year = Number(new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric" }).format(date));
+		return Number.isFinite(year) ? year : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Clock time of the reset; a reset over a day away also gets its date ("28 Nov, 16:00 EET"). */
+export function formatResetClock(reset: Pick<LimitMatch, "resetAt" | "timeZone">, now = new Date()): string | undefined {
 	if (!reset.resetAt) {
 		return undefined;
 	}
+	const farAway = reset.resetAt.getTime() - now.getTime() > 24 * 3_600_000;
 	try {
+		const sameYear = yearIn(reset.resetAt, reset.timeZone) === yearIn(now, reset.timeZone);
 		return new Intl.DateTimeFormat("en-GB", {
+			...(farAway ? { day: "numeric", month: "short" } : {}),
+			...(farAway && !sameYear ? { year: "numeric" } : {}),
 			hour: "2-digit",
 			minute: "2-digit",
+			hourCycle: "h23",
 			...(reset.timeZone ? { timeZone: reset.timeZone } : {}),
 			...(reset.timeZone ? { timeZoneName: "short" } : {}),
 		}).format(reset.resetAt);
@@ -223,7 +308,7 @@ export function formatResetClock(reset: Pick<LimitMatch, "resetAt" | "timeZone">
 
 export function formatLimitNotice(provider: LimitProvider, match: LimitMatch | undefined, now = new Date()): string {	const owner = provider === "claude" ? "Claude" : "Codex";
 	const window = match?.window ? ` ${match.window}` : "";
-	const clock = formatResetClock(match ?? {});
+	const clock = formatResetClock(match ?? {}, now);
 	if (!match?.resetAt || !clock) {
 		return `${owner}${window} limit reached. Wait for the limit to reset, then send the message again. No retry was made.`;
 	}

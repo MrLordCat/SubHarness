@@ -277,6 +277,21 @@ suite("chat agent loop", () => {
 		const results = fake.requests[1].messages.flatMap(message => message.content).filter(part => part instanceof vscode.LanguageModelToolResultPart);
 		assert.deepStrictEqual(results.map(part => part.callId), ["a", "b", "c", "d"]);
 	});
+	test("resets the native session only on the first request after cleaning", async () => {
+		const first = chatMessage("user", [{ kind: "text", text: "Inspect" }]);
+		const fake = fakeBackend([
+			progress => progress.report(new vscode.LanguageModelToolCallPart("call-1", "read", {})),
+			progress => progress.report(new vscode.LanguageModelTextPart("Done")),
+		]);
+		await runAgentTurn({
+			backend: fake.provider, model, history: [first], conversationId: "reset", turn: 1,
+			initialParts: [{ kind: "compaction", method: "none", summary: "", keepFromMessageId: first.id, summarizedMessages: 0, tokensBefore: 100, tokensAfter: 50 }],
+			tools: tools(async () => ({ text: "ok", isError: false })), sink: recorder().sink, token: none,
+		});
+		assert.strictEqual(fake.requests[0].options.modelOptions?._aabHistoryReset, true);
+		assert.strictEqual(fake.requests[1].options.modelOptions?._aabHistoryReset, undefined);
+	});
+
 	test("runs tool rounds, forwards sink events and parses usage", async () => {
 		const fake = fakeBackend([
 			progress => {

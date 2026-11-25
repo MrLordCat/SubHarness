@@ -1,6 +1,7 @@
 import {
 	WEBVIEW_THINKING_PREVIEW_CHARS,
 	WEBVIEW_TOOL_RESULT_PREVIEW_CHARS,
+	type ChatApprovalKind,
 	type ChatAttachment,
 	type ChatAttachmentTarget,
 	type ChatChangedFile,
@@ -228,6 +229,8 @@ let activity: ChatSessionActivity[] = [
 	{ id: "harness-quota", title: "Investigate quota refresh", state: "finished" },
 ];
 const activityTimers = new Map<string, number>();
+const sampleApprovalKinds: ChatApprovalKind[] = [{ key: "command:git-push-force", label: "git push --force, --delete, --mirror or --prune" }];
+let alwaysAllowed: ChatApprovalKind[] = [];
 let pendingApproval: { id: string; assistantId: string; callId: string } | undefined;
 
 interface HarnessSession {
@@ -380,8 +383,6 @@ function handleWebviewMessage(message: WebviewMessage): void {
 			applyToolsEnabled(message.names, message.enabled);
 			emit({ type: "tools", tools: TOOL_GROUPS });
 			break;
-		case "manageToolApprovals":
-			break;
 		case "editMessage":
 			handleEdit(message.messageId, message.text, message.undoChanges, message.attachments);
 			break;
@@ -409,7 +410,11 @@ function handleWebviewMessage(message: WebviewMessage): void {
 			console.log(`harness: open change ${message.id}`);
 			break;
 		case "approve":
-			handleApprove(message.id, message.allow);
+			handleApprove(message.id, message.allow, message.always);
+			break;
+		case "revokeAlwaysAllow":
+			alwaysAllowed = alwaysAllowed.filter(kind => kind.key !== message.key);
+			emit({ type: "alwaysAllowed", kinds: alwaysAllowed });
 			break;
 		case "loadToolResult":
 			handleLoadToolResult(message.messageId, message.callId);
@@ -531,6 +536,7 @@ function emitInit(): void {
 		run: { running: false },
 		tools: TOOL_GROUPS,
 		approvals: [],
+		alwaysAllowed,
 		subagents: openSubagents,
 		changes: currentChanges,
 		quota,
@@ -848,17 +854,22 @@ function startApproval(assistant: ChatMessage): void {
 			title: "Run a dangerous command",
 			detail: "git push --force origin main",
 			reason: "Matches the dangerous-command rule: git push --force",
+			kinds: sampleApprovalKinds,
 		},
 	});
 	emit({ type: "run", run: { running: true, detail: "Waiting for approval…" } });
 }
 
-function handleApprove(id: string, allow: boolean): void {
+function handleApprove(id: string, allow: boolean, always?: boolean): void {
 	const pending = pendingApproval;
 	if (!pending || pending.id !== id) {
 		return;
 	}
 	pendingApproval = undefined;
+	if (allow && always) {
+		alwaysAllowed = [...alwaysAllowed.filter(kind => !sampleApprovalKinds.some(sample => sample.key === kind.key)), ...sampleApprovalKinds];
+		emit({ type: "alwaysAllowed", kinds: alwaysAllowed });
+	}
 	emit({ type: "approvalResolved", id, allowed: allow });
 	const result: ChatPart = {
 		kind: "toolResult",
@@ -1062,6 +1073,15 @@ function createMessages(count: number): ChatMessage[] {
 	const kept = result[6];
 	if (compacted?.role === "assistant" && kept) {
 		compacted.parts.unshift(createCompactionPart(kept.id));
+		// Self-cleanings keep the same window: one only stubs results, one also summarizes.
+		const stubbed = result[5];
+		const summarized = result[7];
+		if (stubbed?.role === "assistant" && summarized?.role === "assistant") {
+			stubbed.parts.unshift({ ...createCompactionPart(kept.id), tokensBefore: 236_000, tokensAfter: 171_000, staleResults: ["harness-stale"],
+				cleaning: { staleResults: 34, summary: false, summarizedMessages: 0, budgetTokens: 200_000 } } as ChatPart);
+			summarized.parts.unshift({ ...createCompactionPart(kept.id), method: "deepseek", fallbackReason: undefined, tokensBefore: 228_000, tokensAfter: 118_000,
+				cleaning: { staleResults: 12, summary: true, summarizedMessages: 4, budgetTokens: 200_000 } } as ChatPart);
+		}
 	}
 	const limited = result[1];
 	if (limited?.role === "assistant") {

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { CONVERSATION_SUMMARY_TAG } from "../context/provider-handoff";
 import type { ChatMessage, ChatPart, ChatToolImage } from "./shared/protocol";
 
 const STOPPED_TOOL_RESULT = "Not executed: the turn was stopped before this tool ran.";
@@ -29,6 +30,31 @@ export function activeCompaction(messages: readonly ChatMessage[]): { part: Chat
 	return undefined;
 }
 
+/** False for a cleaning that only stubbed stale results: the model gets no summary message. */
+export function hasCompactionSummary(part: ChatCompactionPart): boolean {
+	return part.method !== "none";
+}
+
+/**
+ * True until a model answers after the newest compaction. Native sessions hold the history from before it, so the
+ * request must start a new one from the chat's history; a retry after a failed first request starts it again.
+ */
+export function historyResetPending(messages: readonly ChatMessage[]): boolean {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex--) {
+			const kind = message.parts[partIndex].kind;
+			if (kind === "compaction") {
+				return true;
+			}
+			if (message.role === "assistant" && (kind === "text" || kind === "thinking" || kind === "toolCall")) {
+				return false;
+			}
+		}
+	}
+	return false;
+}
+
 export function compactionSummaryText(part: ChatCompactionPart): string {
 	const covered = [
 		...(part.summarizedMessages > 0 || !part.trimmedTurn ? [`${part.summarizedMessages} messages`] : []),
@@ -42,7 +68,8 @@ export function compactionSummaryText(part: ChatCompactionPart): string {
 	const requests = part.requests?.length
 		? `\n\nThe user's requests in the summarized part, verbatim (long ones shortened), oldest first:\n${part.requests.map((request, index) => `[${index + 1}] ${request}`).join("\n")}`
 		: "";
-	return `<conversation_summary>\nThe earlier part of this conversation (${covered}) was compacted. Summary:\n\n${part.summary}${requests}${log}\n</conversation_summary>`;
+	// Providers recognize the summary by its opening tag and keep it when a replay drops old messages.
+	return `${CONVERSATION_SUMMARY_TAG}\nThe earlier part of this conversation (${covered}) was compacted. Summary:\n\n${part.summary}${requests}${log}\n</conversation_summary>`;
 }
 
 /** Tool results above this length in older kept turns reach the model as their start and end. */
@@ -64,6 +91,35 @@ export function shortenToolResults(parts: ChatPart[]): ChatPart[] {
 	return changed ? shortened : parts;
 }
 
+const STALE_RESULT_START_CHARS = 200;
+
+/**
+ * What the model receives instead of a stale tool result. Built from the result alone, so it is the same in
+ * every later request and the provider's prompt cache keeps it.
+ */
+export function staleToolResultText(text: string): string {
+	const first = text.split(/\r?\n/, 40).map(line => line.trim()).find(line => line.length > 0) ?? "";
+	const start = first.length > STALE_RESULT_START_CHARS ? `${first.slice(0, STALE_RESULT_START_CHARS)}…` : first;
+	return `[Earlier tool output (${text.length.toLocaleString("en-US")} characters) was removed to keep the context small; run the tool again if you need it.${start ? ` It began: ${start}` : ""}]`;
+}
+
+/** Stale tool results as the model receives them: a stub without images; the same array when none is stale. */
+export function stubStaleToolResults(parts: ChatPart[], stale: ReadonlySet<string>): ChatPart[] {
+	if (stale.size === 0) {
+		return parts;
+	}
+	let changed = false;
+	const stubbed = parts.map(part => {
+		if (part.kind !== "toolResult" || !stale.has(part.callId)) {
+			return part;
+		}
+		changed = true;
+		const stub: ChatPart = { kind: "toolResult", callId: part.callId, text: staleToolResultText(part.text), ...(part.isError ? { isError: true } : {}) };
+		return stub;
+	});
+	return changed ? stubbed : parts;
+}
+
 export interface CompactionWindow {
 	compaction?: { part: ChatCompactionPart; start: number };
 	/** The messages the model receives after the summary, as it receives them. */
@@ -72,7 +128,7 @@ export interface CompactionWindow {
 	partOffsets: number[];
 }
 
-/** The active compaction and the kept messages, with the trimmed turn cut and older tool outputs shortened. */
+/** The active compaction and the kept messages, with stale results stubbed, the trimmed turn cut and older tool outputs shortened. */
 export function compactionWindow(messages: readonly ChatMessage[]): CompactionWindow {
 	const compaction = activeCompaction(messages);
 	if (!compaction) {
@@ -80,10 +136,11 @@ export function compactionWindow(messages: readonly ChatMessage[]): CompactionWi
 	}
 	const kept = messages.slice(compaction.start);
 	const { trimmedTurn, abbreviatedUntil } = compaction.part;
+	const stale = new Set(compaction.part.staleResults ?? []);
 	const until = abbreviatedUntil ? kept.findIndex(message => message.id === abbreviatedUntil) : -1;
 	const partOffsets = kept.map(() => 0);
 	const view = kept.map((message, index) => {
-		let parts = message.parts;
+		let parts = stubStaleToolResults(message.parts, stale);
 		if (trimmedTurn && message.id === trimmedTurn.messageId && message.role === "assistant") {
 			parts = parts.slice(trimmedTurn.fromPart);
 			partOffsets[index] = trimmedTurn.fromPart;
@@ -135,7 +192,7 @@ export function toLanguageModelMessages(messages: readonly ChatMessage[], option
 		converted.push(systemMessage(options.system));
 	}
 	const window = compactionWindow(messages);
-	if (window.compaction) {
+	if (window.compaction && hasCompactionSummary(window.compaction.part)) {
 		converted.push(vscode.LanguageModelChatMessage.User(compactionSummaryText(window.compaction.part)));
 	}
 	for (const message of window.messages) {

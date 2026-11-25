@@ -350,6 +350,32 @@ export class ShadowGitRepo {
 		});
 	}
 
+	/**
+	 * Hunks of a unified diff between two blobs, from the first `@@` on, without git's header lines; an absent side
+	 * is the empty file. Undefined when git calls the content binary.
+	 */
+	async diffBlobs(before: string | undefined, after: string | undefined, contextLines = 3): Promise<string | undefined> {
+		for (const blob of [before, after]) {
+			if (blob !== undefined && !BLOB_PATTERN.test(blob)) {
+				throw new Error(`invalid blob id: ${blob}`);
+			}
+		}
+		const context = Math.max(0, Math.min(20, Math.floor(contextLines)));
+		await this.init();
+		return this.enqueue(async () => {
+			const output = await this.execGit(
+				["diff", "--no-color", "--no-ext-diff", "--no-renames", `-U${context}`, before ?? EMPTY_BLOB, after ?? EMPTY_BLOB],
+				{ label: "diff" },
+			);
+			const text = output.toString("utf8");
+			const start = text.startsWith("@@") ? 0 : text.indexOf("\n@@");
+			if (start < 0) {
+				return /^Binary files /m.test(text) ? undefined : "";
+			}
+			return text.slice(start === 0 ? 0 : start + 1).replace(/\r(?=\n)/g, "");
+		});
+	}
+
 	private enqueue<T>(operation: () => Promise<T>): Promise<T> {
 		const result = this.queue.then(operation, operation);
 		this.queue = result.then(

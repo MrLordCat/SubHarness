@@ -1,7 +1,8 @@
 import * as vscode from "vscode";
 import { LIMIT_SIGNAL_OPTION, parseLimitSignal, type LimitSignal } from "../providers/limit-signal";
 import { parsePromptCacheSignal, PROMPT_CACHE_OPTION } from "../providers/prompt-cache-signal";
-import { toLanguageModelMessages } from "./lm-messages";
+import { HISTORY_RESET_OPTION } from "../providers/provider-switch";
+import { historyResetPending, toLanguageModelMessages } from "./lm-messages";
 import { appendChatText, type ChatMessage, type ChatPart, type ChatPromptCache, type ChatStructuredPart, type ChatTextKind, type ChatToolImage, type ChatUsage, type ChatUsageTotals } from "./shared/protocol";
 import { SUBAGENT_TOOL_NAME } from "./tools/subagent-tool";
 
@@ -204,10 +205,13 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 				}
 			},
 		};
-		await request.backend.provideLanguageModelChatResponse(request.model, toLanguageModelMessages([...request.history, assistant], { system: request.system, imageInput: request.model.capabilities?.imageInput === true }), {
+		const conversation = [...request.history, assistant];
+		// Until a model answers after the newest compaction, its native session still holds the history from before.
+		const reset = historyResetPending(conversation) ? { [HISTORY_RESET_OPTION]: true } : {};
+		await request.backend.provideLanguageModelChatResponse(request.model, toLanguageModelMessages(conversation, { system: request.system, imageInput: request.model.capabilities?.imageInput === true }), {
 			toolMode: vscode.LanguageModelChatToolMode.Auto,
 			tools: request.tools.tools,
-			modelOptions: { ...request.modelOptions, _conversationId: request.conversationId, _turnIndex: request.turn, [LIMIT_SIGNAL_OPTION]: true, [PROMPT_CACHE_OPTION]: true },
+			modelOptions: { ...request.modelOptions, ...reset, _conversationId: request.conversationId, _turnIndex: request.turn, [LIMIT_SIGNAL_OPTION]: true, [PROMPT_CACHE_OPTION]: true },
 		}, progress, request.token);
 		if (roundUsage) {
 			addUsage(completed, roundUsage);

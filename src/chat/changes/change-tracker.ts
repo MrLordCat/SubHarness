@@ -41,8 +41,25 @@ interface SessionChanges {
 	open?: number;
 }
 
+/** What `diff` shows: the agent reviews its own changes with it. */
+export interface ChatChangeDiffOptions {
+	/** "turn": since the running turn began; "pending": everything waiting for Keep or Undo, the running turn included. */
+	scope: "turn" | "pending";
+	/** Files or folders, relative to the workspace folder or absolute; empty shows every file. */
+	paths?: readonly string[];
+	/** Unchanged lines around each change, 0-20; default 3. */
+	contextLines?: number;
+	/** Upper bound for the whole answer in characters; default 40,000. */
+	maxChars?: number;
+}
+
+export const CHANGE_DIFF_DEFAULT_CHARS = 40_000;
+export const CHANGE_DIFF_MAX_CHARS = 120_000;
+
 export interface ChatChangeTrackerLike {
 	beginTurn(): Promise<TurnSnapshot | undefined>;
+	/** Unified diff of the agent's changes; begin is the running turn's snapshot, absent before its first write. */
+	diff?(sessionId: string, begin: TurnSnapshot | undefined, claimed: readonly string[], options: ChatChangeDiffOptions): Promise<string>;
 	endTurn(sessionId: string, turn: number, begin: TurnSnapshot, claimed?: readonly string[]): Promise<void>;
 	/** Changes so far in a turn that is still running; nothing is saved. */
 	liveChangeSet?(sessionId: string, turn: number, begin: TurnSnapshot, claimed?: readonly string[]): Promise<ChatChangeSet>;
@@ -216,6 +233,115 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 			...(data.notice === undefined ? {} : { notice: data.notice }),
 		};
 		return this._buildChangeSet(live);
+	}
+
+	async diff(sessionId: string, begin: TurnSnapshot | undefined, claimed: readonly string[], options: ChatChangeDiffOptions): Promise<string> {
+		let files: FileChange[] = [];
+		if (begin) {
+			const collected = await this._collectChanges(begin);
+			files = this._overlapped.has(begin) ? this._filterClaimed(collected, claimed).files : collected;
+		}
+		if (options.scope === "pending") {
+			const data = await this._enqueue(() => this._load(sessionId));
+			files = this._mergePending(data.pending, files);
+		}
+		const folders = this._options.folders();
+		const wanted = (options.paths ?? []).map(entry => entry.trim()).filter(Boolean);
+		const shown = files
+			.filter(file => wanted.length === 0 || wanted.some(entry => this._pathMatches(file, entry, folders)))
+			.sort((left, right) => this._displayPath(left, folders).localeCompare(this._displayPath(right, folders)));
+		const where = options.scope === "turn" ? "in this turn" : "waiting for Keep or Undo";
+		if (shown.length === 0) {
+			const unavailable = await this._unavailable(folders);
+			if (unavailable) {
+				return `Changes are not tracked: ${unavailable}`;
+			}
+			return files.length > 0 && wanted.length > 0
+				? `None of the ${plural(files.length, "changed file")} ${where} matches ${wanted.join(", ")}.`
+				: `No files changed ${where}.`;
+		}
+		const maxChars = Math.max(2_000, Math.min(CHANGE_DIFF_MAX_CHARS, Math.floor(options.maxChars ?? CHANGE_DIFF_DEFAULT_CHARS)));
+		const entries = await Promise.all(shown.map(async file => {
+			const counts = await this._counts(file);
+			const status = file.before === undefined ? "added" : file.after === undefined ? "deleted" : "modified";
+			const stat = counts ? ` +${counts.additions} -${counts.deletions}` : " binary";
+			return { file, status, label: `${this._displayPath(file, folders)} (${status},${stat})`, counts };
+		}));
+		const additions = entries.reduce((sum, entry) => sum + (entry.counts?.additions ?? 0), 0);
+		const deletions = entries.reduce((sum, entry) => sum + (entry.counts?.deletions ?? 0), 0);
+		const lines = [
+			`${plural(entries.length, "file")} changed ${where} (+${additions} -${deletions}):`,
+			...entries.map(entry => `- ${entry.label}`),
+		];
+		let used = lines.join("\n").length;
+		const skipped: string[] = [];
+		for (const entry of entries) {
+			if (used >= maxChars) {
+				skipped.push(this._displayPath(entry.file, folders));
+				continue;
+			}
+			const body = await this._diffBody(entry.file, entry.status, entry.counts?.deletions, options.contextLines);
+			const section = `\n=== ${entry.label}\n${body}`;
+			if (used + section.length <= maxChars) {
+				lines.push(section.slice(1));
+				used += section.length;
+				continue;
+			}
+			const room = maxChars - used - entry.label.length - 80;
+			if (room < 400) {
+				skipped.push(this._displayPath(entry.file, folders));
+				used = maxChars;
+				continue;
+			}
+			const cut = body.lastIndexOf("\n", room);
+			const head = body.slice(0, cut > 0 ? cut : room);
+			const rest = body.slice(head.length).split("\n").filter(Boolean).length;
+			lines.push(`=== ${entry.label}\n${head}\n… ${plural(rest, "more diff line")} of this file not shown.`);
+			used = maxChars;
+		}
+		if (skipped.length > 0) {
+			lines.push(`\nOver the ${maxChars}-character limit, not shown: ${skipped.join(", ")}. Call again with paths to see them.`);
+		}
+		return lines.join("\n");
+	}
+
+	/** The diff text of one file: hunks, or a line saying why there are none. */
+	private async _diffBody(file: FileChange, status: string, deletedLines: number | undefined, contextLines: number | undefined): Promise<string> {
+		if (status === "deleted") {
+			return deletedLines === undefined ? "File deleted." : `File deleted (${plural(deletedLines, "line")}).`;
+		}
+		const repo = this._repos.get(file.root) ?? await this._repo(file.root);
+		if (!repo) {
+			return "Diff not available: the snapshot repository is missing.";
+		}
+		try {
+			const hunks = await repo.diffBlobs(file.before, file.after, contextLines ?? 3);
+			if (hunks === undefined) {
+				return "Binary file; no text diff.";
+			}
+			return hunks.trimEnd() || "Only the file mode or line endings changed.";
+		} catch (error) {
+			return `Diff not available: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`;
+		}
+	}
+
+	/** Path shown to the model: folder name first in a multi-root workspace, as in the Keep/Undo list. */
+	private _displayPath(change: FileChange, folders: readonly TrackedFolder[]): string {
+		const folder = folders.length > 1 ? folders.find(candidate => candidate.fsPath === change.root) : undefined;
+		return folder ? `${folder.name}/${change.path}` : change.path;
+	}
+
+	/** A file matches an entry that names it or a folder above it, relative to its root, its display path or absolute. */
+	private _pathMatches(change: FileChange, entry: string, folders: readonly TrackedFolder[]): boolean {
+		const absolute = comparablePath(path.join(change.root, ...change.path.split("/")));
+		const candidates = path.isAbsolute(entry)
+			? [comparablePath(entry)]
+			: [entry, `${path.basename(change.root)}/${entry}`].map(relative => comparablePath(path.join(change.root, ...relative.replace(/^\.?[\\/]+/, "").split(/[\\/]/))));
+		const display = this._displayPath(change, folders);
+		if (folders.length > 1 && (display === entry || display.startsWith(`${entry.replace(/[\\/]+$/, "")}/`))) {
+			return true;
+		}
+		return candidates.some(candidate => absolute === candidate || absolute.startsWith(candidate.endsWith(path.sep) ? candidate : candidate + path.sep));
 	}
 
 	async markOpen(sessionId: string, turn: number): Promise<void> {

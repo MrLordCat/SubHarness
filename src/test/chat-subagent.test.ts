@@ -6,7 +6,7 @@ import type { ChatMessage, ChatSubagentRun, ChatSubagentStep } from "../chat/sha
 import { fitSubagentHistory, runChatSubagent, SUBAGENT_INSTRUCTIONS } from "../chat/subagent-runner";
 import { createChatToolSource } from "../chat/tool-executor";
 import { ChatToolCatalog, type ToolRegistry } from "../chat/tools/catalog";
-import { createCloseSubagentTool, createSubagentTool, parseSubagentInput, SUBAGENT_TOOL_NAME } from "../chat/tools/subagent-tool";
+import { createCloseSubagentTool, createSubagentTool, parseSubagentInput, SUBAGENT_TOOL_NAME, subagentLimitMessage } from "../chat/tools/subagent-tool";
 import type { ChatTool, SubagentModelOption, SubagentRequest } from "../chat/tools/types";
 import { limitSignalPart } from "../providers/limit-signal";
 
@@ -187,6 +187,22 @@ suite("chat subagent", () => {
 				&& error.message.includes('"Smart (Claude)"')
 				&& error.message.includes('"Flash (DeepSeek)"'),
 		);
+	});
+
+	test("a call to a model whose limit is used up is answered with the reset instead of starting", () => {
+		const now = new Date(2026, 10, 25, 14, 0).getTime();
+		const limited = [{ id: "codex::gpt-6-luna", label: "GPT-6-Luna (Codex)", reason: "Codex 1: ChatGPT subscription limit reached (100%).", until: new Date(2026, 10, 25, 18, 40).getTime() }];
+		assert.strictEqual(subagentLimitMessage(limited[0], MODELS, now),
+			'"GPT-6-Luna (Codex)" cannot start: Codex 1: ChatGPT subscription limit reached (100%). It resets at about 18:40. No subagent was started. Choose another model: "Smart (Claude)", "Flash (DeepSeek)".');
+		assert.match(subagentLimitMessage({ ...limited[0], until: new Date(2026, 10, 28, 9, 5).getTime() }, [], now), /resets at about Nov 28, 09:05\. No subagent was started\. No other subagent model is available now; do the step yourself\.$/);
+		assert.ok(!subagentLimitMessage({ ...limited[0], until: now - 1 }, MODELS, now).includes("resets"), "a past reset is left out");
+		for (const wanted of ["GPT-6-Luna (Codex)", "gpt-6-luna", "codex::gpt-6-luna"]) {
+			assert.throws(() => parseSubagentInput({ prompt: "x", model: wanted }, MODELS, limited), /"GPT-6-Luna \(Codex\)" cannot start: .*No subagent was started/, wanted);
+		}
+		assert.throws(() => parseSubagentInput({ prompt: "x", model: "Missing" }, MODELS, limited), /Unknown subagent model "Missing"/);
+		const tool = createSubagentTool({ models: () => MODELS, unavailable: () => limited });
+		assert.ok(tool.description.endsWith('\nLimit used up now, a call returns at once with the reset time: "GPT-6-Luna (Codex)".'));
+		assert.ok(!createSubagentTool({ models: () => MODELS }).description.includes("Limit used up"));
 	});
 
 	test("createSubagentTool hides itself without models and builds the schema from the labels", () => {

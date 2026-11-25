@@ -71,6 +71,14 @@ export interface QuickAccessCodexAccount {
 	summary: string;
 }
 
+export interface QuickAccessClaudeAccount {
+	id: string;
+	label: string;
+	active: boolean;
+	state: string;
+	summary: string;
+}
+
 export interface QuickAccessDependencies {
 	getLastThroughput?: () => string | undefined;
 	getLastContextUsage?: () => QuickAccessContextUsage | undefined;
@@ -105,6 +113,8 @@ export interface QuickAccessDependencies {
 	getCodexUsageLimits?: () => readonly { label: string; description: string }[];
 	/** Every configured Codex account; the active one owns the model picker. */
 	getCodexAccounts?: () => readonly QuickAccessCodexAccount[];
+	/** Every configured Claude account; the active one owns the model picker. */
+	getClaudeAccounts?: () => readonly QuickAccessClaudeAccount[];
 	getCocoStatus?: () => QuickAccessCocoStatus | undefined;
 	getProviderSnapshots?: () => ReadonlyMap<string, ProviderSnapshot>;
 	getUpdateStatus?: () => UpdateStatus | undefined;
@@ -575,6 +585,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 	private get getApiProviders() { return this.dependencies.getApiProviders ?? (async () => []); }
 	private get getCodexUsageLimits() { return this.dependencies.getCodexUsageLimits ?? (() => []); }
 	private get getCodexAccounts() { return this.dependencies.getCodexAccounts ?? (() => []); }
+	private get getClaudeAccounts() { return this.dependencies.getClaudeAccounts ?? (() => []); }
 	private get getCocoStatus() { return this.dependencies.getCocoStatus ?? (() => undefined); }
 
 	refresh(): void {
@@ -824,8 +835,8 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 			return new QuickAccessItem(`codex.account.${account.id || "default"}`, account.label, {
 				description: account.active ? `Active · ${account.summary}` : account.summary,
 				tooltip: account.active
-					? `${account.label} owns the Codex model picker. Its models are the ones shown in chat.`
-					: `Switch to ${account.label}. Its ChatGPT subscription and models replace the current ones in the picker.`,
+					? `${account.label} is the active account: Codex subagents try it first, and the Codex rows here show its usage.`
+					: `Make ${account.label} the active account: Codex subagents try it first. The models of every account stay in the picker.`,
 				icon: account.active ? new vscode.ThemeIcon("pass-filled") : new vscode.ThemeIcon("circle-large-outline"),
 				command: command("llamacpp.selectCodexAccount", `Switch to Codex Account ${account.label}`, { accountId }),
 				children: [
@@ -861,7 +872,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 				// account keeps its own sign-in without editing settings by hand.
 				new QuickAccessItem("codex.accounts", "ChatGPT Accounts", {
 					description: `Active: ${activeCodexAccount?.label ?? "Default"} · ${codexAccounts.length} total`,
-					tooltip: `${codexStatus ?? "Checking..."}\nClick for the subscription status. Expand to switch, sign in to or add ChatGPT subscriptions; each account keeps its own Codex home, login, threads and usage windows, and only the active account's models appear in the picker.`,
+					tooltip: `${codexStatus ?? "Checking..."}\nClick for the subscription status. Expand to switch, sign in to or add ChatGPT subscriptions; each account keeps its own Codex home, login, threads and usage windows, and the picker shows the models of every account in its own group.`,
 					icon: new vscode.ThemeIcon("account"),
 					command: command("llamacpp.codexShowStatus", "Show Codex Subscription Status"),
 					children: [
@@ -937,12 +948,67 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 			],
 		});
 
+		const claudeAccounts = this.getClaudeAccounts();
+		const activeClaudeAccount = claudeAccounts.find(account => account.active) ?? claudeAccounts[0];
+		const claudeAccountItems = claudeAccounts.map(account => {
+			const accountId = account.id;
+			const signedIn = account.state === "connected";
+			return new QuickAccessItem(`claude.account.${account.id || "default"}`, account.label, {
+				description: account.active ? `Active · ${account.summary}` : account.summary,
+				tooltip: account.active
+					? `${account.label} is the active account: Claude subagents try it first, and the Claude rows here show its usage.`
+					: `Make ${account.label} the active account: Claude subagents try it first. The models of every account stay in the picker.`,
+				icon: account.active ? new vscode.ThemeIcon("pass-filled") : new vscode.ThemeIcon("circle-large-outline"),
+				command: command("llamacpp.selectClaudeAccount", `Switch to Claude Account ${account.label}`, { accountId }),
+				children: [
+					new QuickAccessItem(`claude.account.${account.id || "default"}.signIn`, signedIn ? "Sign In Again" : "Sign In", {
+						icon: new vscode.ThemeIcon("sign-in"),
+						tooltip: signedIn
+							? "Sign in again to this Claude config folder; the current login of this account is replaced."
+							: "Open the Claude sign-in flow for this account in your browser",
+						command: command("llamacpp.claudeAccountSignIn", `Sign In to ${account.label}`, { accountId }),
+					}),
+					new QuickAccessItem(`claude.account.${account.id || "default"}.signOut`, "Sign Out", {
+						icon: new vscode.ThemeIcon("sign-out"),
+						tooltip: "Sign out of this account only; the other Claude accounts stay signed in",
+						command: command("llamacpp.claudeAccountSignOut", `Sign Out of ${account.label}`, { accountId }),
+					}),
+					...(account.id
+						? [new QuickAccessItem(`claude.account.${account.id}.remove`, "Remove Account", {
+							icon: new vscode.ThemeIcon("trash"),
+							tooltip: "Remove this account from Quick Access. Its ~/.claude-<id> folder and login stay on disk, so adding the same id again restores it. Its stored chat sessions are cleared.",
+							command: command("llamacpp.removeClaudeAccount", `Remove Claude Account ${account.label}`, { accountId }),
+						})]
+						: []),
+				],
+			});
+		});
+		const addClaudeAccountItem = (label: string): QuickAccessItem => new QuickAccessItem("claude.accounts.add", label, {
+			description: "Second Claude subscription",
+			tooltip: "Create a new Claude account with its own config folder (~/.claude-<id>), then sign in to it. The window reloads so the account joins the picker.",
+			icon: new vscode.ThemeIcon("add"),
+			command: command("llamacpp.addClaudeAccount", "Add Claude Account"),
+		});
+		const claudeAccountsSection = claudeAccounts.length > 1
+			? [new QuickAccessItem("claude.accounts", "Claude Accounts", {
+				description: `Active: ${activeClaudeAccount?.label ?? "Default"} · ${claudeAccounts.length} total`,
+				tooltip: `${claudeStatus ?? "Checking..."}\nExpand to switch, sign in to or add Claude subscriptions; each account keeps its own CLAUDE_CONFIG_DIR, login, sessions and usage windows, and the picker shows the models of every account in its own group.`,
+				icon: new vscode.ThemeIcon("account"),
+				command: command("llamacpp.claudeShowStatus", "Show Claude Subscription Status"),
+				children: [
+					...claudeAccountItems,
+					addClaudeAccountItem("Add Account…"),
+				],
+			})]
+			: [];
+
 		const claude = new QuickAccessItem("claude", "Claude", {
 			description: claudeEnabled
 				? formatProviderUsageLine(claudeStatus ?? "Checking...", claudeUsageLimitPercent, claudeUsageLimitReset)
 				: "Off",
 			icon: new vscode.ThemeIcon("sparkle"),
 			children: [
+				...claudeAccountsSection,
 				new QuickAccessItem("claude.status", "Account", {
 					description: claudeStatus ?? "Checking...",
 					tooltip: "Click for the Claude subscription status, session usage and rate-limit state. Expand to sign in or turn the source off.",
@@ -990,6 +1056,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 					icon: toggleIcon(config.get<boolean>("claudeCacheKeepAliveIgnoreUsageLimit", false) === true),
 					command: command("llamacpp.toggleClaudeCacheKeepAliveIgnoreUsageLimit", "Toggle Ignore Usage-Limit Pause"),
 				}),
+				...(claudeAccounts.length === 1 ? [addClaudeAccountItem("Add Claude Account…")] : []),
 			],
 		});
 

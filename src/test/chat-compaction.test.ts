@@ -6,14 +6,17 @@ import {
 	createChatSummarizer,
 	estimateChatMessageTokens,
 	estimateTextTokens,
+	pickLocalSummaryModel,
 	planChatCompaction,
 	previousModelId,
 	roundStarts,
 	summarizedRequests,
 	toOpenAIMessages,
+	withSummaryTimeout,
 	type ChatCompactionLimits,
 	type ChatCompactionPlan,
 	type ChatSummarizerDeps,
+	type ChatSummaryWriter,
 } from "../chat/compaction";
 import type { CompactionSummaryPrompt } from "../context/deepseek-compaction-summary";
 import { activeCompaction, compactionSummaryText, shortenToolResults, toLanguageModelMessages, userRequestText, type ChatCompactionPart } from "../chat/lm-messages";
@@ -65,6 +68,17 @@ function planForSummarizer(): ChatCompactionPlan {
 		tokensBefore: 500,
 		keptTokens: 100,
 	};
+}
+
+function summaryWriter(name: string, write: ChatSummaryWriter["write"]): ChatSummaryWriter {
+	return { name, write };
+}
+
+/** A writer that waits until its token is cancelled, as a hung local model would. */
+function hangingWriter(name: string): ChatSummaryWriter {
+	return summaryWriter(name, (_prompt, token) => new Promise<string>((_resolve, reject) => {
+		token.onCancellationRequested(() => reject(new Error("cancelled")));
+	}));
 }
 
 suite("chat compaction", () => {
@@ -463,6 +477,168 @@ suite("chat compaction", () => {
 		});
 		await assert.rejects(summarize(plan, source.token), (error: unknown) => error instanceof vscode.CancellationError);
 		source.dispose();
+	});
+
+	test("createChatSummarizer tries the writers in order and stops at the first that writes", async () => {
+		const calls: string[] = [];
+		const source = new vscode.CancellationTokenSource();
+		const summarize = createChatSummarizer({ apiKey: async () => undefined, userAgent: "test-agent" });
+		const result = await summarize(planForSummarizer(), source.token, [
+			summaryWriter("Local", async () => { calls.push("Local"); return VALID_SUMMARY; }),
+			summaryWriter("Chat", async () => { calls.push("Chat"); return VALID_SUMMARY; }),
+		]);
+		source.dispose();
+
+		assert.deepStrictEqual(calls, ["Local"]);
+		assert.strictEqual(result.method, "model");
+		assert.strictEqual(result.summaryModel, "Local");
+		assert.strictEqual(result.fallbackReason, "No DeepSeek API key is set.");
+	});
+
+	test("createChatSummarizer falls through a failing writer with both reasons", async () => {
+		const calls: string[] = [];
+		const source = new vscode.CancellationTokenSource();
+		const summarize = createChatSummarizer({ apiKey: async () => undefined, userAgent: "test-agent" });
+		const result = await summarize(planForSummarizer(), source.token, [
+			summaryWriter("Local", async () => { calls.push("Local"); throw new Error("local model crashed"); }),
+			summaryWriter("Chat", async () => { calls.push("Chat"); return VALID_SUMMARY; }),
+		]);
+		source.dispose();
+
+		assert.deepStrictEqual(calls, ["Local", "Chat"]);
+		assert.strictEqual(result.summaryModel, "Chat");
+		assert.strictEqual(result.fallbackReason, "No DeepSeek API key is set. Local: local model crashed");
+	});
+
+	test("a local writer that times out is skipped for the chat model", async () => {
+		const source = new vscode.CancellationTokenSource();
+		const summarize = createChatSummarizer({ apiKey: async () => undefined, userAgent: "test-agent" });
+		const result = await summarize(planForSummarizer(), source.token, [
+			withSummaryTimeout(hangingWriter("Local"), 20),
+			summaryWriter("Chat", async () => VALID_SUMMARY),
+		]);
+		source.dispose();
+
+		assert.strictEqual(result.method, "model");
+		assert.strictEqual(result.summaryModel, "Chat");
+		assert.match(result.fallbackReason ?? "", /^No DeepSeek API key is set\. Local: did not answer within /);
+	});
+
+	test("outer cancellation during a local write throws instead of falling back", async () => {
+		const source = new vscode.CancellationTokenSource();
+		let chatWrites = 0;
+		const summarize = createChatSummarizer({ apiKey: async () => undefined, userAgent: "test-agent" });
+		const run = summarize(planForSummarizer(), source.token, [
+			withSummaryTimeout(hangingWriter("Local")),
+			summaryWriter("Chat", async () => { chatWrites += 1; return VALID_SUMMARY; }),
+		]);
+		setTimeout(() => source.cancel(), 20);
+		await assert.rejects(run, (error: unknown) => error instanceof vscode.CancellationError);
+		source.dispose();
+
+		assert.strictEqual(chatWrites, 0);
+	});
+
+	test("an empty DeepSeek balance is skipped for 30 minutes and retried after", async () => {
+		const start = new Date(2026, 0, 1, 10, 15).getTime();
+		let clock = start;
+		let requests = 0;
+		const logs: string[] = [];
+		const source = new vscode.CancellationTokenSource();
+		const summarize = createChatSummarizer({
+			apiKey: async () => "sk-test",
+			userAgent: "test-agent",
+			now: () => clock,
+			log: event => logs.push(event),
+			request: async () => {
+				requests += 1;
+				throw new Error("DeepSeek compaction request failed (402 Payment Required)");
+			},
+		});
+
+		const first = await summarize(planForSummarizer(), source.token);
+		assert.strictEqual(requests, 1);
+		assert.strictEqual(first.fallbackReason, "DeepSeek compaction request failed (402 Payment Required)");
+
+		clock += 60_000;
+		const skipped = await summarize(planForSummarizer(), source.token);
+		assert.strictEqual(requests, 1, "the memo keeps the request from being retried");
+		assert.strictEqual(skipped.method, "extractive");
+		const until = new Date(start + 30 * 60_000);
+		const time = `${String(until.getHours()).padStart(2, "0")}:${String(until.getMinutes()).padStart(2, "0")}`;
+		assert.strictEqual(skipped.fallbackReason, `DeepSeek balance is empty; skipped until ${time}.`);
+		assert.deepStrictEqual(logs, ["chat.compaction.deepseek_failed", "chat.compaction.deepseek_skipped"]);
+
+		clock = start + 30 * 60_000;
+		await summarize(planForSummarizer(), source.token);
+		source.dispose();
+
+		assert.strictEqual(requests, 2, "the memo expires after 30 minutes");
+	});
+
+	test("a different DeepSeek key is tried while the old key's balance is empty", async () => {
+		let key = "sk-one";
+		let clock = 1_000_000;
+		let requests = 0;
+		const source = new vscode.CancellationTokenSource();
+		const summarize = createChatSummarizer({
+			apiKey: async () => key,
+			userAgent: "test-agent",
+			now: () => clock,
+			request: async input => {
+				requests += 1;
+				if (input.apiKey === "sk-one") {
+					throw new Error("402 Payment Required: Insufficient Balance");
+				}
+				return { content: "DEEP SUMMARY", inputChars: 0 };
+			},
+		});
+		await summarize(planForSummarizer(), source.token);
+
+		key = "sk-two";
+		clock += 60_000;
+		const result = await summarize(planForSummarizer(), source.token);
+		source.dispose();
+
+		assert.strictEqual(requests, 2);
+		assert.deepStrictEqual(result, { method: "deepseek", summary: "DEEP SUMMARY" });
+	});
+
+	test("other DeepSeek failures are retried", async () => {
+		let requests = 0;
+		const source = new vscode.CancellationTokenSource();
+		const summarize = createChatSummarizer({
+			apiKey: async () => "sk-test",
+			userAgent: "test-agent",
+			now: () => 1_000_000,
+			request: async () => {
+				requests += 1;
+				throw new Error("deepseek is down");
+			},
+		});
+		await summarize(planForSummarizer(), source.token);
+		await summarize(planForSummarizer(), source.token);
+		source.dispose();
+
+		assert.strictEqual(requests, 2);
+	});
+
+	test("pickLocalSummaryModel chooses the first local model with room, other than the chat model", () => {
+		const models = [
+			{ id: "local::small", name: "Small", maxInputTokens: 8_000 },
+			{ id: "deepseek::flash", name: "Flash", maxInputTokens: 128_000 },
+			{ id: "local::room", name: "Room", maxInputTokens: 32_000 },
+			{ id: "local::chat", name: "Chat", maxInputTokens: 64_000 },
+			{ id: "local::big", name: "Big", maxInputTokens: 256_000 },
+		];
+		assert.strictEqual(pickLocalSummaryModel(models, "deepseek::flash")?.id, "local::room");
+		assert.strictEqual(pickLocalSummaryModel(models, "local::room")?.id, "local::chat");
+		assert.strictEqual(pickLocalSummaryModel(models, "local::chat")?.id, "local::room", "the chat model is not its own fallback");
+		assert.strictEqual(pickLocalSummaryModel([{ id: "local::small", name: "Small", maxInputTokens: 31_999 }], "deepseek::flash"), undefined);
+		assert.strictEqual(pickLocalSummaryModel([], "local::small"), undefined);
+		// The default settings leave the llama.cpp server as the `primary` source only.
+		assert.strictEqual(pickLocalSummaryModel([{ id: "primary::qwen", name: "Qwen", maxInputTokens: 262_144 }], "claude::claude-opus-5-5")?.id, "primary::qwen");
+		assert.strictEqual(pickLocalSummaryModel([{ id: "cursor::auto", name: "Auto", maxInputTokens: 262_144 }], "claude::claude-opus-5-5"), undefined, "paid API profiles are not local");
 	});
 
 	test("compactChatHistory returns a part for a history over the trigger", async () => {

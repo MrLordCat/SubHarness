@@ -765,14 +765,18 @@ function isChatPart(value: unknown): value is ChatPart {
 				&& typeof value.summarizedMessages === "number"
 				&& typeof value.tokensBefore === "number"
 				&& typeof value.tokensAfter === "number"
-				&& (value.method === "deepseek" || value.method === "model" || value.method === "extractive")
+				&& (value.method === "deepseek" || value.method === "model" || value.method === "extractive" || value.method === "none")
 				&& (value.trimmedTurn === undefined || (isRecord(value.trimmedTurn) && typeof value.trimmedTurn.messageId === "string"
 					&& Number.isSafeInteger(value.trimmedTurn.fromPart) && Number.isSafeInteger(value.trimmedTurn.rounds)))
 				&& (value.abbreviatedUntil === undefined || typeof value.abbreviatedUntil === "string")
 				&& (value.summaryModel === undefined || typeof value.summaryModel === "string")
 				&& (value.fallbackReason === undefined || typeof value.fallbackReason === "string")
 				&& (value.transcriptPath === undefined || typeof value.transcriptPath === "string")
-				&& (value.requests === undefined || (Array.isArray(value.requests) && value.requests.every(request => typeof request === "string")));
+				&& (value.requests === undefined || (Array.isArray(value.requests) && value.requests.every(request => typeof request === "string")))
+				&& (value.staleResults === undefined || (Array.isArray(value.staleResults) && value.staleResults.every(callId => typeof callId === "string")))
+				&& (value.cleaning === undefined || (isRecord(value.cleaning) && typeof value.cleaning.staleResults === "number"
+					&& typeof value.cleaning.summary === "boolean" && typeof value.cleaning.summarizedMessages === "number"
+					&& typeof value.cleaning.budgetTokens === "number"));
 		case "subagent":
 			return typeof value.callId === "string"
 				&& typeof value.description === "string"

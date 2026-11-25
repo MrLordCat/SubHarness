@@ -469,6 +469,60 @@ test("opens centralized API provider management from Quick Access", async () => 
 			"the built-in account cannot be removed");
 	});
 
+	test("offers per-account Claude sign-in, switching, adding and removal", async () => {
+		const provider = new LlamaQuickActionsProvider({
+			getClaudeAccounts: () => [
+				{ id: "", label: "Default", active: true, state: "connected", summary: "Connected (Max)" },
+				{ id: "work", label: "Work", active: false, state: "signedOut", summary: "Not signed in" },
+			],
+		});
+		const claude = (await getItems(provider)).find(item => labelOf(item) === "Claude");
+		assert.ok(claude);
+		const accounts = (await getItems(provider, claude)).find(item => labelOf(item) === "Claude Accounts");
+		assert.ok(accounts, "the accounts group appears when a second subscription exists");
+		assert.strictEqual(accounts.description, "Active: Default · 2 total");
+		assert.strictEqual(accounts.command?.command, "llamacpp.claudeShowStatus");
+
+		const children = await getItems(provider, accounts);
+		assert.deepStrictEqual(children.map(labelOf), ["Default", "Work", "Add Account…"]);
+		const add = children.find(item => labelOf(item) === "Add Account…");
+		assert.strictEqual(add?.command?.command, "llamacpp.addClaudeAccount");
+
+		const work = children.find(item => labelOf(item) === "Work");
+		assert.ok(work);
+		assert.strictEqual(work.command?.command, "llamacpp.selectClaudeAccount");
+		assert.deepStrictEqual(work.command?.arguments, [{ accountId: "work" }]);
+		const workChildren = await getItems(provider, work);
+		assert.deepStrictEqual(workChildren.map(labelOf), ["Sign In", "Sign Out", "Remove Account"]);
+		assert.strictEqual(workChildren[0].command?.command, "llamacpp.claudeAccountSignIn");
+		assert.deepStrictEqual(workChildren[0].command?.arguments, [{ accountId: "work" }]);
+		assert.strictEqual(workChildren[1].command?.command, "llamacpp.claudeAccountSignOut");
+		assert.strictEqual(workChildren[2].command?.command, "llamacpp.removeClaudeAccount");
+
+		const primary = children.find(item => labelOf(item) === "Default");
+		assert.ok(primary);
+		assert.deepStrictEqual((await getItems(provider, primary)).map(labelOf), ["Sign In Again", "Sign Out"],
+			"the built-in account cannot be removed");
+		// Today's Account row stays, so the subscription source and the active login stay reachable.
+		const status = (await getItems(provider, claude)).find(item => labelOf(item) === "Account");
+		assert.ok(status);
+		assert.deepStrictEqual((await getItems(provider, status)).map(labelOf), ["Subscription Source", "Sign In"]);
+	});
+
+	test("offers only the add row with the single built-in Claude account", async () => {
+		const provider = new LlamaQuickActionsProvider({
+			getClaudeAccounts: () => [{ id: "", label: "Default", active: true, state: "connected", summary: "Connected (Max)" }],
+		});
+		const claude = (await getItems(provider)).find(item => labelOf(item) === "Claude");
+		assert.ok(claude);
+		const children = await getItems(provider, claude);
+		assert.ok(!children.some(item => labelOf(item) === "Claude Accounts"), "the group is only needed for two accounts");
+		const add = children.find(item => labelOf(item) === "Add Claude Account…");
+		assert.strictEqual(add?.command?.command, "llamacpp.addClaudeAccount");
+		assert.ok(children[children.length - 1]?.id?.endsWith(".claude.accounts.add"), "the add row is appended to today's Claude rows");
+		assert.deepStrictEqual(children.slice(0, 2).map(labelOf), ["Account", "Working Context"]);
+	});
+
 	test("keeps the Codex Usage Limit row as an endpoint fallback only", async () => {
 		// Mirrors the duplicated sidebar seen with a live Plus plan: the explicit
 		// Session/Weekly rows already carry percent used and reset time.

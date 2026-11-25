@@ -14,7 +14,8 @@ You are a subagent that another AI agent started for one subtask. That agent see
 </subagent>`;
 
 const MAX_STEPS = 200;
-const SUBAGENT_MAX_ROUNDS = 100;
+/** A safety net against a looping subagent; a long review or refactoring needs a few hundred rounds. */
+const SUBAGENT_MAX_ROUNDS = 1000;
 const MAX_TEXT_STEP_CHARS = 4_000;
 const MAX_SUMMARY_CHARS = 160;
 const MAX_INPUT_CHARS = 4_000;

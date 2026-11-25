@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/SubHarness.git"
 	},
-	"version": "2.0.11",
+	"version": "2.0.13",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -110,7 +110,16 @@
 						"\\b(?:drop\\s+(?:table|database|schema)|truncate\\s+table)\\b",
 						"\\b(?:taskkill|Stop-Process|pkill|killall)\\b[^\\n;&|]*\\bcode(?:\\.exe)?\\b"
 					],
-					"markdownDescription": "Regular expressions (case-insensitive) for terminal commands that the SubHarness chat runs only after you allow them in the chat. Every other tool call runs without asking. Remove an entry to stop asking for it, or add patterns for commands you want to confirm."
+					"markdownDescription": "Regular expressions (case-insensitive) for terminal commands that the SubHarness chat runs only after you allow them in the chat. Every other tool call runs without asking. Remove an entry to stop asking for it, or add patterns for commands you want to confirm. **Always allow** on an approval card skips one rule without removing it; see `#llamacpp.chat.alwaysAllow#`."
+				},
+				"llamacpp.chat.alwaysAllow": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [],
+					"scope": "application",
+					"markdownDescription": "Kinds of actions the SubHarness chat runs without an approval card, in every workspace. **Always allow** on a card adds its kinds; the Tools list shows them under **Always allowed** and revokes them. `write-outside-workspace` covers creating, editing, renaming in and deleting files outside the open folders, `delete-folder` deleting a whole folder, and `command:<rule>` every command one rule of `#llamacpp.chat.dangerousCommands#` holds (for example `command:git-restore`; a rule you added is named by its pattern). A command that matches several rules runs without asking only when all of them are allowed. Only the user setting counts, so a workspace cannot allow itself."
 				},
 				"llamacpp.serverUrl": {
 					"type": "string",
@@ -276,6 +285,13 @@
 					"maximum": 1048576,
 					"description": "Maximum estimated input tokens, including tool schemas, that a model receives when it takes over a chat from another model. Only the newest turns that fit are transferred; older turns are left in the shared transcript. Keeps a provider switch from replaying the whole chat at full price. The Claude resume-recovery limit still applies on top."
 				},
+				"llamacpp.chatContextBudget": {
+					"type": "integer",
+					"default": 200000,
+					"minimum": 0,
+					"maximum": 1048576,
+					"description": "Working context of a SubHarness chat in TOKENS, as the provider counts them. When a new request would be over it, the chat first cleans its history down to about 60%: older tool results that are stale (a file read that was edited or read again later, a command or check that ran again, lookups from earlier requests, large results two requests old) become a one-line stub, then older turns are summarized. The next request starts the provider's session again from the cleaned history, so the cache is rebuilt once per cleaning. The full history stays in the chat. Values below 64000 count as 64000; zero turns cleaning off."
+				},
 				"llamacpp.journalImageRetention": {
 					"type": "integer",
 					"default": 100,
@@ -380,6 +396,38 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Advertise Claude subscription models through the official Claude Agent SDK. Built-in Claude Code tools are disabled; actions are delegated to native VS Code Chat tools."
+				},
+				"llamacpp.claudeAccounts": {
+					"type": "array",
+					"scope": "machine",
+					"default": [],
+					"items": {
+						"type": "object",
+						"required": [
+							"id"
+						],
+						"properties": {
+							"id": {
+								"type": "string",
+								"pattern": "^[a-z0-9][a-z0-9_-]{0,31}$",
+								"description": "Short account id used in model ids (for example work)."
+							},
+							"label": {
+								"type": "string",
+								"description": "Name shown in Quick Access and in the model picker."
+							},
+							"configDir": {
+								"type": "string",
+								"description": "CLAUDE_CONFIG_DIR for this account. Empty uses ~/.claude-<id>, which Claude Code creates on first sign-in."
+							}
+						}
+					},
+					"description": "Extra Claude subscriptions. Each extra account runs Claude Code with its own CLAUDE_CONFIG_DIR (default ~/.claude-<id>), so the logins, sessions and usage windows stay separate. The built-in account (~/.claude) is always available and keeps the historical model ids. Sign in per account from Quick Access -> Claude -> Claude Accounts."
+				},
+				"llamacpp.claudeActiveAccount": {
+					"type": "string",
+					"default": "",
+					"description": "Id of the Claude account that Quick Access and the Claude status commands use and that a Claude subagent tries first. Empty means the built-in account (~/.claude). The chat model picker lists every account's models, grouped as Claude 1, Claude 2… Switch it from Quick Access -> Claude -> Claude Accounts."
 				},
 				"llamacpp.claudeContextLength": {
 					"type": "number",
@@ -951,7 +999,7 @@
 			},
 			{
 				"command": "llamacpp.chat.manageToolApprovals",
-				"title": "SubHarness: Allow External Tools Without Asking"
+				"title": "SubHarness: Manage Always Allowed Actions"
 			},
 			{
 				"command": "llamacpp.chat.addSelection",
@@ -1032,6 +1080,26 @@
 			{
 				"command": "llamacpp.codexAccountSignOut",
 				"title": "SubHarness: Sign Out of a Codex Account"
+			},
+			{
+				"command": "llamacpp.selectClaudeAccount",
+				"title": "SubHarness: Switch Claude Account"
+			},
+			{
+				"command": "llamacpp.addClaudeAccount",
+				"title": "SubHarness: Add Claude Account"
+			},
+			{
+				"command": "llamacpp.removeClaudeAccount",
+				"title": "SubHarness: Remove Claude Account"
+			},
+			{
+				"command": "llamacpp.claudeAccountSignIn",
+				"title": "SubHarness: Sign In to a Claude Account"
+			},
+			{
+				"command": "llamacpp.claudeAccountSignOut",
+				"title": "SubHarness: Sign Out of a Claude Account"
 			},
 			{
 				"command": "llamacpp.codexSignOut",

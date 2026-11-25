@@ -35,15 +35,56 @@ export const DEFAULT_DANGEROUS_COMMANDS: readonly string[] = [
 	"\\b(?:taskkill|Stop-Process|pkill|killall)\\b[^\\n;&|]*\\bcode(?:\\.exe)?\\b",
 ];
 
+/**
+ * Names of the default rules, in the same order. The id is what an "Always allow" choice stores, so it
+ * must not change; the label tells the user which commands that choice covers.
+ */
+export const DEFAULT_DANGEROUS_COMMAND_NAMES: ReadonlyArray<{ id: string; label: string }> = [
+	{ id: "git-push-force", label: "git push --force, --delete, --mirror or --prune" },
+	{ id: "git-push-refspec", label: "git push of a forced (+) or deleting (:) refspec" },
+	{ id: "git-reset-hard", label: "git reset --hard, --merge or --keep" },
+	{ id: "git-clean", label: "git clean -f" },
+	{ id: "git-checkout-discard", label: "git checkout that discards changes (--, ., -f)" },
+	{ id: "git-restore", label: "git restore" },
+	{ id: "git-branch-delete", label: "git branch --delete" },
+	{ id: "git-tag-delete", label: "git tag --delete" },
+	{ id: "git-stash-drop", label: "git stash drop or clear" },
+	{ id: "git-history-rewrite", label: "Rewriting git history (filter-branch, filter-repo, update-ref -d, reflog expire)" },
+	{ id: "rm-recursive", label: "rm -r (recursive delete)" },
+	{ id: "remove-item-recursive", label: "Remove-Item -Recurse, rmdir -r, del -r" },
+	{ id: "rmdir-s", label: "rmdir /s, del /s" },
+	{ id: "disk-format", label: "Formatting or partitioning disks" },
+	{ id: "dd-write", label: "dd writing with of=" },
+	{ id: "shutdown", label: "Shutting down or restarting the computer" },
+	{ id: "chmod-recursive", label: "chmod -R, chown -R" },
+	{ id: "download-to-shell", label: "Piping a download into a shell" },
+	{ id: "registry-delete", label: "Deleting registry keys or values" },
+	{ id: "npm-publish", label: "npm, pnpm or yarn publish, unpublish, deprecate" },
+	{ id: "extension-publish", label: "vsce or ovsx publish, unpublish" },
+	{ id: "gh-release-repo", label: "gh release create/delete/upload/edit, gh repo delete/archive/rename, gh pr merge" },
+	{ id: "docker-prune", label: "docker prune, docker rm -f, docker rmi -f" },
+	{ id: "kubectl-terraform", label: "kubectl delete, terraform apply or destroy" },
+	{ id: "sql-drop", label: "SQL DROP TABLE/DATABASE/SCHEMA, TRUNCATE TABLE" },
+	{ id: "kill-vscode", label: "Killing VS Code processes" },
+];
+
+const DEFAULT_NAME_BY_SOURCE = new Map(DEFAULT_DANGEROUS_COMMANDS.map((source, index) => [source, DEFAULT_DANGEROUS_COMMAND_NAMES[index]]));
+
 export interface DangerousCommandRule {
 	source: string;
 	pattern: RegExp;
+	/** Stable id: the default rule's name, or the pattern itself for a rule the user added. */
+	id: string;
+	/** Which commands an "Always allow" choice for this rule covers. */
+	label: string;
 }
 
 export interface DangerousCommandMatch {
 	rule: string;
 	/** The part of the command that matched, for the confirmation card. */
 	text: string;
+	id: string;
+	label: string;
 }
 
 /** Invalid entries are skipped and reported, so one typo does not disable the whole list. */
@@ -54,7 +95,8 @@ export function compileDangerousCommandRules(patterns: readonly unknown[], onInv
 			continue;
 		}
 		try {
-			rules.push({ source: entry, pattern: new RegExp(entry, "i") });
+			const name = DEFAULT_NAME_BY_SOURCE.get(entry);
+			rules.push({ source: entry, pattern: new RegExp(entry, "i"), id: name?.id ?? entry, label: name?.label ?? `Commands matching ${entry}` });
 		} catch (error) {
 			onInvalid?.(entry, error instanceof Error ? error.message : String(error));
 		}
@@ -63,13 +105,22 @@ export function compileDangerousCommandRules(patterns: readonly unknown[], onInv
 }
 
 export function findDangerousCommand(command: string, rules: readonly DangerousCommandRule[]): DangerousCommandMatch | undefined {
+	return findDangerousCommands(command, rules)[0];
+}
+
+/**
+ * Every rule the command matches, in rule order. A chain such as `git restore x; rm -rf y` matches two
+ * rules, and allowing one of them for good must not let the other through.
+ */
+export function findDangerousCommands(command: string, rules: readonly DangerousCommandRule[]): DangerousCommandMatch[] {
+	const matches: DangerousCommandMatch[] = [];
 	for (const rule of rules) {
 		const match = rule.pattern.exec(command);
-		if (match) {
-			return { rule: rule.source, text: match[0].trim().slice(0, 200) };
+		if (match && !matches.some(entry => entry.id === rule.id)) {
+			matches.push({ rule: rule.source, text: match[0].trim().slice(0, 200), id: rule.id, label: rule.label });
 		}
 	}
-	return undefined;
+	return matches;
 }
 
 /** Reads `llamacpp.chat.dangerousCommands`; a missing or non-array value falls back to the defaults. */

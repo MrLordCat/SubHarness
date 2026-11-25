@@ -177,6 +177,19 @@ export function availableSubagentModelProfiles(): SubagentModelProfile[] {
 	return getSubagentModelProfiles().filter(profile => profile.availability !== "unavailable");
 }
 
+/** Listed models whose limit is used up on every account that offers them; a call to one is answered at once. */
+export function unavailableSubagentModelProfiles(): SubagentModelProfile[] {
+	return getSubagentModelProfiles().filter(profile => profile.availability === "unavailable");
+}
+
+/** The profile of an open subagent's model when its limit is used up and no other account can take it over. */
+export function blockedSubagentModel(modelId: string): SubagentModelProfile | undefined {
+	const own = [...catalogs.values()]
+		.flatMap(scopes => [...scopes.values()].flatMap(catalog => catalog.profiles))
+		.find(profile => profile.id === modelId);
+	return own?.availability === "unavailable" && !subagentStandIn(modelId) ? own : undefined;
+}
+
 /**
  * The model an open subagent moves to when the subscription of its own model is used up or
  * gone: the available model listed under the same label, that is the same Codex model of
@@ -186,13 +199,18 @@ export function subagentStandIn(modelId: string): string | undefined {
 	const own = [...catalogs.values()]
 		.flatMap(scopes => [...scopes.values()].flatMap(catalog => catalog.profiles))
 		.find(profile => profile.id === modelId);
+	const slug = bareModelId(modelId);
 	if (own) {
 		return own.availability === "unavailable"
-			? availableSubagentModelProfiles().find(profile => profile.label === own.label && profile.id !== modelId)?.id
+			? availableSubagentModelProfiles().find(profile => profile.id !== modelId && (own.provider === "claude"
+				? profile.provider === "claude" && bareModelId(profile.id) === slug
+				: profile.label === own.label))?.id
 			: undefined;
 	}
-	// The account dropped its catalog (signed out, turned off): the same Codex model of another account.
-	const slug = bareModelId(modelId);
+	// The account dropped its catalog: find the same model on another account.
+	if (modelId.startsWith("claude::")) {
+		return availableSubagentModelProfiles().find(profile => profile.provider === "claude" && bareModelId(profile.id) === slug)?.id;
+	}
 	return modelId.startsWith("codex::") && codexSubagentRole(slug)
 		? availableSubagentModelProfiles().find(profile => profile.provider === "codex" && bareModelId(profile.id) === slug)?.id
 		: undefined;

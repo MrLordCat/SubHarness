@@ -834,6 +834,12 @@ body.vscode-light {
 	overflow-wrap: anywhere;
 }
 
+.compaction-note {
+	margin-top: 2px;
+	font-size: 11px;
+	overflow-wrap: anywhere;
+}
+
 .compaction-requests {
 	margin-top: 6px;
 }
@@ -2078,24 +2084,33 @@ body.vscode-light {
 	font-size: 11px;
 }
 
-.tool-picker .tool-group-approve {
-	margin-left: 4px;
-	padding: 0;
-	border: none;
-	background: none;
-	color: var(--vscode-textLink-foreground);
-	font: inherit;
+.tool-allowed {
+	padding: 6px 4px;
+	border-top: 1px solid var(--vscode-widget-border);
+}
+
+.tool-allowed-empty {
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.tool-allowed-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 3px 0;
+}
+
+.tool-allowed-row button {
+	border: 0;
+	background: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
 	cursor: pointer;
 }
 
-.tool-picker .tool-group-approve:hover {
-	color: var(--vscode-textLink-activeForeground);
-	text-decoration: underline;
-}
-
-.tool-picker .tool-group-approve:focus-visible {
+.tool-allowed-row button:focus-visible {
 	outline: 1px solid var(--vscode-focusBorder);
-	outline-offset: 1px;
 }
 
 .tool-picker .tool-row {
@@ -2166,6 +2181,11 @@ body.vscode-light {
 	color: var(--vscode-descriptionForeground);
 }
 
+.approval-scope {
+	margin-bottom: 4px;
+	color: var(--vscode-descriptionForeground);
+}
+
 .approval-detail {
 	margin: 0 0 6px;
 	padding: 4px 6px;
@@ -2189,6 +2209,7 @@ body.vscode-light {
 }
 
 .approval-allow,
+.approval-always,
 .approval-deny {
 	padding: 3px 14px;
 	border: none;
@@ -2207,16 +2228,19 @@ body.vscode-light {
 	background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
 }
 
+.approval-always,
 .approval-deny {
 	background: var(--vscode-button-secondaryBackground, #3a3d41);
 	color: var(--vscode-button-secondaryForeground);
 }
 
+.approval-always:hover:not(:disabled),
 .approval-deny:hover:not(:disabled) {
 	background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-secondaryBackground, #3a3d41));
 }
 
 .approval-allow:disabled,
+.approval-always:disabled,
 .approval-deny:disabled {
 	opacity: 0.5;
 	cursor: default;
@@ -3243,6 +3267,7 @@ body.vscode-light {
 .attachment-chip-remove:focus-visible,
 .queued-message-remove:focus-visible,
 .approval-allow:focus-visible,
+.approval-always:focus-visible,
 .approval-deny:focus-visible,
 .todo-toggle:focus-visible,
 .changes-toggle:focus-visible,

@@ -349,6 +349,7 @@ suite("Chat symbol tools", () => {
 			title: "Rename a symbol outside the workspace",
 			detail: path.resolve(outside),
 			reason: "The path is outside the open workspace folders.",
+			kinds: [{ key: "write-outside-workspace", label: "Create, edit and delete files outside the workspace" }],
 		});
 		assert.strictEqual(rename.needsConfirmation?.({
 			symbol: "aabsymFoo",

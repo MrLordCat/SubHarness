@@ -1,14 +1,14 @@
 // Screenshots of the bridge chat harness in headless Edge or Chrome, driven over the DevTools protocol.
 // Build the harness first: node scripts/build-webview.mjs --harness
-// Usage: node scripts/chat-harness-shots.mjs [--only=name,name] [--out=artifacts/screens] [--browser=<msedge.exe>]
+// Usage: node scripts/chat-harness-shots.mjs [--only=name,name] [--widths=320,420] [--out=artifacts/screens] [--browser=<msedge.exe>]
 // Scenarios open the harness at any width (320 px too, which a real window cannot get below),
 // run a few actions and save <out>/<name>.png. Runs without dialogs, so agents can use it unattended.
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const args = Object.fromEntries(process.argv.slice(2).map(arg => {
@@ -16,7 +16,13 @@ const args = Object.fromEntries(process.argv.slice(2).map(arg => {
 	return [key, rest.join("=") || "true"];
 }));
 const outDir = path.resolve(args.out ?? "artifacts/screens");
-const harnessPage = path.resolve("artifacts/chat-harness/index.html");
+const harnessDir = path.resolve("artifacts/chat-harness");
+const harnessPage = path.join(harnessDir, "index.html");
+const widths = args.widths ? args.widths.split(",").map(width => Number(width.trim())) : undefined;
+if (widths?.some(width => !Number.isInteger(width) || width <= 0)) {
+	console.error("--widths takes comma-separated pixel widths, e.g. --widths=320,420,1000.");
+	process.exit(1);
+}
 
 /**
  * Actions: { wait: ms } | { click: selector } | { hover: selector } | { scrollTo: selector }
@@ -41,6 +47,9 @@ const SCENARIOS = [
 	{ name: "sidebar-320-models", width: 320, height: 800, params: { count: "8" }, actions: [{ click: ".composer .picker-trigger" }] },
 	{ name: "sidebar-320-history", width: 320, height: 800, params: { count: "8" }, actions: [{ click: ".history-trigger" }] },
 	{ name: "sidebar-320-changes", width: 320, height: 800, params: { count: "8" }, actions: [{ click: ".changes-panel summary, .changes-toggle" }] },
+	// A message with "danger" makes the fake host hold a call; Always allow then lists its kind in the Tools picker.
+	{ name: "approval-always-allow", width: 420, height: 900, params: { count: "2" }, actions: [{ focus: ".composer textarea" }, { type: "run the danger command" }, { key: "Enter" }, { wait: 500 }, { scrollTo: ".approval-card" }] },
+	{ name: "tools-always-allowed", width: 420, height: 900, params: { count: "2" }, actions: [{ focus: ".composer textarea" }, { type: "run the danger command" }, { key: "Enter" }, { wait: 500 }, { click: ".approval-always" }, { wait: 400 }, { click: ".tool-picker .picker-trigger" }, { wait: 300 }, { type: "always" }, { wait: 300 }] },
 ];
 
 function findBrowser() {
@@ -59,6 +68,55 @@ function findBrowser() {
 		throw new Error("No Edge or Chrome found; pass --browser=<path>.");
 	}
 	return found;
+}
+
+const CONTENT_TYPES = {
+	".html": "text/html; charset=utf-8",
+	".js": "text/javascript; charset=utf-8",
+	".mjs": "text/javascript; charset=utf-8",
+	".css": "text/css; charset=utf-8",
+	".json": "application/json; charset=utf-8",
+	".map": "application/json; charset=utf-8",
+	".svg": "image/svg+xml",
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif": "image/gif",
+	".webp": "image/webp",
+	".woff": "font/woff",
+	".woff2": "font/woff2",
+};
+
+/** Serves artifacts/chat-harness/ on a random 127.0.0.1 port; HTTP avoids the file:// limits of browsers. */
+function startServer() {
+	const server = createServer((request, response) => {
+		let pathname;
+		try {
+			pathname = decodeURIComponent(new URL(request.url ?? "/", "http://127.0.0.1").pathname);
+		} catch {
+			response.writeHead(400).end("Bad request");
+			return;
+		}
+		const file = path.resolve(harnessDir, `.${pathname}`);
+		if (!file.startsWith(harnessDir + path.sep)) {
+			response.writeHead(403).end("Forbidden");
+			return;
+		}
+		let body;
+		try {
+			body = readFileSync(file);
+		} catch {
+			response.writeHead(404).end("Not found");
+			return;
+		}
+		const type = CONTENT_TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream";
+		response.writeHead(200, { "Content-Type": type });
+		response.end(body);
+	});
+	return new Promise((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", () => resolve(server));
+	});
 }
 
 async function connect(port) {
@@ -183,27 +241,37 @@ class Page {
 }
 
 if (!existsSync(harnessPage)) {
-	throw new Error(`No harness at ${harnessPage}; run node scripts/build-webview.mjs --harness first.`);
+	console.error(`No harness at ${harnessPage}.`);
+	console.error("Build it first: node scripts/build-webview.mjs --harness");
+	process.exit(1);
 }
 mkdirSync(outDir, { recursive: true });
 const only = args.only ? new Set(args.only.split(",")) : undefined;
 const scenarios = SCENARIOS.filter(scenario => !only || only.has(scenario.name));
+const shots = scenarios.flatMap(scenario => (widths ?? [scenario.width]).map(width => ({ scenario, width })));
 const port = 9300 + Math.floor(Math.random() * 500);
-const profile = mkdtempSync(path.join(tmpdir(), "chat-harness-shots-"));
-const browser = spawn(findBrowser(), [
-	"--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
-	"--no-first-run", "--disable-gpu", "--allow-file-access-from-files", "about:blank",
-], { stdio: "ignore" });
-const socket = new globalThis.WebSocket(await connect(port));
-await new Promise(resolve => socket.addEventListener("open", resolve, { once: true }));
-const page = new Page(socket);
+let server;
+let profile;
+let browser;
+let socket;
 let failed = 0;
 try {
+	server = await startServer();
+	const harnessUrl = new URL(`http://127.0.0.1:${server.address().port}/index.html`);
+	profile = mkdtempSync(path.join(tmpdir(), "chat-harness-shots-"));
+	browser = spawn(findBrowser(), [
+		"--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
+		"--no-first-run", "--disable-gpu", "about:blank",
+	], { stdio: "ignore" });
+	socket = new globalThis.WebSocket(await connect(port));
+	await new Promise(resolve => socket.addEventListener("open", resolve, { once: true }));
+	const page = new Page(socket);
 	await page.send("Page.enable");
-	for (const scenario of scenarios) {
+	for (const { scenario, width } of shots) {
+		const name = widths ? `${scenario.name}-${width}` : scenario.name;
 		try {
-			await page.send("Emulation.setDeviceMetricsOverride", { width: scenario.width, height: scenario.height, deviceScaleFactor: 1, mobile: false });
-			const url = new URL(pathToFileURL(harnessPage));
+			await page.send("Emulation.setDeviceMetricsOverride", { width, height: scenario.height, deviceScaleFactor: 1, mobile: false });
+			const url = new URL(harnessUrl);
 			for (const [key, value] of Object.entries(scenario.params ?? {})) {
 				url.searchParams.set(key, value);
 			}
@@ -214,18 +282,22 @@ try {
 			}
 			await sleep(300);
 			const { data } = await page.send("Page.captureScreenshot", { format: "png" });
-			const file = path.join(outDir, `${scenario.name}.png`);
+			const file = path.join(outDir, `${name}.png`);
 			writeFileSync(file, Buffer.from(data, "base64"));
-			console.log(`ok   ${scenario.name} -> ${path.relative(process.cwd(), file)}`);
+			console.log(`ok   ${name} -> ${path.relative(process.cwd(), file)}`);
 		} catch (error) {
 			failed++;
-			console.log(`FAIL ${scenario.name}: ${error instanceof Error ? error.message : String(error)}`);
+			console.log(`FAIL ${name}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 } finally {
-	socket.close();
-	browser.kill();
+	socket?.close();
+	browser?.kill();
+	server?.close();
+	server?.closeAllConnections?.();
 	await sleep(500);
-	rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+	if (profile) {
+		rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+	}
 }
 process.exitCode = failed > 0 ? 1 : 0;

@@ -1,5 +1,116 @@
 # Changelog
 
+## 2.0.13 (development build) - 2026-11-25
+
+- Added: a chat cleans its own context instead of growing until you start a
+  new one. Over `llamacpp.chatContextBudget` (200,000 tokens by default, 0
+  turns it off), a new request first replaces stale tool results of earlier
+  requests with a one-line stub, then summarizes older turns, down to about
+  60% of the budget. Stale means a file read that was edited or read again
+  later, a command or check that ran again, a search or listing from an
+  earlier request, or a large result two requests old. Sizes are measured in
+  the provider's tokens, so a session the provider compacted itself does not
+  trigger a cleaning. The first request after a cleaning starts the
+  provider's session again from the cleaned history (`_aabHistoryReset`,
+  handled like a model switch by Claude, Codex, Cursor and Coco; HTTP models
+  drop their compacted snapshot), so the cache is rebuilt once per cleaning.
+  A **Context cleaned** card shows what left the context; the full messages
+  stay in the chat. Session Quality counts the cleanings and the tokens saved.
+- Changed: a model switch compacts the already cleaned history, and only when
+  it is still over `llamacpp.providerSwitchContextTokens`; a switch keeps the
+  stubs of a cleaning.
+- Fixed (found in the first live cleaning): the new Claude session replays the
+  history within `providerSwitchContextTokens`, and a cleaned history of 120k
+  tokens did not fit, so Claude dropped its oldest 189 messages together with
+  the chat's summary. A cleaning now also stays within 70% of that limit, and
+  a replay that still has to drop old messages keeps the summary
+  (`<conversation_summary>`) after the instructions: in Claude's cold start
+  and in the shared handoff of Codex, Cursor and Coco. The cleaning card
+  counts only the stubs in kept messages, not results that went into the
+  summary.
+- Changed: a call to a subagent model whose subscription limit is used up on
+  every account starts nothing and answers at once: `"GPT-6-Luna (Codex)"
+  cannot start: … It resets at about 18:40. No subagent was started. Choose
+  another model: …`, instead of `Unknown subagent model`. The tool description
+  lists such models as used up, and an open subagent on one answers its next
+  task the same way and stays open. Codex subagent profiles now carry the
+  reset time.
+- Changed: the compaction summary falls back DeepSeek → a local llama.cpp
+  model (at least 32k context, two minutes) → the chat model → an extract. An
+  empty DeepSeek balance is remembered for 30 minutes per key instead of being
+  asked on every compaction.
+- Changed: with the local server off, background probes of `/v1/models`,
+  `/slots` and the provider directory back off from 15 s to 5 min (about 0.6
+  requests a minute instead of 3). A success, a change of
+  `llamacpp.localServerUrl` or `llamacpp.enableLocalServer`, **Refresh
+  Models**, **Run Provider Health Check** and **Recheck** in the Providers
+  Manager reset the pause; a chat request to a local model always tries.
+- Changed: `scripts/chat-harness-shots.mjs` serves the harness itself on a
+  random local port and takes `--widths=320,420,1000`.
+- Added: the `changes_diff` tool returns a unified diff of the agent's changes
+  from the Keep/Undo snapshots: the running turn with its subagents' edits, or
+  everything waiting for Keep or Undo. A file list with line counts comes
+  first; `paths`, `contextLines` and `maxChars` (40,000 by default) narrow it.
+  A reviewer subagent can call it, and the delegation guide tells the agent
+  so. It is read-only and starts no snapshot.
+
+## 2.0.12 (development build) - 2026-11-25
+
+- Changed: a subagent stops after 1000 tool rounds instead of 100; a broad
+  review ran out of rounds before its report.
+
+- Added: two or more Claude subscriptions, like the Codex accounts. Quick
+  Access → Claude → **Add Claude Account…** (or `llamacpp.claudeAccounts`)
+  gives an account its own `CLAUDE_CONFIG_DIR` (`~/.claude-<id>`); its chat
+  sessions, usage probes and `claude auth` commands run with it, so both logins
+  coexist and signing out of an added account leaves the built-in one alone.
+  The picker shows a group per account with its own limits; subagents list
+  each Claude model once and start on the active account, then on the next one
+  with room; an open subagent moves to the same model of the other account.
+- Added: when a limit stops an answer and another subscription of the same
+  provider has room, the limit card offers **Continue on Claude 2** or
+  **Continue on Codex 2**. The chat takes that subscription's model and
+  continues the answer like Retry.
+- Fixed: Quick Access tooltips said that only the active Codex account's
+  models appear in the picker; every account's models do.
+
+- Fixed: a weekly Claude or Codex limit could show a reset a few hours away,
+  and auto-continue then ran into the same limit again. The reset text with a
+  date (`resets Nov 28, 4pm`, `try again at Nov 28th, 2026 4:12 PM`) was not
+  understood, Claude's `session`, `Opus` and `Sonnet` limit names gave no
+  window, and with both Codex windows used up the 5-hour one decided. The
+  window and reset now come from the provider's own report when there is one:
+  Claude's rate-limit event of the request or a fresh usage report, Codex's
+  window that resets later.
+- Changed: a weekly limit keeps the **Continue automatically after the
+  reset** box on the limit card, cleared; tick it to continue at the reset.
+  Waits of a day or more read in days (`in 2 d 5 h`), and the limit notice
+  names the date (`28 Nov, 16:00 EET`).
+
+- Added: **Always allow** on the chat's approval cards. It covers the kind of
+  action, not the one file or command line: every create, edit, rename or
+  delete outside the workspace, every folder deletion, or every command that
+  one rule of `llamacpp.chat.dangerousCommands` holds (every `git restore`,
+  every `rm -r`). The card names what it covers. The choice holds in every
+  workspace and is saved in the new user setting `llamacpp.chat.alwaysAllow`,
+  which a workspace's `.vscode/settings.json` cannot set. A waiting card of
+  the same kind in another chat or subagent goes through at once.
+- Added: **Always allowed** at the end of the Tools list shows what runs
+  without a card, with **Revoke** for each entry. The command **SubHarness:
+  Manage Always Allowed Actions** (formerly "Allow External Tools Without
+  Asking") lists and revokes them as well.
+- Fixed: a command that matches several dangerous-command rules, such as
+  `git restore x; rm -rf y`, named only the first one. The card now names
+  every matched rule, and **Always allow** lets the command through only
+  once all of them are allowed. Deleting a folder outside the workspace names
+  both reasons.
+- Removed: **Allow without asking…** beside external tool groups. It opened
+  VS Code's own tool approval, which VS Code applies only inside its own chat
+  sessions, so it never stopped the dialog for calls from this chat and could
+  not show whether an approval existed. The group's note now says that tools
+  which may change something, such as MCP tools not marked read-only, ask in
+  VS Code's own dialog every time.
+
 ## 2.0.11 (stable release) - 2026-11-23
 
 - Fixed: a subagent on DeepSeek missed the prompt cache after its system

@@ -46,10 +46,13 @@ export type ChatPart =
 	| { kind: "toolResult"; callId: string; text: string; isError?: boolean; truncated?: boolean; preview?: boolean; fullLength?: number; images?: ChatToolImage[] }
 	/** Shows Retry when the notice is in the last answer. */
 	| { kind: "notice"; level: "info" | "warning" | "error"; text: string; limit?: ChatLimitInfo; retryable?: boolean }
-	/** Messages before keepFromMessageId reach the model only as this summary. */
+	/**
+	 * Messages before keepFromMessageId reach the model only as this summary. Method "none" summarizes nothing:
+	 * the part only carries staleResults, and the model gets no summary message.
+	 */
 	| {
 		kind: "compaction"; summary: string; keepFromMessageId: string; summarizedMessages: number;
-		tokensBefore: number; tokensAfter: number; method: "deepseek" | "model" | "extractive";
+		tokensBefore: number; tokensAfter: number; method: "deepseek" | "model" | "extractive" | "none";
 		/** The kept turn was cut between tool rounds: parts before fromPart of this answer reach the model only through the summary. */
 		trimmedTurn?: { messageId: string; fromPart: number; rounds: number };
 		/** Tool results in kept messages before this user message reach the model shortened to their start and end. */
@@ -62,9 +65,25 @@ export type ChatPart =
 		transcriptPath?: string;
 		/** The user's summarized requests, verbatim (long ones cut), oldest first; the summary alone may paraphrase them. */
 		requests?: string[];
+		/** Call ids of tool results in kept messages that reach the model as a one-line stub. */
+		staleResults?: string[];
+		/** Set when self-cleaning over the chat context budget made the part, not a model switch. */
+		cleaning?: ChatContextCleaning;
 	}
 	/** What a subagent tool call did; the model sees only the subagent's report in the tool result. */
 	| ({ kind: "subagent" } & ChatSubagentRun);
+
+/** What one self-cleaning of the chat context removed. */
+export interface ChatContextCleaning {
+	/** Tool results this cleaning replaced with stubs. */
+	staleResults: number;
+	/** This cleaning wrote a new summary; false when it kept the earlier one, or there is none. */
+	summary: boolean;
+	/** Messages this cleaning added to the summary; a trimmed answer counts none. */
+	summarizedMessages: number;
+	/** The chat context budget, in tokens, that the chat was over. */
+	budgetTokens: number;
+}
 
 export type ChatSubagentStep =
 	/** input and output are display copies (at most 4,000 and 2,000 characters); summary stays for old sessions. */
@@ -417,6 +436,17 @@ export interface ChatQuestionRequest {
 	skipLabel?: string;
 }
 
+/**
+ * What an "Always allow" choice covers: a kind of action, never one path or command line,
+ * for example every write outside the workspace or every command the `git restore` rule holds.
+ */
+export interface ChatApprovalKind {
+	/** Stored in `llamacpp.chat.alwaysAllow`, e.g. "write-outside-workspace" or "command:git-restore". */
+	key: string;
+	/** Shown on the card and in the Tools list. */
+	label: string;
+}
+
 /** A tool call held until the user allows or denies it. */
 export interface ChatApprovalRequest {
 	id: string;
@@ -428,6 +458,8 @@ export interface ChatApprovalRequest {
 	detail: string;
 	/** Why it needs confirmation, e.g. the matched dangerous-command rule. */
 	reason: string;
+	/** Kinds the call belongs to; "Always allow" stores all of them. Absent: the card offers Allow and Deny only. */
+	kinds?: ChatApprovalKind[];
 }
 
 /** Composer that requested an attachment; omitted for host-initiated additions. */
@@ -451,6 +483,8 @@ export type HostMessage =
 		favoriteModels?: string[];
 		/** Subagents kept open in the shown chat. */
 		subagents?: ChatOpenSubagent[];
+		/** Kinds of actions that run without an approval card. */
+		alwaysAllowed?: ChatApprovalKind[];
 	}
 	| { type: "changes"; changes: ChatChangeSet }
 	| { type: "contextSettings"; settings: ChatContextSettings }
@@ -473,6 +507,8 @@ export type HostMessage =
 	| { type: "run"; run: ChatRunState }
 	| { type: "approval"; request: ChatApprovalRequest }
 	| { type: "approvalResolved"; id: string; allowed: boolean }
+	/** The kinds of actions that run without an approval card changed. */
+	| { type: "alwaysAllowed"; kinds: ChatApprovalKind[] }
 	/** Questions the agent waits on; the webview shows an answer card. */
 	| { type: "questions"; request: ChatQuestionRequest }
 	| { type: "questionsResolved"; id: string }
@@ -522,6 +558,8 @@ export type WebviewMessage =
 	| { type: "editMessage"; messageId: string; text: string; undoChanges?: boolean; attachments?: ChatAttachment[] }
 	/** Continues the failed answer (messageId): its work stays and a continuation message asks the model to finish. */
 	| { type: "retryTurn"; messageId: string }
+	/** The limit card's "Continue on Claude 2": the chat takes that model and continues the answer like Retry. */
+	| { type: "continueOnModel"; messageId: string; modelId: string }
 	/** Closes an open subagent from the panel above the input. */
 	| { type: "closeSubagent"; sessionId: string; subagentId: string }
 	/** The limit card's checkbox: continue the answer (messageId) by itself once the limit resets. */
@@ -541,9 +579,10 @@ export type WebviewMessage =
 	/** Saves the context popup's sliders and Codex toggle. */
 	| { type: "saveContextSettings"; change: ChatContextSettingsChange }
 	| { type: "setToolsEnabled"; names: string[]; enabled: boolean }
-	/** Opens VS Code's tool approval settings, where external tools can run without its dialog. */
-	| { type: "manageToolApprovals" }
-	| { type: "approve"; id: string; allow: boolean }
+	/** always: the call's kinds run without asking from now on, in every workspace. */
+	| { type: "approve"; id: string; allow: boolean; always?: boolean }
+	/** Takes a kind of action off the always-allowed list; its calls ask again. */
+	| { type: "revokeAlwaysAllow"; key: string }
 	/** Answers to a questions message; answers absent means the user skipped. */
 	| { type: "answerQuestions"; id: string; answers?: ChatQuestionAnswer[] }
 	| { type: "newChat" }

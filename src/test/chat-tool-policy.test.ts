@@ -4,7 +4,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { createChatToolSource, DENIED_TOOL_RESULT } from "../chat/tool-executor";
 import { ChatToolCatalog, isCopilotOnlyTool, TOOL_OVERRIDES_KEY, type ToolRegistry } from "../chat/tools/catalog";
-import { compileDangerousCommandRules, DEFAULT_DANGEROUS_COMMANDS, findDangerousCommand } from "../chat/tools/danger";
+import { compileDangerousCommandRules, DEFAULT_DANGEROUS_COMMANDS, DEFAULT_DANGEROUS_COMMAND_NAMES, findDangerousCommand, findDangerousCommands } from "../chat/tools/danger";
 import { createChatTerminalTools } from "../chat/tools/terminal-tools";
 import { MAX_IMAGE_BYTES, type ChatTool, type ChatToolOutput } from "../chat/tools/types";
 import type { CocoTerminalRunInput, CocoTerminalSnapshot } from "../coco/terminal-manager";
@@ -170,7 +170,13 @@ suite("chat tool policy", () => {
 		const rules = compileDangerousCommandRules(["(unclosed", 42, "", "\\bdeploy\\b"], pattern => invalid.push(pattern));
 		assert.deepStrictEqual(invalid, ["(unclosed"]);
 		assert.deepStrictEqual(rules.map(rule => rule.source), ["\\bdeploy\\b"]);
-		assert.deepStrictEqual(findDangerousCommand("npm run DEPLOY", rules), { rule: "\\bdeploy\\b", text: "DEPLOY" });
+		assert.deepStrictEqual(findDangerousCommand("npm run DEPLOY", rules), { rule: "\\bdeploy\\b", text: "DEPLOY", id: "\\bdeploy\\b", label: "Commands matching \\bdeploy\\b" });
+	});
+
+	test("dangerous rules have stable names and report all matches", () => {
+		assert.strictEqual(DEFAULT_DANGEROUS_COMMAND_NAMES.length, DEFAULT_DANGEROUS_COMMANDS.length);
+		assert.strictEqual(new Set(DEFAULT_DANGEROUS_COMMAND_NAMES.map(name => name.id)).size, DEFAULT_DANGEROUS_COMMAND_NAMES.length);
+		assert.deepStrictEqual(findDangerousCommands("git restore a.txt; rm -rf build", RULES).map(match => match.id), ["git-restore", "rm-recursive"]);
 	});
 
 	test("terminal tools ask before dangerous commands and input only", () => {
@@ -190,6 +196,10 @@ suite("chat tool policy", () => {
 		const held = run?.needsConfirmation?.({ command: "git push --force", cwd: "C:\\repo" });
 		assert.strictEqual(held?.detail, "git push --force\n\nDirectory: C:\\repo");
 		assert.match(held?.reason ?? "", /git push --force/);
+		assert.deepStrictEqual(held?.kinds?.map(kind => kind.key), ["command:git-push-force"]);
+		const chain = run?.needsConfirmation?.({ command: "git restore a.txt; rm -rf build" });
+		assert.deepStrictEqual(chain?.kinds?.map(kind => kind.key), ["command:git-restore", "command:rm-recursive"]);
+		assert.strictEqual(chain?.reason.split("\n").length, 2);
 		assert.strictEqual(run?.needsConfirmation?.({ command: "npm test" }), undefined);
 		assert.strictEqual(run?.needsConfirmation?.({ command: 7 }), undefined);
 		assert.ok(byName.get("send_to_terminal")?.needsConfirmation?.({ terminalId: "t", text: "rm -rf /" }));
@@ -322,8 +332,8 @@ suite("chat tool policy", () => {
 		]);
 		assert.strictEqual(groups.find(group => group.label === "Files")?.note, undefined);
 		assert.strictEqual(groups.find(group => group.label === "Files")?.external, undefined);
-		assert.match(groups.find(group => group.label === "pylance")?.note ?? "", /tool approval/);
-		// External groups get the picker's link to VS Code's tool approval.
+		// VS Code ignores its saved approvals for calls without its own chat session; the note says so.
+		assert.match(groups.find(group => group.label === "pylance")?.note ?? "", /cannot skip that dialog/);
 		assert.strictEqual(groups.find(group => group.label === "pylance")?.external, true);
 		assert.deepStrictEqual(catalog.enabledTools().map(tool => tool.name), ["read_file", "run_in_terminal", "llamacpp_store_memory"]);
 	});

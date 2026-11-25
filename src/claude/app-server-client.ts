@@ -231,6 +231,8 @@ export interface ClaudeRateLimitInfo {
 	status: "allowed" | "allowed_warning" | "rejected";
 	resetsAt?: number;
 	utilization?: number;
+	/** The window the event is about, e.g. `five_hour` or `seven_day`. */
+	rateLimitType?: string;
 }
 
 export type ClaudeSubscriptionUsageSnapshot = SDKControlGetUsageResponse;
@@ -259,6 +261,8 @@ export interface ClaudeAgentSessionOptions {
 	resumeSessionAt?: string;
 	maxTurns?: number;
 	maxCumulativeInputTokens?: number;
+	/** Extra environment of the CLI process, e.g. CLAUDE_CONFIG_DIR of a second account. */
+	env?: Readonly<Record<string, string>>;
 	logSink?: LlamaLogSink;
 	callbacks: ClaudeAgentSessionCallbacks;
 }
@@ -774,6 +778,7 @@ export class ClaudeAgentSession implements vscode.Disposable {
 			...(this.options.effort ? { effort: this.options.effort } : {}),
 			env: {
 				...process.env,
+				...this.options.env,
 				CLAUDE_AGENT_SDK_CLIENT_APP: `llama-vscode-chat/${this.options.extensionVersion}`,
 				...(this.options.autoCompactTokenLimit !== undefined
 					? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(this.options.autoCompactTokenLimit) }
@@ -894,6 +899,7 @@ export class ClaudeAgentSession implements vscode.Disposable {
 				status: message.rate_limit_info.status,
 				resetsAt: message.rate_limit_info.resetsAt,
 				utilization: message.rate_limit_info.utilization,
+				...(message.rate_limit_info.rateLimitType ? { rateLimitType: message.rate_limit_info.rateLimitType } : {}),
 			});
 			return;
 		}

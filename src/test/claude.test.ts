@@ -36,7 +36,8 @@ import {
 	resolveClaudeRuntimeModel,
 	ClaudeChatModelProvider,
 } from "../claude/claude-provider";
-import { buildClaudeModelAvailability } from "../claude/availability";
+import { buildClaudeModelAvailability, claudeReportedLimit } from "../claude/availability";
+import { encodeClaudeAccountModelId, resolveClaudeAccounts, type ClaudeAccountIdentity } from "../claude/accounts";
 import { resolveClaudeKeepAliveSettings } from "../claude/keepalive-settings";
 import { getSubagentModelProfiles, setSubagentModelProfiles } from "../subagent-guidance";
 import {
@@ -903,6 +904,25 @@ test("marks the session stream as closed after an interrupt", async () => {
 		assert.ok(prepared.text.includes("user-0-"), "the first message stays");
 	});
 
+	test("a truncated cold start keeps the chat's conversation summary after the instructions", () => {
+		const messages = [
+			vscode.LanguageModelChatMessage.User("INSTRUCTIONS"),
+			vscode.LanguageModelChatMessage.User("<conversation_summary>\nSUMMARY_OF_EARLIER_WORK\n</conversation_summary>"),
+			...Array.from({ length: 400 }, (_, index) => index % 2 === 0
+				? vscode.LanguageModelChatMessage.User(`<userRequest>request-${index}</userRequest> ${"u".repeat(1_000)}`)
+				: vscode.LanguageModelChatMessage.Assistant(`answer-${index}-${"a".repeat(1_000)}`)),
+			vscode.LanguageModelChatMessage.User("<userRequest>latest</userRequest>"),
+		];
+		const prepared = buildClaudeInitialConversationText(messages, 80_000);
+		assert.strictEqual(prepared.truncated, true);
+		assert.ok(prepared.text.length <= 80_000);
+		const summary = prepared.text.indexOf("SUMMARY_OF_EARLIER_WORK");
+		assert.ok(prepared.text.indexOf("INSTRUCTIONS") < summary && summary >= 0, "the summary follows the instructions");
+		assert.ok(summary < prepared.text.indexOf("older messages omitted"), "the summary precedes the omission marker");
+		assert.ok(!prepared.text.includes("answer-1-"), "old turns are dropped");
+		assert.ok(prepared.text.trimEnd().endsWith("latest</userRequest>\"}]}]"));
+	});
+
 	test("a cold start after a provider switch keeps the recent user requests and only the current images", () => {
 		const screenshot = new vscode.LanguageModelDataPart(new Uint8Array([1, 2, 3]), "image/png");
 		const toolRound = (index: number) => [
@@ -1200,6 +1220,43 @@ test("marks the session stream as closed after an interrupt", async () => {
 		assert.strictEqual(rejected.unavailableUntil, "2026-07-19T10:50:00.000Z");
 	});
 
+	test("names the window that refused a request from Claude's own report", () => {
+		const now = AVAILABILITY_NOW;
+		// A rejected event of this turn wins: it says which window and when.
+		const weeklyReset = Date.parse("2026-07-22T13:00:00Z") / 1000;
+		assert.deepStrictEqual(
+			claudeReportedLimit("claude-opus-5", { status: "rejected", resetsAt: weeklyReset, rateLimitType: "seven_day" }, now - 1_000, undefined, undefined, now),
+			{ window: "weekly", resetAt: new Date(weeklyReset * 1000) }
+		);
+		assert.deepStrictEqual(
+			claudeReportedLimit("claude-opus-5", { status: "rejected", rateLimitType: "five_hour" }, now - 1_000, undefined, undefined, now),
+			{ window: "5-hour" }
+		);
+		// An old event or an allowed one says nothing about this request.
+		assert.strictEqual(claudeReportedLimit("claude-opus-5", { status: "rejected", resetsAt: weeklyReset, rateLimitType: "seven_day" }, now - 10 * 60_000, undefined, undefined, now), undefined);
+		assert.strictEqual(claudeReportedLimit("claude-opus-5", { status: "allowed_warning", resetsAt: weeklyReset }, now, undefined, undefined, now), undefined);
+
+		// Otherwise a fresh usage report: of the used-up windows, the one that resets last.
+		const both = usageSnapshot({
+			five_hour: { utilization: 100, resets_at: "2026-07-19T10:50:00Z" },
+			seven_day: { utilization: 100, resets_at: "2026-07-21T23:00:00Z" },
+		});
+		assert.deepStrictEqual(claudeReportedLimit("claude-opus-5", undefined, undefined, both, now - 60_000, now), { window: "weekly", resetAt: new Date("2026-07-21T23:00:00Z") });
+		assert.strictEqual(claudeReportedLimit("claude-opus-5", undefined, undefined, both, now - 60 * 60_000, now), undefined, "a stale report is not used");
+		// Another family's scoped window did not refuse an Opus request.
+		const sonnetOnly = usageSnapshot({
+			five_hour: { utilization: 100, resets_at: "2026-07-19T10:50:00Z" },
+			seven_day: { utilization: 40, resets_at: "2026-07-21T23:00:00Z" },
+			model_scoped: [{ display_name: "Sonnet 5", utilization: 100, resets_at: "2026-07-23T23:00:00Z" }],
+		});
+		assert.deepStrictEqual(claudeReportedLimit("claude-opus-5", undefined, undefined, sonnetOnly, now, now), { window: "5-hour", resetAt: new Date("2026-07-19T10:50:00Z") });
+		const opusWeekly = usageSnapshot({
+			five_hour: { utilization: 30, resets_at: "2026-07-19T10:50:00Z" },
+			seven_day_opus: { utilization: 100, resets_at: "2026-07-22T23:00:00Z" },
+		});
+		assert.deepStrictEqual(claudeReportedLimit("claude-opus-5", undefined, undefined, opusWeekly, now, now), { window: "weekly", resetAt: new Date("2026-07-22T23:00:00Z") });
+	});
+
 	test("applies Opus-specific windows and ignores removed model families", () => {
 		const base = {
 			five_hour: { utilization: 20, resets_at: "2026-07-19T10:50:00Z" },
@@ -1356,7 +1413,7 @@ function claudeTool(name: string): vscode.LanguageModelChatTool {
 	return { name, description: `${name} tool`, inputSchema: { type: "object", properties: {} } };
 }
 
-function claudeChatFixture(): {
+function claudeChatFixture(account?: ClaudeAccountIdentity, memento = new FakeClaudeMemento()): {
 	provider: ClaudeChatModelProvider;
 	clients: FakeClaudeToolSession[];
 	events: string[];
@@ -1368,20 +1425,20 @@ function claudeChatFixture(): {
 		log: (event: string) => { events.push(event); },
 		logError: () => undefined,
 		shouldLogStreamChunks: () => false,
-	}, new FakeClaudeMemento(), {
+	}, memento, {
 		resolveExecutable: () => "claude-test",
 		createSessionClient: options => {
 			const client = new FakeClaudeToolSession(options);
 			clients.push(client);
 			return client as unknown as ClaudeAgentSession;
 		},
-	});
+	}, account);
 	const internals = provider as unknown as { lastSubscriptionUsage?: unknown; lastSubscriptionUsageAt: number };
 	internals.lastSubscriptionUsage = { subscription_type: "pro", rate_limits_available: false };
 	internals.lastSubscriptionUsageAt = Date.now();
 	const tokenSource = new vscode.CancellationTokenSource();
 	const model = {
-		id: encodeClaudeModelId(CLAUDE_SUBSCRIPTION_MODELS[0].id),
+		id: encodeClaudeAccountModelId(account?.id ?? "", CLAUDE_SUBSCRIPTION_MODELS[0].id),
 		name: "Opus 5 (Claude)",
 		family: "claude",
 		version: "1",
@@ -1417,6 +1474,39 @@ suite("Claude tool catalog growth", () => {
 				const label = (id: string) => CLAUDE_SUBSCRIPTION_MODELS.find(model => encodeClaudeModelId(model.id) === id)!.name;
 				return label(left).localeCompare(label(right));
 			}));
+		} finally {
+			setSubagentModelProfiles("claude", []);
+			fixture.provider.dispose();
+		}
+	});
+
+	test("a second account runs its CLI with its own config directory and keeps its own sessions", async () => {
+		const [, second] = resolveClaudeAccounts([{ id: "work" }], "C:/home");
+		assert.strictEqual(second.providerLabel, "Claude 2");
+		const memento = new FakeClaudeMemento();
+		const fixture = claudeChatFixture(second, memento);
+		try {
+			await fixture.send([claudeUser("FIRST")], [claudeTool("read_file")]);
+			assert.strictEqual(fixture.clients[0].options.env?.CLAUDE_CONFIG_DIR, second.configDir);
+			const internals = fixture.provider as unknown as { persistDurableSessions(): Promise<void>; durableSessions: Map<string, unknown> };
+			internals.durableSessions.set("k", { conversationId: "c", sdkSessionId: "s", modelId: "m", runtimeKey: "r", userSignatures: [], lastUsedAt: Date.now() });
+			await internals.persistDurableSessions();
+			assert.ok(memento.get("llamacpp.claudeDurableSessions.v1.account.work"), "the second account's sessions have their own key");
+			assert.strictEqual(memento.get("llamacpp.claudeDurableSessions.v1"), undefined, "the built-in account's key is untouched");
+
+			// The built-in account's model id is not this provider's.
+			await assert.rejects(fixture.provider.provideLanguageModelChatResponse({ id: encodeClaudeModelId(CLAUDE_SUBSCRIPTION_MODELS[0].id) } as vscode.LanguageModelChatInformation, [claudeUser("X")], {
+				toolMode: vscode.LanguageModelChatToolMode.Auto,
+				tools: [],
+				modelOptions: {},
+			}, { report: () => undefined }, new vscode.CancellationTokenSource().token), /Invalid Claude model id/);
+
+			(fixture.provider as unknown as { refreshSubagentProfiles(): void }).refreshSubagentProfiles();
+			const profiles = getSubagentModelProfiles().filter(profile => profile.provider === "claude");
+			assert.ok(profiles.every(profile => profile.id.startsWith("claude::work::")), "subagents run on this account");
+			assert.ok(profiles.every(profile => profile.label.endsWith("(Claude)")), "the label is shared between accounts");
+			const names = (fixture.provider as unknown as { mapKnownModels(): vscode.LanguageModelChatInformation[] }).mapKnownModels().map(model => model.name);
+			assert.ok(names.every(name => name.endsWith("(Claude 2)")), names.join(", "));
 		} finally {
 			setSubagentModelProfiles("claude", []);
 			fixture.provider.dispose();

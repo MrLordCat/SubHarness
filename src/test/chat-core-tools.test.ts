@@ -184,6 +184,8 @@ suite("Chat core tools", () => {
 		assert.strictEqual(create.needsConfirmation?.({ filePath: "inside.txt", content: "" }), undefined);
 		assert.strictEqual(create.needsConfirmation?.({}), undefined);
 		const confirmation = create.needsConfirmation?.({ filePath: outside, content: "" });
+		assert.deepStrictEqual(confirmation?.kinds?.map(kind => kind.key), ["write-outside-workspace"]);
+		assert.deepStrictEqual(tool("replace_string_in_file").needsConfirmation?.({ filePath: outside })?.kinds?.map(kind => kind.key), ["write-outside-workspace"]);
 		assert.strictEqual(confirmation?.title, "Create a file outside the workspace");
 		assert.strictEqual(confirmation?.detail, path.resolve(outside));
 		const edit = tool("replace_string_in_file");
@@ -338,6 +340,7 @@ suite("Chat core tools", () => {
 				{ filePath: outside, oldString: "c", newString: "d" },
 			],
 		});
+		assert.deepStrictEqual(confirmation?.kinds?.map(kind => kind.key), ["write-outside-workspace"]);
 		assert.strictEqual(confirmation?.title, "Edit files outside the workspace");
 		assert.strictEqual(confirmation?.detail, path.resolve(outside));
 		assert.strictEqual(confirmation?.reason, "The path is outside the open workspace folders.");
@@ -377,11 +380,26 @@ suite("Chat core tools", () => {
 		assert.strictEqual(remove.needsConfirmation?.({ filePath: "folder" }), undefined);
 		assert.strictEqual(remove.needsConfirmation?.({ filePath: "missing", recursive: true }), undefined);
 		const folder = remove.needsConfirmation?.({ filePath: "folder", recursive: true });
+		assert.deepStrictEqual(folder?.kinds?.map(kind => kind.key), ["delete-folder"]);
+		const outsideFolder = path.join(tmpDir, "..", path.basename(tmpDir) + "-outside");
+		await fsp.mkdir(outsideFolder);
+		try {
+			const outsideFile = path.join(outsideFolder, "file.txt");
+			await fsp.writeFile(outsideFile, "x");
+			assert.deepStrictEqual(remove.needsConfirmation?.({ filePath: outsideFile, recursive: true })?.kinds?.map(kind => kind.key), ["write-outside-workspace"]);
+			await fsp.unlink(outsideFile);
+			const both = remove.needsConfirmation?.({ filePath: outsideFolder, recursive: true });
+			assert.strictEqual(both?.title, "Delete a folder outside the workspace");
+			assert.deepStrictEqual(both?.kinds?.map(kind => kind.key), ["write-outside-workspace", "delete-folder"]);
+		} finally {
+			await fsp.rmdir(outsideFolder);
+		}
 		assert.strictEqual(folder?.title, "Delete a folder");
 		assert.strictEqual(folder?.detail, path.resolve(tmpDir, "folder"));
 		assert.strictEqual(folder?.reason, "Deletes the folder and everything in it.");
 		const outside = path.join(tmpDir, "..", "outside-delete.txt");
 		const confirmation = remove.needsConfirmation?.({ filePath: outside });
+		assert.deepStrictEqual(confirmation?.kinds?.map(kind => kind.key), ["write-outside-workspace"]);
 		assert.strictEqual(confirmation?.title, "Delete outside the workspace");
 		assert.strictEqual(confirmation?.detail, path.resolve(outside));
 		assert.strictEqual(confirmation?.reason, "The path is outside the open workspace folders.");

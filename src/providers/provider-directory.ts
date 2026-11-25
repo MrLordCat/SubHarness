@@ -5,6 +5,7 @@ import { apiProviderSecretKey, isCursorApiProfile } from "../api-providers/api-p
 import type { ApiRequestProtocol } from "../model-sources/source-routing";
 import { getModelsEndpoint, isCloudflareWorkersAiBase, isDeepSeekEndpoint } from "../transport/openai-http";
 import { BUILTIN_PROVIDER_SOURCES, type ProviderSourceDefinition } from "./provider-registry";
+import { ProbeBackoff } from "./probe-backoff";
 
 /**
  * Unified provider directory: one place that knows every model source
@@ -80,6 +81,10 @@ export interface ProviderDirectoryOptions {
 	probeHttp?: HttpProbeFn;
 	probeIntervalMs?: number;
 	probeTimeoutMs?: number;
+	/** Injectable clock for tests. */
+	now?: () => number;
+	/** Structured log sink; used for `local.probe.backoff` state changes. */
+	log?: (event: string, data?: unknown) => void;
 }
 
 export const DEFAULT_PROVIDER_PROBE_INTERVAL_MS = 5 * 60_000;
@@ -168,11 +173,23 @@ export class ProviderDirectory implements vscode.Disposable {
 	private readonly probeHttp: HttpProbeFn;
 	private readonly probeIntervalMs: number;
 	private readonly probeTimeoutMs: number;
+	/** Failing probes of the local server pause 15 s -> 5 min instead of polling. */
+	private readonly localBackoff: ProbeBackoff;
+	private localEndpoint: string | undefined;
+	private localEnabled: boolean | undefined;
 
 	constructor(private readonly options: ProviderDirectoryOptions) {
 		this.probeHttp = options.probeHttp ?? defaultProbeHttp;
 		this.probeIntervalMs = options.probeIntervalMs ?? DEFAULT_PROVIDER_PROBE_INTERVAL_MS;
 		this.probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROVIDER_PROBE_TIMEOUT_MS;
+		this.localBackoff = new ProbeBackoff({
+			now: options.now,
+			onChange: state => options.log?.("local.probe.backoff", {
+				failures: state.failureCount,
+				nextDelayMs: state.delayMs,
+				nextProbeAt: state.nextProbeAt === undefined ? undefined : new Date(state.nextProbeAt).toISOString(),
+			}),
+		});
 		if (this.probeIntervalMs > 0) {
 			this.probeTimer = setInterval(() => void this.recheck(), this.probeIntervalMs);
 		}
@@ -262,6 +279,14 @@ export class ProviderDirectory implements vscode.Disposable {
 		}
 	}
 
+	/**
+	 * Clears the local-server pause so the next recheck probes immediately.
+	 * Called for settings changes and explicit user actions.
+	 */
+	resetLocalProbeBackoff(): void {
+		this.localBackoff.reset();
+	}
+
 	/** Probes every enabled HTTP source now (Local, DeepSeek, custom API
 	 *  profiles) and refreshes the directory. Used by the periodic timer and
 	 *  the manual "Recheck" button in the Providers Manager. */
@@ -269,13 +294,27 @@ export class ProviderDirectory implements vscode.Disposable {
 		const config = this.options;
 		const secrets = this.options.getSecret;
 		const profiles = await config.getApiProfiles().catch(() => []);
-		const now = Date.now();
+		const now = this.now();
 
 		const jobs: Array<Promise<void>> = [];
 
-		if (config.getConfigValue("enableLocalServer", true) !== false) {
+		const localEnabled = config.getConfigValue("enableLocalServer", true) !== false;
+		if (localEnabled !== this.localEnabled) {
+			// Toggling the source is a settings change, not a probe failure.
+			this.localEnabled = localEnabled;
+			this.localBackoff.reset();
+		}
+		if (localEnabled) {
 			const url = String(config.getConfigValue("localServerUrl", DEFAULT_SERVER_URL) ?? DEFAULT_SERVER_URL);
-			jobs.push(this.probeSource("local", getModelsEndpoint(url), undefined, now));
+			const endpoint = getModelsEndpoint(url);
+			if (endpoint !== this.localEndpoint) {
+				// A different URL is a different server: start its pause from scratch.
+				this.localEndpoint = endpoint;
+				this.localBackoff.reset();
+			}
+			if (this.localBackoff.canProbe(now)) {
+				jobs.push(this.probeSource("local", endpoint, undefined, now));
+			}
 		}
 
 		if (config.getConfigValue("enableDeepSeek", true) !== false) {
@@ -297,6 +336,10 @@ export class ProviderDirectory implements vscode.Disposable {
 		await this.refresh();
 	}
 
+	private now(): number {
+		return this.options.now?.() ?? Date.now();
+	}
+
 	private deepSeekServerUrl(): string {
 		const configured = String(this.options.getConfigValue("serverUrl", DEEPSEEK_SERVER_URL) ?? DEEPSEEK_SERVER_URL);
 		return isDeepSeekEndpoint(configured) ? configured : DEEPSEEK_SERVER_URL;
@@ -311,6 +354,13 @@ export class ProviderDirectory implements vscode.Disposable {
 	): Promise<void> {
 		const result = await this.probeHttp(endpoint, apiKey, timeoutMs);
 		this.probes.set(key, { lastAttemptAt: now, result, endpoint });
+		if (key === "local") {
+			if (result.ok) {
+				this.localBackoff.succeeded();
+			} else {
+				this.localBackoff.failed(this.now());
+			}
+		}
 	}
 
 	private setMapped(

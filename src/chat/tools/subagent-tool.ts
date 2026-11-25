@@ -1,4 +1,4 @@
-import { CHAT_TOOL_GROUPS, type ChatTool, type SubagentModelOption, type SubagentRequest } from "./types";
+import { CHAT_TOOL_GROUPS, type ChatTool, type SubagentModelOption, type SubagentRequest, type UnavailableSubagentModel } from "./types";
 
 /** Tool name used by the SubHarness chat. */
 export const SUBAGENT_TOOL_NAME = "subagent";
@@ -18,6 +18,33 @@ const DESCRIPTION_HEAD = [
 export interface SubagentToolOptions {
 	/** Models a subagent may use right now, cheapest first. */
 	models(): readonly SubagentModelOption[];
+	/** Models whose subscription limit is used up; a call to one is answered at once instead of started. */
+	unavailable?(): readonly UnavailableSubagentModel[];
+}
+
+/** "18:40" today, "Nov 28, 18:40" on another day. */
+function formatResetTime(at: number, now = Date.now()): string {
+	const date = new Date(at);
+	const time = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+	return new Date(now).toDateString() === date.toDateString()
+		? time
+		: `${date.toLocaleDateString("en-US", { month: "short", day: "numeric" })}, ${time}`;
+}
+
+function quotedLabels(models: readonly { label: string }[]): string {
+	return models.map(option => `"${option.label}"`).join(", ");
+}
+
+/**
+ * The answer to a call of a model whose limit is used up: nothing was started, so the agent picks another model
+ * at once instead of waiting for a run that fails at the provider.
+ */
+export function subagentLimitMessage(model: UnavailableSubagentModel, available: readonly SubagentModelOption[], now = Date.now()): string {
+	const reset = model.until !== undefined && model.until > now ? ` It resets at about ${formatResetTime(model.until, now)}.` : "";
+	const next = available.length > 0
+		? ` Choose another model: ${quotedLabels(available)}.`
+		: " No other subagent model is available now; do the step yourself.";
+	return `"${model.label}" cannot start: ${model.reason.replace(/[.\s]+$/, "")}.${reset} No subagent was started.${next}`;
 }
 
 function stringField(input: Record<string, unknown>, key: string): string {
@@ -42,7 +69,7 @@ function findModel(models: readonly SubagentModelOption[], wanted: string): Suba
 }
 
 /** Reads the call's arguments; throws a message the model can act on. */
-export function parseSubagentInput(input: unknown, models: readonly SubagentModelOption[]): SubagentRequest {
+export function parseSubagentInput(input: unknown, models: readonly SubagentModelOption[], unavailable: readonly UnavailableSubagentModel[] = []): SubagentRequest {
 	const record = typeof input === "object" && input !== null ? input as Record<string, unknown> : {};
 	const prompt = stringField(record, "prompt");
 	if (!prompt) {
@@ -55,8 +82,13 @@ export function parseSubagentInput(input: unknown, models: readonly SubagentMode
 	const wanted = stringField(record, "model");
 	const model = findModel(models, wanted);
 	if (!model) {
-		const names = models.map(option => `"${option.label}"`).join(", ");
-		throw new Error(`Unknown subagent model ${JSON.stringify(wanted)}. Use one of: ${names}.`);
+		// A model whose limit is used up is known: say so instead of "unknown", and nothing starts.
+		const match = findModel(unavailable.map(entry => ({ ...entry, useWhen: "" })), wanted);
+		const limited = match ? unavailable.find(entry => entry.id === match.id) : undefined;
+		if (limited) {
+			throw new Error(subagentLimitMessage(limited, models));
+		}
+		throw new Error(`Unknown subagent model ${JSON.stringify(wanted)}. Use one of: ${quotedLabels(models)}.`);
 	}
 	return { description: stringField(record, "description") || prompt.split("\n")[0].slice(0, 60), prompt, model, ...(record.keepOpen === true ? { keepOpen: true } : {}), ...(record.background === true ? { background: true } : {}) };
 }
@@ -108,7 +140,12 @@ export function createSubagentTool(options: SubagentToolOptions): ChatTool {
 		group: CHAT_TOOL_GROUPS.agents,
 		get description(): string {
 			const models = options.models().map(option => `- "${option.label}": ${option.useWhen}.`);
-			return `${DESCRIPTION_HEAD}\nModels (pass the quoted name as model):\n${models.join("\n")}`;
+			const limited = options.unavailable?.() ?? [];
+			// Listed without the reset time: a time in the description would change the tools, and the prompt cache, every minute.
+			const note = limited.length > 0
+				? `\nLimit used up now, a call returns at once with the reset time: ${quotedLabels(limited)}.`
+				: "";
+			return `${DESCRIPTION_HEAD}\nModels (pass the quoted name as model):\n${models.join("\n")}${note}`;
 		},
 		// Static, without an enum: providers check calls against the schema and may keep an old copy of it.
 		inputSchema: {
@@ -128,7 +165,7 @@ export function createSubagentTool(options: SubagentToolOptions): ChatTool {
 			if (!context?.runSubagent) {
 				throw new Error("A subagent cannot start another subagent.");
 			}
-			return context.runSubagent(parseSubagentInput(input, options.models()), token);
+			return context.runSubagent(parseSubagentInput(input, options.models(), options.unavailable?.() ?? []), token);
 		},
 	};
 }

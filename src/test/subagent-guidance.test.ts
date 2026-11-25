@@ -8,6 +8,8 @@ import {
 	setSubagentModelProfiles,
 	subagentProviderForSource,
 	subagentStandIn,
+	blockedSubagentModel,
+	unavailableSubagentModelProfiles,
 } from "../subagent-guidance";
 
 suite("subagent model guidance", () => {
@@ -108,9 +110,15 @@ suite("subagent model guidance", () => {
 			assert.deepStrictEqual(codexIds(), ["codex::work::gpt-6-luna"], "the second subscription stands in");
 			assert.strictEqual(subagentStandIn("codex::gpt-6-luna"), "codex::work::gpt-6-luna");
 
+			assert.deepStrictEqual(unavailableSubagentModelProfiles().map(profile => profile.id), [], "a used-up account with a stand-in is not reported");
+			assert.strictEqual(blockedSubagentModel("codex::gpt-6-luna"), undefined, "an open subagent moves instead");
+
 			setSubagentModelProfiles("codex", [luna("work", "unavailable")], "work", 2);
 			assert.deepStrictEqual(codexIds(), [], "no Codex subagent while both are used up");
 			assert.strictEqual(subagentStandIn("codex::gpt-6-luna"), undefined);
+			assert.deepStrictEqual(unavailableSubagentModelProfiles().map(profile => profile.id), ["codex::gpt-6-luna"], "listed once, as used up");
+			assert.strictEqual(blockedSubagentModel("codex::gpt-6-luna")?.id, "codex::gpt-6-luna");
+			assert.strictEqual(blockedSubagentModel("codex::work::gpt-6-luna")?.id, "codex::work::gpt-6-luna");
 		} finally {
 			setSubagentModelProfiles("codex", []);
 		}
@@ -124,6 +132,19 @@ suite("subagent model guidance", () => {
 			assert.strictEqual(subagentStandIn("claude::smart"), undefined, "other providers keep their model");
 		} finally {
 			setSubagentModelProfiles("codex", []);
+		}
+	});
+
+	test("Claude models fall back to the same model on another account", () => {
+		try {
+			setSubagentModelProfiles("claude", [{ id: "claude::opus", label: "Opus (Claude 1)", provider: "claude", useWhen: "x", availability: "available" }], "", 0);
+			setSubagentModelProfiles("claude", [{ id: "claude::work::opus", label: "Opus (Claude 2)", provider: "claude", useWhen: "x", availability: "unavailable" }], "work", 1);
+			assert.strictEqual(subagentStandIn("claude::work::opus"), "claude::opus");
+			setSubagentModelProfiles("claude", [], "work");
+			assert.strictEqual(subagentStandIn("claude::work::opus"), "claude::opus");
+			assert.strictEqual(subagentStandIn("claude::work::sonnet"), undefined);
+		} finally {
+			setSubagentModelProfiles("claude", []);
 		}
 	});
 

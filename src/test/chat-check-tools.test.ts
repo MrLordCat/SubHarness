@@ -76,7 +76,7 @@ suite("chat check tools", () => {
 	test("approval and running checks", async () => {
 		config([{ name: "ok", command: "node -e \"console.log('ok')\"" }, { name: "fail", command: "node -e \"process.exit(3)\"" }]);
 		const tool = createCheckTool({ logDir: path.join(root, "logs"), roots: () => [root], isTrusted: () => true, rules: () => compileDangerousCommandRules(["process\\.exit"]) });
-		assert.ok(tool.needsConfirmation?.({}));
+		assert.deepStrictEqual(tool.needsConfirmation?.({})?.kinds?.map(kind => kind.key), ["command:process\\.exit"]);
 		assert.strictEqual(tool.needsConfirmation?.({ checks: ["ok"] }), undefined);
 		const result = await tool.invoke({}, new vscode.CancellationTokenSource().token);
 		assert.match(String(result), /ok — PASSED/);

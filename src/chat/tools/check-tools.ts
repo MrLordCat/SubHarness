@@ -3,7 +3,8 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
-import { findDangerousCommand, type DangerousCommandRule } from "./danger";
+import { commandKind } from "../approvals";
+import { findDangerousCommands, type DangerousCommandRule } from "./danger";
 import { CHAT_TOOL_GROUPS, type ChatTool } from "./types";
 import { vscodeWorkspaceRoots } from "./workspace-paths";
 
@@ -258,13 +259,14 @@ export function createCheckTool(options: {
 				return undefined;
 			}
 			const matches = checks
-				.map((check) => findDangerousCommand(check.command, options.rules()))
-				.filter((match) => match !== undefined);
+				.flatMap((check) => findDangerousCommands(check.command, options.rules()));
+			const kinds = [...new Map(matches.map((match) => { const kind = commandKind(match); return [kind.key, kind]; })).values()];
 			return matches.length
 				? {
 						title: "Run checks",
 						detail: checks.map((check) => check.command).join("\n"),
 						reason: matches.map((match) => `Matches the dangerous-command rule for "${match.text}".`).join("\n"),
+						kinds,
 					}
 				: undefined;
 		},

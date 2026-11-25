@@ -30,7 +30,10 @@ Open Chat in Editor** opens the same chat as an editor tab.
 - **Subagents:** the agent can hand bounded steps to cheaper models and keeps
   working while they run.
 - **One working context:** switching models compacts the conversation instead
-  of losing it.
+  of losing it. A long chat cleans itself: over its context budget (200,000
+  tokens by default, `llamacpp.chatContextBudget`), stale tool results and
+  then older turns leave the model's context, and the full history stays in
+  the chat. You do not need to start a new chat.
 - **Everyday work:** attachments, editing sent messages, queued messages while
   the agent works, chat history, chats that keep running in the background,
   and clickable file links in answers.
@@ -133,6 +136,32 @@ is used up. An open subagent whose account runs out moves to the same model
 of another account with its conversation. The subagent card names the account
 it ran on (`GPT-6-Luna (Codex 2)`).
 
+### Two Claude subscriptions in one window
+
+Claude works the same way. Claude Code keeps the login, its state and the
+sessions of an account under one config folder (`~/.claude` by default), so an
+added account gets its own `CLAUDE_CONFIG_DIR` (`~/.claude-<id>`), and every
+Claude process of that account runs with it. Quick Access → **Claude** →
+**Add Claude Account…** asks for an id and a name, reloads the window and opens
+the sign-in by itself; **Claude Accounts** then holds Sign In, Sign Out and
+Remove for each account and selects the active one. By hand:
+
+```json
+"llamacpp.claudeAccounts": [
+  { "id": "work", "label": "Work" }
+]
+```
+
+The picker shows a group per account (Claude 1 is the built-in `~/.claude`
+account, then Claude 2 …) with its own limits. Subagents list each Claude model
+once, `Opus 5.5 (Claude)`, and start on the active account, then on the others,
+skipping one whose limit is used up. Signing out of an added account leaves the
+built-in login, and the Claude Code extension, alone.
+
+When a limit stops an answer and another subscription of the same provider has
+room, the limit card offers **Continue on Claude 2** (or **Codex 2**): the chat
+takes that subscription's model and continues the answer like Retry.
+
 ### Snowflake Coco
 
 Coco uses the CLI's credentials, so it may require a separate browser sign-in.
@@ -176,16 +205,16 @@ See [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md),
 [provider architecture](docs/PROVIDER_ARCHITECTURE.md), and
 [Quick Access](docs/QUICK_ACCESS.md) for the current maintenance contracts.
 
-**Latest release: 2.0.11. Current build: 2.0.11.**
+**Latest release: 2.0.11. Current build: 2.0.13.**
 
 ```sh
 npm ci
 npm run compile
 npm run check:metadata
 npm run lint
-npm test              # 1491 extension-host tests on VS Code 1.143.1 in the current 2.0.11 build
+npm test              # 1553 extension-host tests on VS Code 1.143.1 in the current 2.0.13 build
 npm run package       # builds the local VSIX
-code --install-extension ./llama-vscode-chat-2.0.11.vsix --force
+code --install-extension ./llama-vscode-chat-2.0.13.vsix --force
 ```
 
 The extension ID is `mrlordcat.llama-vscode-chat`; settings and commands retain

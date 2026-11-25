@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
-import type { ChatToolGroup, ChatToolInfo } from "../shared/protocol";
+import type { ChatApprovalKind, ChatToolGroup, ChatToolInfo } from "../shared/protocol";
 import { postMessage } from "./api";
 import { matchesQuery, popupPlacement, useDismiss, useKeepInView } from "./popup";
 
 interface ToolPickerProps {
 	tools: ChatToolGroup[];
+	/** Kinds of actions that run without an approval card; listed under Always allowed with Revoke. */
+	alwaysAllowed: ChatApprovalKind[];
 	onSetToolsEnabled: (names: string[], enabled: boolean) => void;
 }
 
@@ -13,10 +15,14 @@ interface VisibleToolGroup {
 	tools: ChatToolInfo[];
 }
 
-export function ToolPicker({ tools, onSetToolsEnabled }: ToolPickerProps) {
+export function ToolPicker({ tools, alwaysAllowed, onSetToolsEnabled }: ToolPickerProps) {
 	const [open, setOpen] = useState(false);
 	const [placement, setPlacement] = useState<"above" | "below">("above");
 	const [query, setQuery] = useState("");
+	// A search for the section itself lists every row; otherwise only the matching ones.
+	const sectionMatches = matchesQuery(query, "always allowed");
+	const matchingAllowed = sectionMatches ? alwaysAllowed : alwaysAllowed.filter(kind => matchesQuery(query, kind.label));
+	const showAllowed = sectionMatches || matchingAllowed.length > 0;
 	const wrapperRef = useRef<HTMLDivElement>(null);
 	const triggerRef = useRef<HTMLButtonElement>(null);
 	const searchRef = useRef<HTMLInputElement>(null);
@@ -124,21 +130,7 @@ export function ToolPicker({ tools, onSetToolsEnabled }: ToolPickerProps) {
 										<span class="tool-group-label">{entry.group.label}</span>
 										<span class="tool-group-count">{enabledCount}/{entry.tools.length}</span>
 									</div>
-									{entry.group.note || entry.group.external ? (
-										<div class="tool-group-note">
-											{entry.group.note}
-											{entry.group.external ? (
-												<button
-													type="button"
-													class="tool-group-approve"
-													title="Open VS Code's tool approval and mark the server or tools as always allowed"
-													onClick={() => postMessage({ type: "manageToolApprovals" })}
-												>
-													Allow without asking…
-												</button>
-											) : null}
-										</div>
-									) : null}
+									{entry.group.note ? <div class="tool-group-note">{entry.group.note}</div> : null}
 									{entry.tools.map(tool => (
 										<label class="tool-row" title={tool.description} key={tool.name}>
 											<input
@@ -154,7 +146,19 @@ export function ToolPicker({ tools, onSetToolsEnabled }: ToolPickerProps) {
 								</div>
 							);
 						})}
-						{groups.length === 0 ? <div class="picker-empty">No tools match</div> : null}
+						{groups.length === 0 && !showAllowed ? <div class="picker-empty">No tools match</div> : null}
+						{showAllowed ? (
+							<div class="tool-allowed" role="group" aria-label="Always allowed">
+								<div class="tool-group-label">Always allowed</div>
+								{alwaysAllowed.length === 0 ? <div class="tool-allowed-empty">Nothing yet. Choose Always allow on an approval card.</div> : null}
+								{matchingAllowed.map(kind => (
+									<div class="tool-allowed-row" key={kind.key} title={kind.key}>
+										<span>{kind.label}</span>
+										<button type="button" title="Ask again before these actions" onClick={() => postMessage({ type: "revokeAlwaysAllow", key: kind.key })}>Revoke</button>
+									</div>
+								))}
+							</div>
+						) : null}
 					</div>
 				</div>
 			) : null}

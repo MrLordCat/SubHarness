@@ -72,24 +72,28 @@ export interface ClaudeAuthCommandResult {
 	stderr: string;
 }
 
-export type ClaudeAuthRunner = (executable: string, args: readonly string[]) => Promise<ClaudeAuthCommandResult>;
+/** `env` adds to the process environment, e.g. CLAUDE_CONFIG_DIR of a second account. */
+export type ClaudeAuthRunner = (executable: string, args: readonly string[], env?: Readonly<Record<string, string>>) => Promise<ClaudeAuthCommandResult>;
 
 /** Runs `claude auth …` without a window; a non-zero exit is a result, not an error. */
-export const runClaudeAuth: ClaudeAuthRunner = (executable, args) => new Promise(resolve => {
-	execFile(executable, ["auth", ...args], { timeout: AUTH_TIMEOUT_MS, windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+export const runClaudeAuth: ClaudeAuthRunner = (executable, args, env) => new Promise(resolve => {
+	execFile(executable, ["auth", ...args], { timeout: AUTH_TIMEOUT_MS, windowsHide: true, maxBuffer: 1024 * 1024, ...(env ? { env: { ...process.env, ...env } } : {}) }, (error, stdout, stderr) => {
 		const code = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : 1) : 0;
 		resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
 	});
 });
 
-export async function readClaudeAuthStatus(executable: string, run: ClaudeAuthRunner = runClaudeAuth): Promise<ClaudeAuthStatus | undefined> {
-	const result = await run(executable, ["status"]);
+export async function readClaudeAuthStatus(executable: string, run: ClaudeAuthRunner = runClaudeAuth, env?: Readonly<Record<string, string>>): Promise<ClaudeAuthStatus | undefined> {
+	const result = await run(executable, ["status"], env);
 	return parseClaudeAuthStatus(result.stdout);
 }
 
-/** Signs Claude Code out on this computer, the Claude Code extension included. */
-export async function signOutClaudeCli(executable: string, run: ClaudeAuthRunner = runClaudeAuth): Promise<void> {
-	const result = await run(executable, ["logout"]);
+/**
+ * Signs Claude Code out. Without `env` that is the built-in account on this computer, the Claude
+ * Code extension included; with a CLAUDE_CONFIG_DIR only that account.
+ */
+export async function signOutClaudeCli(executable: string, run: ClaudeAuthRunner = runClaudeAuth, env?: Readonly<Record<string, string>>): Promise<void> {
+	const result = await run(executable, ["logout"], env);
 	if (result.code !== 0) {
 		const detail = (result.stderr || result.stdout).trim().split(/\r?\n/).at(-1);
 		throw new Error(detail ? `claude auth logout failed: ${detail}` : `claude auth logout exited with code ${result.code}`);
@@ -101,11 +105,17 @@ export async function signOutClaudeCli(executable: string, run: ClaudeAuthRunner
  * for a code there. Resolves with the status read after the command ends, the
  * terminal is closed or the wait times out.
  */
-export function signInWithClaudeCli(executable: string, run: ClaudeAuthRunner = runClaudeAuth): Promise<ClaudeAuthStatus | undefined> {
+export function signInWithClaudeCli(
+	executable: string,
+	run: ClaudeAuthRunner = runClaudeAuth,
+	env?: Readonly<Record<string, string>>,
+	name = "Claude sign-in"
+): Promise<ClaudeAuthStatus | undefined> {
 	const terminal = vscode.window.createTerminal({
-		name: "Claude sign-in",
+		name,
 		shellPath: executable,
 		shellArgs: ["auth", "login", "--claudeai"],
+		...(env ? { env: { ...env } } : {}),
 		iconPath: new vscode.ThemeIcon("account"),
 		isTransient: true,
 	});
@@ -120,7 +130,7 @@ export function signInWithClaudeCli(executable: string, run: ClaudeAuthRunner = 
 			clearInterval(poll);
 			clearTimeout(timeout);
 			closed.dispose();
-			void readClaudeAuthStatus(executable, run).then(resolve, () => resolve(undefined));
+			void readClaudeAuthStatus(executable, run, env).then(resolve, () => resolve(undefined));
 		};
 		const closed = vscode.window.onDidCloseTerminal(candidate => {
 			if (candidate === terminal) {

@@ -49,7 +49,7 @@ export function App({ store }: { store: ChatStore }) {
 		onOpenAttachment,
 		onRemoveAttachment,
 	} = useComposerActions(store, "draft");
-	const onApprove = useCallback((id: string, allow: boolean) => postMessage({ type: "approve", id, allow }), []);
+	const onApprove = useCallback((id: string, allow: boolean, always?: boolean) => postMessage({ type: "approve", id, allow, ...(always ? { always: true } : {}) }), []);
 	const onAnswer = useCallback((id: string, answers?: ChatQuestionAnswer[]) => postMessage(answers ? { type: "answerQuestions", id, answers } : { type: "answerQuestions", id }), []);
 	const onListSessions = useCallback(() => postMessage({ type: "listSessions" }), []);
 	const onListMemory = useCallback(() => postMessage({ type: "listMemory" }), []);
@@ -130,6 +130,7 @@ export function App({ store }: { store: ChatStore }) {
 				run={store.run}
 				models={store.models}
 				tools={store.tools}
+				alwaysAllowed={store.alwaysAllowed}
 				selectedModelId={store.selectedModelId}
 				selectedThinking={store.selectedThinking}
 				cache={cache}

@@ -685,6 +685,8 @@ export class ApiProviderManagerPanel {
 					this.status = "Model catalogs are refreshing.";
 					break;
 				case "recheck":
+					// An explicit recheck probes the local server even while it is backing off.
+					this.directory.resetLocalProbeBackoff();
 					await this.directory.recheck();
 					this.status = "Provider availability rechecked.";
 					break;

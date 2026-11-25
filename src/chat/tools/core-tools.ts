@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { DELETE_FOLDER, WRITE_OUTSIDE_WORKSPACE } from "../approvals";
 import { defaultEditDiagnosticsSource, reportEditErrors, snapshotDiagnostics, type EditDiagnosticsSource } from "./edit-diagnostics";
 import { CHAT_TOOL_GROUPS, MAX_IMAGE_BYTES, type ChatTool, type ChatToolConfirmation, type ChatToolOutput } from "./types";
 import {
@@ -615,6 +616,7 @@ export function createCoreTools(options: {
 					title,
 					detail: path.resolve(value),
 					reason: "The path is outside the open workspace folders.",
+					kinds: [WRITE_OUTSIDE_WORKSPACE],
 				};
 			}
 			const file = resolveToolPath(value, currentRoots);
@@ -623,6 +625,7 @@ export function createCoreTools(options: {
 					title,
 					detail: file,
 					reason: "The path is outside the open workspace folders.",
+					kinds: [WRITE_OUTSIDE_WORKSPACE],
 				};
 			}
 			return undefined;
@@ -1053,6 +1056,7 @@ export function createCoreTools(options: {
 					title: "Edit files outside the workspace",
 					detail: outside.join("\n"),
 					reason: "The path is outside the open workspace folders.",
+					kinds: [WRITE_OUTSIDE_WORKSPACE],
 				};
 			} catch {
 				return undefined;
@@ -1138,25 +1142,28 @@ export function createCoreTools(options: {
 		},
 		needsConfirmation(input: unknown): ChatToolConfirmation | undefined {
 			const outside = outsideWorkspace(input, "Delete outside the workspace");
-			if (outside !== undefined) {
-				return outside;
-			}
 			try {
 				const record = inputRecord(input);
-				if (record.recursive !== true) {
-					return undefined;
-				}
-				const target = resolveToolPath(record.filePath, roots());
-				return fs.statSync(target).isDirectory()
-					? {
-						title: "Delete a folder",
-						detail: target,
-						reason: "Deletes the folder and everything in it.",
+				if (record.recursive === true) {
+					const target = resolveToolPath(record.filePath, roots());
+					if (fs.statSync(target).isDirectory()) {
+						return outside ? {
+							title: "Delete a folder outside the workspace",
+							detail: target,
+							reason: "Deletes the folder and everything in it; the path is outside the open workspace folders.",
+							kinds: [WRITE_OUTSIDE_WORKSPACE, DELETE_FOLDER],
+						} : {
+							title: "Delete a folder",
+							detail: target,
+							reason: "Deletes the folder and everything in it.",
+							kinds: [DELETE_FOLDER],
+						};
 					}
-					: undefined;
+				}
 			} catch {
-				return undefined;
+				// A missing or inaccessible target is not known to be a folder.
 			}
+			return outside;
 		},
 		writes: writtenPath,
 		async invoke(input: unknown, token: vscode.CancellationToken): Promise<string> {
