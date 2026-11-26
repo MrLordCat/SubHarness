@@ -462,6 +462,19 @@ function repairMissingRequiredDescription(
 	return false;
 }
 
+/**
+ * Top-level arguments a schema that forbids extra properties does not list. Models often pass an option of another
+ * tool (maxResults on run_in_terminal); evaluate drops them when the call is valid without them.
+ */
+function unknownTopLevelProperties(argumentsValue: Record<string, unknown>, schema: object | undefined): string[] {
+	const schemaObj = schema as Record<string, unknown> | undefined;
+	if (!schemaObj || schemaObj.additionalProperties !== false || !schemaObj.properties || typeof schemaObj.properties !== "object") {
+		return [];
+	}
+	const properties = schemaObj.properties as Record<string, unknown>;
+	return Object.keys(argumentsValue).filter(name => !Object.prototype.hasOwnProperty.call(properties, name));
+}
+
 export class ToolCallReliabilityGuard {
 	private definitions = new Map<string, OpenAIFunctionToolDef>();
 	private namesByLowerCase = new Map<string, string>();
@@ -528,7 +541,20 @@ export class ToolCallReliabilityGuard {
 			}
 		}
 		if (this.options.validateSchema && definition) {
-			const issues = validateToolArguments(parsed.value, definition.function.parameters);
+			let issues = validateToolArguments(parsed.value, definition.function.parameters);
+			const unknown = issues.length > 0 && this.options.repairEnabled
+				? unknownTopLevelProperties(parsed.value, definition.function.parameters)
+				: [];
+			if (unknown.length > 0) {
+				const trimmed = Object.fromEntries(Object.entries(parsed.value).filter(([name]) => !unknown.includes(name)));
+				if (validateToolArguments(trimmed, definition.function.parameters).length === 0) {
+					for (const name of unknown) {
+						delete parsed.value[name];
+					}
+					repaired = true;
+					issues = [];
+				}
+			}
 			if (issues.length > 0) {
 				if (!final) {
 					return { ok: false, pending: true };

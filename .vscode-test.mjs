@@ -4,7 +4,7 @@ import path from 'node:path';
 
 export default defineConfig({
   files: 'out/test/**/*.test.js',
-  // The current stable VS Code; Copilot and agent-host patch patterns are version-specific.
+  // The default test host is the current stable VS Code (1.143.1).
   // `npm test -- --code-version 1.131.0` checks the minimum from engines.vscode.
   version: '1.143.1',
   launchArgs: [

@@ -1,8 +1,10 @@
 # Shared Memory
 
 Shared memory is durable reference context owned by the extension. It is
-available to local models and DeepSeek across chats. Agents explicitly choose
-whether each new entry applies globally or only to the current project.
+available to every model in the SubHarness chat, whatever the provider. Agents
+explicitly choose whether each new entry applies globally or only to the
+current project. The chat UI that shows and edits entries is described in
+[CHAT.md](CHAT.md).
 
 ## Storage And Migration
 
@@ -74,9 +76,9 @@ excluded from normal search and automatic prompt injection.
 
 ## Retrieval
 
-For every request, the extension builds a query from the four most recent user
-messages. It first filters entries by active project scope and expiry,
-then ranks them with:
+In the SubHarness chat, the extension adds a `<memory>` block to the user
+request when the index or a relevant entry is new or edited. Entries are first
+filtered by active project scope and expiry, then ranked with:
 
 - weighted exact title, tag, and content terms;
 - BM25-style document frequency and length normalization;
@@ -84,15 +86,24 @@ then ranks them with:
 - exact title-phrase and pinned boosts after relevance is established;
 - update time as the final tie-breaker.
 
-Pinned entries are not injected merely because they are pinned. They must still
-match a non-empty query. An empty manual search lists pinned and recent entries.
+The block starts with an index of the visible entries, newest first, up to 100
+lines; a longer store ends with a count and a hint to use
+`llamacpp_search_memory`. It then carries the full text of the pinned entries
+and of the entries that match the message. Pinned entries are included even
+when the message shares no terms with them, within half of the entry budget.
 
-The first selected set is inserted immediately before the current user request.
-Later changes are appended as memory-delta checkpoints while earlier checkpoints
-stay byte-stable for prompt-cache reuse. Tool rounds freeze the selected set; a
-new user turn may append newly relevant or updated entries. Compaction restores
-a consolidated current checkpoint if older deltas are summarized.
-`llamacpp.memoryMaxTokens` caps automatic memory context; the default is 4096.
+Later requests resend an entry only when it is new or was edited, and resend
+the index only when it changed; earlier requests stay byte-stable for
+prompt-cache reuse. Compaction starts the comparison fresh. The chat retrieves
+entries with its own budget of 1,500 estimated tokens.
+
+The provider keeps a second retrieval path for requests that do not come from
+the chat. It builds a query from the last four user messages, inserts memory
+checkpoints before the newest request, freezes the selection across the tool
+rounds of a turn, and restores a consolidated checkpoint after compaction. The
+chat sets `_aabSkipSharedMemory` and supplies its own block, so this path does
+not run for chat requests. `llamacpp.memoryMaxTokens` (default 4096) caps this
+automatic retrieval.
 
 ## Agent Tools
 
@@ -103,7 +114,7 @@ a consolidated current checkpoint if older deltas are summarized.
 - `llamacpp_delete_memory`: delete one entry by exact id and mandatory scope.
   Workspace deletion is rejected if the entry belongs to another project.
 
-VS Code asks for confirmation before extension tools execute. Users can inspect
+The chat runs these memory tools without an approval prompt. Users can inspect
 or edit the file with `SubHarness: Open Shared Memory` and remove all entries
 with `SubHarness: Clear Shared Memory`.
 
@@ -111,7 +122,10 @@ with `SubHarness: Clear Shared Memory`.
 
 - 500 entries total.
 - 160 characters per title.
-- 24,000 characters per content value.
+- 24,000 characters per stored content value.
+- 4,096 characters per entry content saved by the agent tools or the memory
+  panel (`MAX_NEW_CONTENT_CHARS`); longer text is rejected, so keep one
+  thought per entry.
 - 16 normalized tags, 48 characters each.
 - 32,768 tokens maximum automatic injection budget.
 

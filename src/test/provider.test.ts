@@ -1427,6 +1427,48 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.strictEqual(measuredThinking, "step 1 -> step 2");
         });
 
+        test("emits the valid calls of a round before rejecting an invalid one", async () => {
+            const isolatedProvider = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent");
+            const providerAny = isolatedProvider as unknown as {
+                configureToolCallReliability: (
+                    tools: readonly OpenAIFunctionToolDef[],
+                    options: { repairEnabled: boolean; validateSchema: boolean }
+                ) => void;
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+            providerAny.configureToolCallReliability(
+                [{
+                    type: "function",
+                    function: {
+                        name: "read_file",
+                        parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+                    },
+                }],
+                { repairEnabled: true, validateSchema: true }
+            );
+            // The second call only becomes valid JSON after the final repair pass, so it is not emitted early.
+            const payload =
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-bad\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}},{\"index\":1,\"id\":\"call-good\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"b.txt\\\",}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+                "data: [DONE]\n\n";
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.enqueue(new TextEncoder().encode(payload));
+                    controller.close();
+                },
+            });
+            const parts: vscode.LanguageModelResponsePart[] = [];
+            await assert.rejects(
+                providerAny.processStreamingResponse(stream, { report: part => parts.push(part) }, new vscode.CancellationTokenSource().token),
+                (error: unknown) => error instanceof ToolCallValidationError && error.message === "$.path is required"
+            );
+            const calls = parts.filter((part): part is vscode.LanguageModelToolCallPart => part instanceof vscode.LanguageModelToolCallPart);
+            assert.deepStrictEqual(calls.map(call => [call.callId, call.input]), [["call-good", { path: "b.txt" }]]);
+        });
+
         test("retains native thinking for the next DeepSeek tool turn", async () => {
             class NativeThinkingPart {
                 constructor(
@@ -3609,6 +3651,62 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.ok(retryMessages.at(-1)?.content?.includes("read_file"));
             assert.ok(reportedParts.some(part =>
                 part instanceof vscode.LanguageModelTextPart && part.value === "Recovered after correction"
+            ));
+        });
+
+        test("keeps the turn when a rejected tool call follows one that was already emitted", async () => {
+            const providerAny = provider as unknown as Record<string, unknown>;
+            const names = ["getServerUrl", "getApiKey", "getRuntimeContextLengthWithCache", "acquireChatRequestSlot", "sendChatCompletion", "processStreamingResponse"];
+            const originals = Object.fromEntries(names.map(name => [name, providerAny[name]]));
+            const reportedParts: vscode.LanguageModelResponsePart[] = [];
+            let requests = 0;
+            try {
+                providerAny.getServerUrl = async () => "http://localhost:8000";
+                providerAny.getApiKey = async () => undefined;
+                providerAny.getRuntimeContextLengthWithCache = async () => 65536;
+                providerAny.acquireChatRequestSlot = async () => ({ release: () => undefined, waitMs: 0 });
+                providerAny.sendChatCompletion = async () => {
+                    requests += 1;
+                    return new Response(new ReadableStream<Uint8Array>({ start: controller => controller.close() }), { status: 200 });
+                };
+                providerAny.processStreamingResponse = async (_body: unknown, progress: vscode.Progress<vscode.LanguageModelResponsePart>) => {
+                    progress.report(new vscode.LanguageModelToolCallPart("call_ok", "read_file", { path: "README.md" }));
+                    throw new ToolCallValidationError("$.path is required", "read_file", "schema");
+                };
+
+                await provider.provideLanguageModelChatResponse(
+                    {
+                        id: "test-model",
+                        name: "test-model",
+                        family: "llama",
+                        version: "1",
+                        maxInputTokens: 32768,
+                        maxOutputTokens: 4096,
+                        capabilities: { toolCalling: true },
+                    } as unknown as vscode.LanguageModelChatInformation,
+                    [vscode.LanguageModelChatMessage.User("Read README twice")],
+                    {
+                        modelOptions: {},
+                        tools: [{
+                            name: "read_file",
+                            description: "Read a file",
+                            inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+                        }],
+                        toolMode: vscode.LanguageModelChatToolMode.Auto,
+                    },
+                    { report: part => reportedParts.push(part) },
+                    new vscode.CancellationTokenSource().token
+                );
+            } finally {
+                for (const name of names) {
+                    providerAny[name] = originals[name];
+                }
+            }
+
+            assert.strictEqual(requests, 1, "an emitted call cannot be taken back, so the request is not repeated");
+            assert.ok(reportedParts.some(part => part instanceof vscode.LanguageModelToolCallPart && part.callId === "call_ok"));
+            assert.ok(reportedParts.some(part =>
+                part instanceof vscode.LanguageModelTextPart && /The read_file call was not run: \$\.path is required/.test(part.value)
             ));
         });
     });

@@ -39,7 +39,7 @@ subscription starts a new session from the chat history, as on a provider
 switch. `llamacpp.claudeActiveAccount` names the account subagents try first
 and Quick Access reports.
 
-## Native VS Code Tool Boundary
+## Chat Tool Boundary
 
 One `ClaudeAgentSession` owns a long-lived Agent SDK query and an asynchronous
 user-message queue. Its runtime configuration is deliberately restrictive:
@@ -48,26 +48,26 @@ user-message queue. Its runtime configuration is deliberately restrictive:
 - setting sources, plugins, and skills are empty;
 - `strictMcpConfig` is enabled;
 - one SDK MCP server named `vscode` proxies the tools advertised by the current
-  VS Code Chat request;
+  SubHarness chat request;
 - `canUseTool` allows only `mcp__vscode__*` names and denies every other action.
 
 The execution path is:
 
 ```text
-VS Code Chat + selected Claude model
+SubHarness chat + selected Claude model
   -> ClaudeChatModelProvider
   -> persistent Claude Agent SDK Query
   -> mcp__vscode__* request
   -> LanguageModelToolCallPart
-  -> native VS Code tool card, policy, and approval
+  -> SubHarness chat tool card, policy, and approval
   -> LanguageModelToolResultPart
   -> matching SDK MCP promise resolves
   -> the same Agent SDK Query continues
 ```
 
 The extension therefore keeps Claude's reasoning/tool-selection loop native to
-the Agent SDK while keeping executable actions visible and controlled by VS
-Code. A tool step marked `completed` means that the matching VS Code tool result
+the Agent SDK while keeping executable actions visible and controlled by the
+SubHarness chat. A tool step marked `completed` means that the matching VS Code tool result
 returned to the SDK; Session Quality does not inspect or retain its body.
 
 ## Extended Context
@@ -191,5 +191,5 @@ different raw provider limit.
 - Session Quality observes transport completion. It cannot independently judge
   whether a tool result was semantically useful to Claude.
 - A real post-install smoke test is still required: select Claude, invoke at
-  least one native VS Code tool, let the final response complete, and confirm a
+  least one chat tool, let the final response complete, and confirm a
   single row with model/tool steps and a later context snapshot.

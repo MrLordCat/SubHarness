@@ -2,6 +2,21 @@
 
 ## 2.0.13 (development build) - 2026-11-25
 
+- Fixed: one bad tool call no longer ends the turn for local and API models
+  (seen as a DeepSeek subagent stopping with `$.maxResults is not allowed`).
+  An argument the tool's schema does not list is dropped when the call is
+  valid without it. The valid calls of a round are passed on before a bad one
+  is rejected, and a bad call after calls already passed on is skipped: those
+  calls run, and the model reads `[tool call guard] The … call was not run:
+  <reason>` and can call it again. A bad call before any other is still
+  retried once with a correction prompt, as before.
+- Changed: the documentation was cleaned up. Finished plans, old audits,
+  `docs/BUGS.md` (a closed August registry) and one-off research and incident
+  notes were removed; their still-valid facts moved into the reference
+  documents. `docs/CURSOR_CONTINUITY.md` is now `docs/CURSOR.md`,
+  `docs/PROVIDER_ARCHITECTURE.md` became the "Provider contracts" section of
+  `docs/ARCHITECTURE.md`, and the remaining documents no longer describe the
+  removed Copilot Chat integration. The removed files stay in git history.
 - Added: a chat cleans its own context instead of growing until you start a
   new one. Over `llamacpp.chatContextBudget` (200,000 tokens by default, 0
   turns it off), a new request first replaces stale tool results of earlier

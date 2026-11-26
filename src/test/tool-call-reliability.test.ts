@@ -170,6 +170,24 @@ suite("tool call reliability", () => {
 		assert.ok(tail.ok && !tail.repaired && tail.arguments.mode === "async");
 	});
 
+	test("drops arguments the schema does not list when the call is valid without them", () => {
+		const guard = new ToolCallReliabilityGuard();
+		guard.configure([terminalTool, tool], { repairEnabled: true, validateSchema: true });
+		const extra = guard.evaluate("run_in_terminal", '{"command":"git status","mode":"sync","maxResults":20}', true);
+		assert.ok(extra.ok);
+		assert.deepStrictEqual(extra.ok && extra.arguments, { command: "git status", mode: "sync" });
+		assert.strictEqual(extra.ok && extra.repaired, true);
+
+		const misnamed = guard.evaluate("read_file", '{"file":"README.md"}', true);
+		assert.ok(!misnamed.ok && !misnamed.pending && misnamed.kind === "schema", "a wrong name for a required field is still rejected");
+		assert.ok(!misnamed.ok && !misnamed.pending && /path is required.*file is not allowed/.test(misnamed.reason));
+
+		const strict = new ToolCallReliabilityGuard();
+		strict.configure([terminalTool], { repairEnabled: false, validateSchema: true });
+		const rejected = strict.evaluate("run_in_terminal", '{"command":"git status","mode":"sync","maxResults":20}', true);
+		assert.ok(!rejected.ok && !rejected.pending && rejected.reason === "$.maxResults is not allowed");
+	});
+
 	test("rejects unknown tools and invalid schemas", () => {
 		const guard = new ToolCallReliabilityGuard();
 		guard.configure([tool], { repairEnabled: true, validateSchema: true });

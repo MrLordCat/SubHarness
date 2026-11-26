@@ -6,23 +6,26 @@ to. Codex, Coco and Cursor prepare handoffs using one token-budget planner. The 
 million-character Coco cutoff is gone. See [shared context](SHARED_CONTEXT.md)
 for settings, native continuation, archive/image preservation and long-run errors.
 
-Since 1.18.13, requests with VS Code callback tools use native ACP even when
-SDK is selected: the bundled CLI expires SDK callbacks after 30 seconds,
-including time spent waiting for Chat approval and tool execution. ACP retains
-the native session and supports longer tool waits. Text-only requests can
-still use SDK. See [the live reproduction and measurements](PERFORMANCE_RESEARCH.md).
+Requests with VS Code callback tools use native ACP even when SDK is selected:
+the bundled CLI expires SDK callbacks after 30 seconds, including time spent
+waiting for Chat approval and tool execution. In the measured case a 35-second
+callback timed out on SDK while ACP returned its marker. ACP retains the native
+session and supports longer tool waits. Text-only requests can still use SDK.
 
-For the reproduced full-tool-name failure and the 1.18.12 fix, see
-[the tool-name incident diagnosis](COCO_TOOL_NAME_INCIDENT.md). SDK aliases
-include the MCP namespace in the 64-character backend limit and are checked
-before inference. Request bounds and sanitized failures are recorded as
-`coco.request.prepared` / `coco.request.failed` without prompt text.
+The backend rejects a fully qualified tool name longer than 64 characters,
+counted after the `mcp__vscode_chat__` prefix. Aliases are bounded to that
+limit and keep a stable hash suffix, so similar long names stay distinct. Names
+are checked for length, characters and uniqueness before inference. Request
+bounds and sanitized failures are recorded as `coco.request.prepared` /
+`coco.request.failed` without prompt text.
 
 Coco keeps a native session for each workspace, conversation, model and
 Snowflake connection. Follow-ups append new entries, including entries from
 another provider that continued the same Chat. Compatible completed sessions
-resume after a VS Code reload. Rewinding/editing history creates a fresh native
-branch; interrupted tool cycles are cancelled rather than reused.
+resume after a VS Code reload through `session/load`; the history the server
+replays is not shown as a new answer, and an interrupted or cancelled session
+is not treated as a completed checkpoint. Rewinding/editing history creates a
+fresh native branch; interrupted tool cycles are cancelled rather than reused.
 
 A continuing session gets only the new entries plus the current environment
 blocks. Since 1.21.35 the bridge also keeps a hash of the system instructions
@@ -46,8 +49,10 @@ omitted text in an exact archive. Chat shows the reduction and archive path.
 The model can read that archive through VS Code tools when a detail is missing;
 an archive is not proof that every detail is in the active model context.
 Historical @ references are quoted to avoid automatic attachment loading.
-The working target is at most 1,000,000 text characters, reduced for smaller
-configured windows. It is not a measured token limit: SDK 0.0.2 exposes no exact
+The target is the shared token budget from `prepareSharedHandoff`
+(`sharedContextBudget` over the model window and tool schemas, capped by
+`llamacpp.providerSwitchContextTokens` after a provider switch), not a fixed
+character count; it is still an estimate, because SDK 0.0.2 exposes no exact
 model tokenizer. A current request that alone exceeds the target is rejected
 before inference. The CLI owns its actual finite window and subsequent native
 compaction. There is no automatic multi-request replay after a failure.
@@ -57,6 +62,13 @@ Exceeding that safety limit archives the payload and stops before inference;
 it is not a token count or model window. `llamacpp.cocoMaxHistoryImportParts`
 is obsolete. Full transcripts, image bytes and oversized tool outputs remain
 available locally for rereading.
+
+Two further local limits are not model limits. The ACP client stops with an
+explicit oversized-message error when its accumulated inbound buffer passes
+4,000,000 characters. `convertCocoToolResult` cuts a tool result over 100,000
+characters to a head/tail preview, while the full output stays in the archive
+and transcript. Inside its finite window the Cortex CLI applies its own
+summarization (`autoCompactThreshold`, 0.9 by default).
 
 An interrupted native turn requires a new explicit user message. The bridge
 resumes the stored session and skips the already-sent request. Repeated native
@@ -74,11 +86,18 @@ The exact `claude-opus-5-5` ID starts with a verified 1,000,000-token window.
 `llamacpp.cocoModelContextLengths` overrides per-model baselines; unknown models
 use `llamacpp.cocoContextLength` (128,000 by default). Measured runtime windows
 take precedence. A model's finite window and native compaction still apply.
-See [continuity, storage and cache verification](COCO_CONTINUITY.md).
 
-For the investigation behind SDK-managed native sessions, see the
-[Coco native integration research](COCO_NATIVE_INTEGRATION_RESEARCH.md).
-Current implementation and runtime checks are described here and in the changelog.
+Snowflake's own Coco panel runs `cortex acp serve` and uses `session/new`,
+`session/load` and `_meta.clientTools`, so ACP is the native path, not a
+workaround. `_meta.sessionId` and `session/list` are extensions of this runtime,
+not portable ACP: the bridge never picks "the last session" by working
+directory. `session/resume` and `session/fork` are not advertised; `session/load`
+is the supported restore path. SDK 0.0.2 callbacks carry no native tool-use ID.
+
+Workspace storage keeps session bindings, the conversation journal and archives;
+the CLI keeps the native session text. The store keeps at most 32 saved sessions
+and 8 warm sessions, and drops saved entries older than seven days. A checkpoint
+for an unfinished request is not restored.
 
 Install the Snowflake VS Code extension. SubHarness uses its bundled
 `cortex` CLI through the Snowflake SDK and ACP. If your Snowflake CLI has
@@ -192,12 +211,14 @@ configured fallback for that model. The bridge does not treat cumulative billing
 tokens as context or invent a measured count when the runtime sends none.
 
 SDK/ACP prompt results also provide measured usage: uncached input, cache reads,
-cache writes and output. These populate Coco's own Token Usage category,
-Quick Access metrics and session diagnostics. Input totals include cache reads
-and writes exactly once. SDK cumulative counters are differenced per process; current
-context remains a separate snapshot. Cache availability depends on the backend;
-a warm or restored session does not promise a hit. Missing counters show as
-unreported.
+cache writes and output. Total input is
+`inputTokens + cachedReadTokens + cachedWriteTokens`; cache hit is
+`cachedReadTokens` divided by that total. These populate Coco's own Token Usage
+category, Quick Access metrics and session diagnostics. Input totals include
+cache reads and writes exactly once. SDK cumulative counters are differenced per
+process; current context remains a separate snapshot. Cache availability depends
+on the backend; a warm or restored session does not promise a hit. Missing
+counters show as unreported.
 
 `node scripts/coco-sdk-smoke.mjs --run --cli <cortex> --connection <name> --vision`
 verifies a callback, warm continuation, process restart, image and subsequent

@@ -168,8 +168,7 @@ Coco uses the CLI's credentials, so it may require a separate browser sign-in.
 Its commands run in visible `Coco` terminals where you can type, interrupt or
 close them. Images and reasoning choices depend on the connected runtime.
 Coco keeps conversation sessions across requests and reloads and reports
-native token and cache usage. See [Coco setup and behavior](docs/COCO.md) and
-[Coco continuity and cache verification](docs/COCO_CONTINUITY.md).
+native token and cache usage. See [Coco setup and behavior](docs/COCO.md).
 
 ## More features
 
@@ -189,21 +188,22 @@ native token and cache usage. See [Coco setup and behavior](docs/COCO.md) and
 
 ## Documentation
 
-- Chat: [the chat guide](docs/CHAT.md).
+- Chat: [the chat guide](docs/CHAT.md), [agent instructions](docs/AGENT-INSTRUCTIONS.md).
 - Providers: [APIs](docs/API_PROVIDERS.md), [Codex](docs/CODEX_SUBSCRIPTION.md),
-  [Claude](docs/CLAUDE_SUBSCRIPTION.md), [Coco](docs/COCO.md).
-- Long conversations: [tokens, reasoning and cache](docs/TOKENS_REASONING_CACHE.md),
-  [memory](docs/MEMORY.md), [diagnostics](docs/RELIABILITY_DIAGNOSTICS.md).
-- Development: [architecture](docs/ARCHITECTURE.md), [agent tools](docs/AGENT_TOOLS_GUIDE.md),
-  [audit](docs/AUDIT.md), [Debian verification](docs/DEBIAN_VERIFICATION.md),
-  [Debian desktop in Docker](docs/DEBIAN_GUI.md).
+  [Claude](docs/CLAUDE_SUBSCRIPTION.md), [Cursor](docs/CURSOR.md), [Coco](docs/COCO.md).
+- Long conversations: [shared context](docs/SHARED_CONTEXT.md),
+  [tokens, reasoning and cache](docs/TOKENS_REASONING_CACHE.md), [memory](docs/MEMORY.md),
+  [knowledge verification](docs/KNOWLEDGE_VERIFICATION.md),
+  [diagnostics](docs/RELIABILITY_DIAGNOSTICS.md).
+- Development: [architecture](docs/ARCHITECTURE.md), [Quick Access](docs/QUICK_ACCESS.md),
+  [Debian desktop in Docker](docs/DEBIAN_GUI.md), [work plan](docs/WORK_PLAN_AGENTS.md).
 - [Changelog](CHANGELOG.md) · [Release notes](docs/RELEASE_NOTES.md).
 
 ## Development
 
-See [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md),
-[provider architecture](docs/PROVIDER_ARCHITECTURE.md), and
-[Quick Access](docs/QUICK_ACCESS.md) for the current maintenance contracts.
+See [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md) and
+[provider contracts](docs/ARCHITECTURE.md#provider-contracts) for the current
+maintenance contracts.
 
 **Latest release: 2.0.11. Current build: 2.0.13.**
 
@@ -212,7 +212,7 @@ npm ci
 npm run compile
 npm run check:metadata
 npm run lint
-npm test              # 1553 extension-host tests on VS Code 1.143.1 in the current 2.0.13 build
+npm test              # 1556 extension-host tests on VS Code 1.143.1 in the current 2.0.13 build
 npm run package       # builds the local VSIX
 code --install-extension ./llama-vscode-chat-2.0.13.vsix --force
 ```

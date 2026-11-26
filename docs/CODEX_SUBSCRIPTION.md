@@ -4,22 +4,22 @@ The SubHarness chat can expose models from an existing ChatGPT/Codex
 subscription alongside local OpenAI-compatible and DeepSeek models.
 
 This is a model-provider integration, not a separate `@codex` participant.
-Selecting a discovered Codex model in the normal picker, including a model with
-the native `xhigh` effort option, is the intended entry point. When multiple
-accounts are configured, SubHarness lists each in a numbered Codex group with
-its own limits; the active account runs the status commands. Subagents list
-each Codex model once and start on the active account, or on the next account
-in list order while the active one's 5-hour or weekly limit is used up; an
-open subagent moves the same way with its conversation.
+Selecting a discovered Codex model in the SubHarness chat's model picker,
+including a model with the native `xhigh` effort option, is the intended entry
+point. When multiple accounts are configured, SubHarness lists each in a
+numbered Codex group with its own limits; the active account runs the status
+commands. Subagents list each Codex model once and start on the active account,
+or on the next account in list order while the active one's 5-hour or weekly
+limit is used up; an open subagent moves the same way with its conversation.
 
 ## What Subscription Access Means
 
 ChatGPT subscription access is not an OpenAI API key. The extension launches
 the official `codex app-server --stdio` process and uses its JSON-RPC surface.
 Codex owns browser login, refresh tokens, model discovery, rate limits, and the
-inner reasoning/tool-selection loop. Native command, search, file, web, memory,
-MCP, and other registered actions remain owned by the outer VS Code Chat
-session.
+inner reasoning/tool-selection loop. Command, search, file, web, memory, MCP,
+and other actions remain owned by the SubHarness chat, which runs them as its
+own tools.
 
 The extension never reads, copies, logs, or stores the contents of
 `~/.codex/auth.json`. It validates `account/read` and requires
@@ -43,7 +43,7 @@ SubHarness chat
         -> ChatGPT-managed Codex service
         -> dynamic tool selection
            -> LanguageModelToolCallPart
-              -> native VS Code tool card and approval
+              -> SubHarness chat tool card and approval
               -> tool result resumes the same app-server turn
 ```
 
@@ -82,7 +82,8 @@ or removes advertised tools while a call is running, the active turn keeps its
 original catalog until completion instead of restarting with the full history.
 
 The SubHarness chat can advertise a large catalog whose size depends on the installed
-extensions, attached MCP servers, workspace policy, and current Chat mode.
+extensions, attached MCP servers, workspace policy, and the tools enabled in
+the chat.
 By default, the provider marks uncommon schemas with app-server
 `deferLoading` inside the `vscode_deferred` namespace, while keeping workspace
 reads, searches, terminal commands, edits, web verification, user input, and
@@ -98,17 +99,16 @@ the physical model window: the selected target is capped to the latest
 `modelContextWindow` returned by app-server. For a cold full-history start, the
 provider subtracts explicit output, dynamic-tool-schema, developer-instruction,
 and safety reserves, then compacts semantic VS Code history only above the
-remaining budget. This replaces the former extra `0.45` multiplier that could
-shrink a 258.4k-window request to roughly 87k message tokens.
+remaining budget.
 
 Completed durable conversation threads stay available for up to seven days
 (maximum 16), matching Claude session retention. Reuse first checks the complete SHA-256 history and answer
 digests. The SubHarness chat forwards a stable conversation id and turn index
 so the provider can tolerate rewritten service, tool, or rendered prompt history
 while still requiring an advancing turn and the exact prior
-answer. Without the patch, a conservative fallback ignores mutable tool
-plumbing but requires the complete bounded suffix of recent semantic user
-messages. Model, workspace, sandbox, approval policy, and app-server process
+answer. Without that conversation id and turn index, a conservative fallback
+ignores mutable tool plumbing but requires the complete bounded suffix of
+recent semantic user messages. Model, workspace, sandbox, approval policy, and app-server process
 generation must still match. The dynamic tool catalog may drift: a reused thread retains the
 catalog and namespace routes supplied at `thread/start`, while the provider
 allows only the intersection with the current SubHarness chat request. Newly advertised
@@ -121,8 +121,8 @@ prompt-cache percentage returned by Codex. Body-free
 codex.chat.thread_reuse_miss events categorize reuse failures without logging
 conversation ids, text, or hashes.
 
-This design also supports private caller tools that are not present in
-`vscode.lm.tools`, including the SubHarness chat's terminal implementation. Native calls use
+This design also supports tools that the SubHarness chat advertises only in its
+own catalog, including the chat's terminal implementation. Native calls use
 the session's own permission level, terminal auto-approval rules, and `Bypass
 Approvals`. While delegation is active, internal Codex command and file approval
 requests are declined without an extra modal prompt so Codex can select the
@@ -166,7 +166,7 @@ bodies. Markdown and JSON snapshots are written to extension global storage.
 ### New user turn while a native tool is still running
 
 If the SubHarness chat forwards a newer user turn while the same conversation is waiting on
-a native VS Code tool (including `runSubagent`), the provider interrupts the
+a chat tool (including a running `subagent`), the provider interrupts the
 pending Codex app-server turn and marks its Live Report record terminal. When
 the model, runtime, tool catalog, process generation, and conversation identity
 still match, the provider starts the new user turn on that same app-server
@@ -269,7 +269,7 @@ session approval mode. `codex.internal_tool.declined` or
 `codex.internal_tool.blocked` means the runtime attempted a forbidden internal
 path; the provider denied or interrupted it instead of executing invisibly.
 
-### Native VS Code tool delegation is unavailable
+### Chat tool delegation is unavailable
 
 Dynamic calls arriving after one native card detaches but before its result
 resumes the turn are queued and logged as `codex.chat.tool_delegation_queued`.
@@ -280,12 +280,12 @@ SubHarness chat result round to resume and is intentionally rejected.
 
 ### Clarification questions appear as plain chat text
 
-The native VS Code question tool is advertised immediately, alongside file and
+The chat's `ask_questions` tool is advertised immediately, alongside file and
 terminal tools, and the provider instructs Codex to use its card for clarification
 and user choices. It does not require deferred tool discovery. If a contributed
 question tool is named `request_user_input`, it is exposed under `vscode_native`
 to avoid a collision with Codex's own collaboration-mode-dependent tool.
-The question tool still needs to be included by the active VS Code chat mode.
+The question tool must stay enabled in the chat's tool list.
 
 ### No visible thoughts during a long pause
 

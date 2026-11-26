@@ -10,9 +10,10 @@ What does this PR change and why.
 
 ## Changelog
 
-- Entry added to `CHANGELOG.md` (and `docs/BUGS.md` when fixing a tracked bug).
+- Entry added to `CHANGELOG.md`.
 
 ## Notes for reviewers
 
-Anything version-sensitive (agent-host / Copilot patch patterns are validated
-against VS Code 1.143 and the minimum 1.131), Windows-specific, or security-related.
+Anything version-sensitive (the test suite runs on the pinned VS Code 1.143.1
+host while `engines.vscode` allows ^1.131.0), Windows- or Linux-specific, or
+security-related.

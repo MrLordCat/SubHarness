@@ -9,7 +9,7 @@ labels: bug
 
 - Extension version (VSIX file name):
 - VS Code version (`Help: About`):
-- OS: Windows
+- OS: Windows / Linux / macOS
 
 **Describe the bug**
 

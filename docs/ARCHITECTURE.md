@@ -9,7 +9,8 @@ Stable compatibility ids remain under the `llamacpp` namespace.
 ## Runtime Components
 
 - `src/extension.ts` is the composition root. It creates services and registers
-  the provider, commands, status items, UI providers, and memory tools.
+  the provider, commands, status items, UI providers, and chat services; memory
+  tools are chat tool definitions (`src/memory/tools.ts`) in the chat catalog.
 - `src/composite-provider.ts` consumes `ProviderRegistry` to combine catalogs
   and route each model to its registered owner, isolating discovery failures.
 - `src/providers/model-descriptor.ts` projects shared model metadata to VS Code;
@@ -45,7 +46,7 @@ Stable compatibility ids remain under the `llamacpp` namespace.
 - `src/subagent-guidance.ts` adds stable provider/model routing guidance to the
   SubHarness chat subagent tool without changing its execution boundary.
 - `src/memory/` owns durable shared memory, retrieval, prompt injection, and
-  VS Code language model tools.
+  the chat's memory tool definitions in `tools.ts`.
 - `src/tools/tool-call-reliability.ts` owns deterministic tool argument repair,
   schema validation, metrics, and repeated identical-call detection.
 - `src/diagnostics/` owns provider health reports and session-quality
@@ -85,14 +86,79 @@ Stable compatibility ids remain under the `llamacpp` namespace.
   command handlers.
 - `src/constants.ts` contains shared product, provider, endpoint, and limit
   constants.
-- Patch commands and automatic startup patching use the compiled implementation
-  shipped in the VSIX; installation does not depend on an external patch script.
 
 `src/vscode.d.ts` is a checked-in VS Code API declaration used for the language
 model provider surface. Update it explicitly with `npm run update-vscode-api`.
 
-See [provider contracts](PROVIDER_ARCHITECTURE.md) for extension points and
-[the development workflow](DEVELOPMENT_WORKFLOW.md) for verification and releases.
+## Chat runtime
+
+The SubHarness chat in the secondary side bar is the only agent surface; it is
+not a VS Code chat participant and contributes no language-model tools to the
+host.
+
+- `src/chat/agent-loop.ts` runs one agent turn: it sends the conversation to
+  the selected provider, executes returned tool calls through the chat catalog,
+  feeds the results back, and ends when the model answers without a tool call
+  or the user stops.
+- `src/chat/chat-controller.ts` owns sessions, approvals, subagents, Keep/Undo
+  change sets, queued messages and auto-continue after a subscription limit
+  resets.
+- `src/chat/tools/` defines the built-in catalog: files, search, terminals,
+  `run_checks`, `changes_diff`, `subagent`, `ask_questions`, todo and tool
+  access. Memory tools come from `src/memory/tools.ts`; extension and MCP tools
+  are added from the VS Code catalog.
+- `src/chat/context-cleaning.ts` stubs stale tool results before a new request;
+  `src/chat/compaction.ts` summarizes long chats and model handoffs.
+- `src/chat/subagent-runner.ts` runs a subagent's own tool loop and report.
+- `src/chat/changes/` records Keep/Undo snapshots in shadow git repositories.
+- `src/chat/webview/` is the chat UI.
+
+See [the chat guide](CHAT.md) for user-visible behaviour and approvals.
+
+## Provider contracts
+
+`ProviderRegistry` owns model ownership, catalog aggregation and change
+propagation. A registration pairs a `ProviderSourceDefinition` (stable id,
+label, status mode, enabled setting) with a VS Code provider and an ownership
+predicate; composite routing, the directory and model grouping consume these
+registrations. Quick Access renders a generic `ProviderSnapshot`; integrations
+can add extra controls. API-profile transports use `ApiSourceAdapter` through
+`ApiSourceRouter`; HTTP request policies remain inside the HTTP implementation,
+and the Cursor SDK uses its own adapter.
+
+Model adapters supply a `ModelDescriptor` (native id, capabilities, context
+origin and output policy) to `modelInformation`. Reasoning values and wire
+parameter names stay protocol-specific. A working cap cannot increase a
+model's reported window.
+
+Use source ids for runtime metrics. Family names describe model behavior and
+must not determine the account billed for a request. Persisted usage history
+keeps its existing categories and adds a separate API category. `spendingCap`,
+`monthlyUsage`, `creditsBalance` and `rollingQuota` have different meanings;
+format their typed values without treating them as interchangeable.
+
+Catalog and balance loads share `AsyncResourceCache` (TTL, one in-flight load
+per key, invalidation generations and independent reader cancellation).
+Invalidation retires the old entry before aborting its loader, so a late
+response cannot publish into a newer entry. Cancelling one reader detaches only
+that reader; source refresh or disposal owns shared cancellation. Catalog cache
+identities include a credentials revision or a private digest, never the secret
+itself.
+
+Cursor and Coco use the shared response boundary and output buffer in
+`DelegatedTurnState`. Claude and Codex use `PendingToolRegistry` for
+exactly-once delivery and settlement of native tool callbacks while retaining
+their long-lived runtime and recovery. Protocol adapters own result
+serialization, batch timing, timeout policy, usage events and delivery of
+steered messages. All delegated actions continue to execute through the
+SubHarness chat tools.
+
+Contract suites cover registry extension, metadata and source attribution,
+cache generations and cancellation, transport dispatch and delegated results.
+Protocol suites verify native tool calls, images and session recovery.
+
+See [the development workflow](DEVELOPMENT_WORKFLOW.md) for verification and
+releases.
 
 ## Request Flow
 
@@ -128,7 +194,7 @@ See [provider contracts](PROVIDER_ARCHITECTURE.md) for extension points and
 ### Codex subscription flow
 
 1. The user selects a discovered `codex::` model and reasoning effort in the
-  normal VS Code model picker; there is no separate chat participant.
+  SubHarness chat's model picker.
 2. A strict app-server thread starts in read-only mode with built-in shell,
   file, web, MCP, browser, plugin, hook, image, and subagent actions disabled.
   Codex's permissions message is left out, so the model does not read the
@@ -209,12 +275,21 @@ working.
 ## Invariants
 
 - Source prefixes are never sent as model ids to upstream servers.
-- Codex and Claude cannot execute actions outside native VS Code tool cards.
+- Model-source catalogs are not cached across secret, `llamacpp.*` setting or
+  API-profile changes: a stale cache could send an API key to the previous
+  address.
+- Codex and Claude cannot execute actions outside the SubHarness chat's tool
+  cards.
 - A selected Codex model uses the contributed model-provider path; no secondary
   participant or hidden execution surface may be introduced for the same flow.
 - A detached Codex bridge may queue only calls belonging to an already pending
   native tool turn; an unrelated detached call is rejected and logged.
 - DeepSeek-only fields and llama.cpp-only fields stay source-specific.
+- Cancelling a turn cancels the streaming response body, so an abandoned
+  generation does not hold the local server slot.
+- Network failures and HTTP 429/502/503/504 retry with cancellation-aware
+  exponential backoff before the stream starts; timeouts and other client
+  errors do not.
 - Memory and tool schemas count against the same request budget as messages.
 - Exact server counts include the active chat template and tool catalog; the
   heuristic remains mandatory for OpenAI-compatible servers without tokenizer
@@ -224,6 +299,8 @@ working.
 - Externally verified memory requires source provenance and verification time;
   expired memory is excluded from automatic retrieval.
 - Tool calls are never repaired by inventing values or changing argument types.
+- Compaction is lossy but keeps complete tool turns and code/decision
+  milestones.
 - Knowledge policy and custom durable instructions stay before mutable history;
   source-aware tool descriptions remain stable across turns for cache reuse.
 - Logs may contain counts, timings, model ids, and tool names, but not API keys

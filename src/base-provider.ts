@@ -1178,13 +1178,15 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         if (this._toolCallBuffers.size === 0) {
             return;
         }
+        // Valid calls of the round are emitted even when another one is rejected; the first rejection is thrown after.
+        let rejected: ToolCallValidationError | undefined;
         for (const [idx, buf] of Array.from(this._toolCallBuffers.entries())) {
             const evaluated = this._toolCallReliability.evaluate(buf.name, buf.args, true);
             if (!evaluated.ok) {
-                if (throwOnInvalid) {
+                if (throwOnInvalid && !rejected) {
                     const reason = evaluated.pending ? "incomplete tool-call arguments" : evaluated.reason;
                     const kind = evaluated.pending ? "json" : evaluated.kind;
-                    throw new ToolCallValidationError(reason, buf.name, kind);
+                    rejected = new ToolCallValidationError(reason, buf.name, kind);
                 }
                 // Keep the buffer for the final validation pass.
                 continue;
@@ -1201,6 +1203,9 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             progress.report(new vscode.LanguageModelToolCallPart(id, name, evaluated.arguments));
             this._toolCallBuffers.delete(idx);
             this._completedToolCallIndices.add(idx);
+        }
+        if (rejected) {
+            throw rejected;
         }
     }
 

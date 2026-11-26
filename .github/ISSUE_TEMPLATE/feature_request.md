@@ -19,5 +19,5 @@ Any workarounds or alternative designs.
 
 **Context**
 
-- Provider(s) involved (Local / DeepSeek / Codex / Claude / custom API):
+- Provider(s) involved (Local / DeepSeek / Codex / Claude / Cursor / Snowflake Coco / custom API):
 - Anything else that helps evaluate the request.

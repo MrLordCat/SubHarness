@@ -12,14 +12,17 @@ Build the GUI image from the repository:
 docker build -f Dockerfile.gui -t ai-agent-bridge-debian-gui .
 ```
 
-Use the Linux x64 VSIX from the 1.17.3 release or the locally verified package:
+Use the Linux x64 VSIX from the latest release. The file is named
+`llama-vscode-chat-<version>-linux-x64.vsix`; replace `<version>` below with the
+downloaded version:
 
 ```powershell
-$vsix = (Resolve-Path .\artifacts\debian\llama-vscode-chat-1.17.3-linux-x64.vsix).Path
+$version = "<version>"
+$vsix = (Resolve-Path ".\llama-vscode-chat-${version}-linux-x64.vsix").Path
 docker run -d --name ai-agent-bridge-debian-gui --shm-size=1g `
   -p 127.0.0.1:6080:6080 `
   --mount "type=volume,source=ai-agent-bridge-debian-gui-home,target=/home/node" `
-   --mount "type=bind,source=$vsix,target=/packages/llama-vscode-chat-1.17.3-linux-x64.vsix,readonly" `
+   --mount "type=bind,source=$vsix,target=/packages/llama-vscode-chat-${version}-linux-x64.vsix,readonly" `
   ai-agent-bridge-debian-gui
 ```
 
@@ -34,10 +37,11 @@ credential folders are not mounted.
 
 1. In VS Code, open **Extensions** and its **…** menu.
 2. Choose **Install from VSIX…** and select
-   `/packages/llama-vscode-chat-1.17.3-linux-x64.vsix`.
+   `/packages/llama-vscode-chat-<version>-linux-x64.vsix`.
 3. Run **Developer: Reload Window**.
-4. Open the SubHarness chat from its activity bar icon.
-6. Configure the provider you want to test. Firefox is available for account
+4. Open the SubHarness chat in the secondary side bar. The SubHarness icon in
+   the activity bar opens Quick Access, the control tree.
+5. Configure the provider you want to test. Firefox is available for account
    sign-in and OAuth callbacks inside the container.
 
 Use the noVNC sidebar's clipboard panel to paste text. Alt+Shift switches the
@@ -66,4 +70,3 @@ docker logs --tail 20 ai-agent-bridge-debian-gui
 
 Desktop, VNC and VS Code logs are under `~/gui-logs`. Removing the container
 preserves the named volume; removing that volume also removes saved profiles.
-The existing headless verification image and driver remain separate.

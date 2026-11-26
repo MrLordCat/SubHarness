@@ -25,9 +25,8 @@ Memory is the main asset. You must **initiate** saving yourself — do not wait 
   - `kind` — `preference` | `decision` | `environment` | `workflow` | `externalFact` | `other`.
   - `scope` is required: `global` only for durable info useful to agents in all projects; `workspace` for paths, commands, architecture and decisions of the current project only. The extension computes the project id itself.
 - **Deleting memory**: pass the same explicit `scope`; an entry of another project cannot be deleted by id alone.
-- **Entry format**: one thought per entry — `content` is 1–3 lines of essence (commands, paths, values, reasons), usually under ~750 chars. The store tool rejects new entries above 4096 chars; existing longer entries stay, but `llamacpp.memoryHealth` reports them for cleanup.
+- **Entry format**: one thought per entry — `content` is 1–3 lines of essence (commands, paths, values, reasons), usually under ~750 chars. The store tool rejects new entries above 4096 chars; existing longer entries stay, but the `SubHarness: Check Memory Health` command reports them for cleanup.
 - **Write budget**: at most 2–3 new entries per significant piece of work. The store tool answers with the saved size and warns when your entry is close to an existing one — update that id instead of duplicating.
-- **Built-in Copilot memory** (the `memory` tool, `/memories/` files) — for native chats: user memory (preferences, patterns), repo memory (project facts), session (current task plan). If available, use it just as actively.
 
 ### Memory hygiene
 
@@ -35,7 +34,7 @@ Memory is the main asset. You must **initiate** saving yourself — do not wait 
 - **Update, do not duplicate**: if a related entry exists, update it by `id` instead of creating a copy.
 - **Do not save**: session retellings, the obvious, transient details (random request ids, junk commands), what the code already shows (unless it explains "why").
 - Keep entries short — one thought per entry.
-- **Respect tool feedback**: the store tool returns size and similarity warnings — shrink or update rather than ignoring them. Run `llamacpp.memoryHealth` to find duplicates and overlarge entries before a long session.
+- **Respect tool feedback**: the store tool returns size and similarity warnings — shrink or update rather than ignoring them. Use the `SubHarness: Check Memory Health` command to find duplicates and overlarge entries before a long session.
 
 ## 2. Accuracy and honesty
 
@@ -92,4 +91,4 @@ Memory is the main asset. You must **initiate** saving yourself — do not wait 
 - **Do not end a turn with a summary while the task is unfinished.** Tool errors restart the "tool → verify → fix" cycle instead of stopping the flow.
 - **Keep the thread**: if interrupted (stop, error, loop) — check the plan and resume from the unfinished step; do not start over or repeat what is done.
 - **Avoid repeats and loops**: if a tool returned "not found" or "already applied" — do not retry the same operation; verify the actual state of the file/data and move on.
-- **Record decisions**: after finishing a step, save important decisions and facts to memory (llamacpp_store_memory / Copilot memory) so the next session does not start from zero.
+- **Record decisions**: after finishing a step, save important decisions and facts to memory (llamacpp_store_memory) so the next session does not start from zero.

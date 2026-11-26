@@ -8,7 +8,7 @@ The extension does not use one number for every purpose:
 | --- | --- | --- |
 | `reasoningBudget` | Maximum hidden reasoning tokens for compatible local llama.cpp servers | 16384 |
 | `localDefaultMaxOutputTokens` | Normal local `max_tokens` when the session supplies no explicit value | 32768 |
-| `deepSeekDefaultMaxOutputTokens` | Normal DeepSeek `max_tokens` | 65536 |
+| `deepSeekDefaultMaxOutputTokens` | Normal DeepSeek `max_tokens` | 70000 |
 | `maxOutputTokensCap` | Absolute ceiling applied after session, model, and source limits | 131072 local / 393216 DeepSeek maximum |
 
 `max_tokens` covers the complete generated sequence. For a reasoning model that
@@ -128,7 +128,7 @@ independent chats on a single llama.cpp slot can also lower cache reuse.
 DeepSeek materializes the disk cache for a freshly compacted prefix
 asynchronously. The immediate tool-result continuation can therefore miss even
 when every prior message matches byte-for-byte. With
-`llamacpp.deepSeekCacheWriteGraceMs` (default 180000) the provider waits out
+`llamacpp.deepSeekCacheWriteGraceMs` (default 60000) the provider waits out
 the remaining write window before sending that continuation, turning the second
 miss into a cache hit. The wait is skipped for new user turns, non-DeepSeek
 sources, and when `cachePrompt` is disabled. A miss caused by this race is
@@ -206,12 +206,12 @@ Quality-oriented local coding:
   "llamacpp.accurateTokenCounting": true,
   "llamacpp.cachePrompt": true,
   "llamacpp.toolCallingMode": "apiDirect",
-  "llamacpp.apiDirectMaxTools": 70,
+  "llamacpp.apiDirectMaxTools": 100,
   "llamacpp.apiDirectToolTokenBudget": 12000,
   "llamacpp.apiDirectIncludeAllTools": false
 }
 ```
 
 Faster local turns can use Balanced without changing the cap. DeepSeek quality
-uses Deep, a 65536 normal output default, and retains 393216 only as the hard
+uses Deep, a 70000 normal output default, and retains 393216 only as the hard
 ceiling for explicitly large requests.

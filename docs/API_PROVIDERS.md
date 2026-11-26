@@ -33,18 +33,13 @@ If no maximum is reported, the card labels its safe fallback explicitly.
 Existing saved context values become working caps; editing the connection
 preserves them. Presets do not override discovered context limits.
 
-### Choose models by provider
+### Choose a model
 
-Click **Models by Provider** (the tree icon) in the Chat or Quick Access title
-bar, or run **SubHarness: Models by Provider** from the command palette.
-Choose a provider first, then one of its models. Use **Back to providers** to
-change the group. API profiles remain separate even when their names match;
+Models are chosen in the SubHarness chat's model picker, which groups them by
+provider, has a search box and shows each provider's limit state
+([CHAT.md](CHAT.md)). API profiles remain separate even when their names match;
 an enabled profile with an unavailable catalog stays visible with zero models.
-
-Choosing a model updates the current chat without sending a message. Models
-without local tool calling use Ask mode. Cursor SDK models with Tools remain
-available in Agent mode.
-The regular VS Code model dropdown remains available for model configuration.
+Choosing a model updates the current chat without sending a message.
 
 ### Cursor billing
 
@@ -85,8 +80,9 @@ SDK's `systemPrompt` override, which some Cursor runtimes reject as
 `unknown option '--system-prompt'`. Failed runs report Cursor's original error
 message and code, with credentials redacted, instead of only `status error`.
 
-Cursor models advertise **Tools** and **Vision**, making them selectable in the
-native Agent picker. The SDK requires Node.js 22.13 or newer in the extension
+Cursor models advertise **Tools** and **Vision**, so the chat gives them its
+tools and attached images. The SDK requires Node.js
+22.13 or newer in the extension
 host and its supported platform package (Windows x64, Linux/macOS x64 or arm64).
 It loads only when Cursor is used; the JSONL store avoids a node:sqlite dependency.
 On unsupported hosts the Cloud Agents transport remains a chat-only fallback
@@ -104,13 +100,16 @@ from Codex/Coco/Claude and returning to Cursor with foreign turns retained.
 Automatic multi-prompt history imports are disabled. Each user request starts
 one SDK run; native model/tool iterations can still occur within it. Unmatched
 history branches stop before inference and preserve the completed session.
-New sessions replay at most 64,000 history characters by default, controlled by
-`llamacpp.cursorMaxColdHistoryChars`; larger cold transfers stop before inference
-and retain a full archive. Warm/restored deltas do not use that cold budget.
-`llamacpp.cursorMaxHistoryImportParts` is deprecated and ignored. The Cloud
-fallback rejects oversized history explicitly instead of dropping early messages.
+A cold transfer is prepared by the shared token-budget planner
+([shared context](SHARED_CONTEXT.md)) from the history the chat's self-cleaning
+left ([`llamacpp.chatContextBudget`](CHAT.md)); the old
+`llamacpp.cursorMaxColdHistoryChars` character limit is deprecated and ignored.
+A request that alone exceeds the budget stops before inference and retains a
+full archive. `llamacpp.cursorMaxHistoryImportParts` is deprecated and ignored.
+The Cloud fallback rejects oversized history explicitly instead of dropping
+early messages.
 Native SDK cache read/write counters feed profile metrics and diagnostics,
-independently of billing permissions. See [Cursor continuity](CURSOR_CONTINUITY.md)
+independently of billing permissions. See [Cursor](CURSOR.md)
 for storage, verification and finite-context limitations.
 
 The API format and model family are deliberately separate. For example, a

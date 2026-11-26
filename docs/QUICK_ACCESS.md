@@ -1,8 +1,8 @@
 # Quick Access
 
 Quick Access is the extension's control tree. The root keeps Providers Manager,
-API profile cards, built-in providers, Token Usage, experiments, agents, model
-behavior, memory, diagnostics and patch controls in their existing order.
+API profile cards, built-in providers, Token Usage, experiments, Subagents, model
+behavior, memory and diagnostics in their existing order.
 
 Provider cards show connection and provider-specific actions. API cards also
 show live metrics belonging to that exact saved source. Token Usage contains
@@ -19,14 +19,14 @@ Its input and cache counters come from ACP prompt results, including history
 imports; they are not inferred from context occupancy or session reuse.
 
 Cursor SDK usage appears on its saved API profile and in the aggregate API
-history category. Session Diagnostics distinguishes Cursor from Claude, shows
+history category. Live Report distinguishes Cursor from Claude, shows
 new/warm/restored mode and separates fresh input, cache reads and cache writes.
 Native Cursor input already includes cache reads/writes; the adapter counts
 them once and checks SDK totals for the known duplicate-cache representation.
 First cold starts are labelled separately from failed session reuse. A warm
 session does not itself prove a server cache hit. Older aggregates are retained.
 No SDK context-occupancy counter is inferred from cumulative billed tokens.
-Details and verification: [Cursor continuity](CURSOR_CONTINUITY.md).
+Details and verification: [Cursor continuity](CURSOR.md).
 
 Supported account balances load in the background. The tree displays profile
 metadata and cached values immediately, then updates after the request finishes.
@@ -42,8 +42,8 @@ the other root sections usable and marks Providers as unavailable.
 
 The current visibility policy is preserved: unavailable built-in providers
 are hidden until they recover, while Coco keeps its reconnect controls.
-API profiles remain inspectable with their state. Model selection is available
-from Models by Provider; reasoning controls remain in the native model picker.
+API profiles remain inspectable with their state. Models and their reasoning
+levels are chosen in the SubHarness chat's model picker ([CHAT.md](CHAT.md)).
 
 The last root group, **SubHarness**, shows the installed version, the last
 update check with the latest stable release, Check for Updates, Install Update
@@ -57,5 +57,3 @@ Implementation boundaries:
 - `quick-access.ts`: section composition, captured state and provider controls.
 - `ApiProviderService`: cached profile metadata and background account requests.
 - `ProviderSnapshot` / `ProviderRuntimeMetrics`: source-owned data.
-
-The [audit](QUICK_ACCESS_AUDIT.md) records the findings and implemented fixes.

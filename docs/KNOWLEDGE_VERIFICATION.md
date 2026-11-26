@@ -41,11 +41,13 @@ The policy tells the model to:
 - cross-check documentation against implementation or a reproducible test when
   runtime behavior matters.
 
-API Direct adds matching hints to `fetch_webpage`, `github_repo`, and
-`github_text_search`. Those tools remain in a stable priority-ordered catalog;
-the provider does not change tool definitions based on prompt keywords because
-that would reduce prompt-cache reuse and could hide a tool needed later in an
-agent turn.
+The provider adds matching hints to tool descriptions by name. The chat's
+`fetch_webpage` gets a source-verification hint; `read_file`, `grep_search` and
+`file_search` keep their fixed descriptions. `github_repo` and
+`github_text_search` get the same hint when an extension or MCP server
+provides them; the chat's built-in catalog has neither. Tools remain in a stable priority-ordered catalog; the provider does
+not change tool definitions based on prompt keywords because that would reduce
+prompt-cache reuse and could hide a tool needed later in an agent turn.
 
 ## Custom Instructions
 
@@ -57,15 +59,14 @@ project-wide coding constraints. Put task-specific text in the chat and mutable
 facts in shared memory. Frequently editing the custom system prompt changes the
 request prefix and lowers prompt-cache reuse.
 
-The custom prompt is capped at 12,000 characters. It is not injected into
-Copilot's explicit Compact Conversation service request.
+The custom prompt is capped at 12,000 characters.
 
 ## Cache Layout
 
 The request is assembled in this order:
 
 1. Provider knowledge policy and custom system prompt.
-2. Native VS Code/Copilot system instructions.
+2. The chat's system instructions.
 3. Conversation history.
 4. Retrieved shared memory immediately before the latest user message.
 

@@ -6038,6 +6038,23 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                                 repairEnabled: toolCallRepairEnabled,
                                 cancelled: token.isCancellationRequested,
                             });
+                            // Other calls of this round already reached the caller, so the request cannot be
+                            // repeated. Keep the turn: those calls run, and the model reads why this one did not.
+                            if (roundToolCallParts > 0 && !token.isCancellationRequested) {
+                                measuredProgress.report(new vscode.LanguageModelTextPart(
+                                    `\n[tool call guard] The ${error.toolName ?? "tool"} call was not run: ${error.message}. Call it again with arguments that follow its schema.`
+                                ));
+                                this.log("chat.tools.validation_skipped", {
+                                    requestId,
+                                    attemptNo: attempt.attemptNo,
+                                    kind: error.kind,
+                                    toolName: error.toolName,
+                                    reason: error.message,
+                                    roundToolCallParts,
+                                });
+                                finalAttempt = attempt;
+                                break;
+                            }
                         }
                         throw error;
                     }
