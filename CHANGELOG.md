@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.1.0 (stable release) - 2026-11-26
+
+Consolidates the 2.0.12 and 2.0.13 development builds below.
+
+- A chat cleans its own context over `llamacpp.chatContextBudget`: stale tool
+  results become one-line stubs and older turns are summarized; a **Context
+  cleaned** card shows what left. The cleaned history fits a provider switch
+  and Claude's replay whole.
+- Two or more Claude subscriptions, like the Codex accounts; a limit card
+  offers **Continue on Claude 2** / **Continue on Codex 2**.
+- **Always allow** on approval cards, by the kind of action, kept in the user
+  setting `llamacpp.chat.alwaysAllow` and listed under **Always allowed**.
+- Weekly limits show the right reset, and auto-continue waits for it.
+- A subagent call to a used-up model answers at once; subagents get 1000
+  rounds; the new `changes_diff` tool shows the agent's changes as a diff.
+- One bad tool call no longer ends the turn for local and API models.
+- Local-server probes back off to 5 minutes while the server is off; the
+  compaction summary falls back to a local model and the chat model.
+- The documentation keeps one current reference per topic.
+
 ## 2.0.13 (development build) - 2026-11-25
 
 - Fixed: one bad tool call no longer ends the turn for local and API models
