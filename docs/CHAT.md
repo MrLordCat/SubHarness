@@ -1,4 +1,4 @@
-# Bridge chat (preview)
+# SubHarness chat
 
 The extension's models and tools are available in its own **SubHarness chat**.
 It talks to Codex, Claude, DeepSeek, custom APIs, local servers and Coco, and

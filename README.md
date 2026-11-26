@@ -22,21 +22,56 @@ The chat lives in the secondary side bar, next to the other agent chats: click
 its **SubHarness** icon there. The first start opens it once. **SubHarness:
 Open Chat in Editor** opens the same chat as an editor tab.
 
-- **Models:** the picker groups models by provider and shows each provider's
-  5-hour and weekly limits or its balance.
-- **Tools:** files, search and terminal, with approval prompts for dangerous
-  commands, plus tools of other extensions and MCP servers when you enable
-  them. **Keep/Undo** reviews every file a turn changed.
-- **Subagents:** the agent can hand bounded steps to cheaper models and keeps
-  working while they run.
-- **One working context:** switching models compacts the conversation instead
-  of losing it. A long chat cleans itself: over its context budget (200,000
-  tokens by default, `llamacpp.chatContextBudget`), stale tool results and
-  then older turns leave the model's context, and the full history stays in
-  the chat. You do not need to start a new chat.
-- **Everyday work:** attachments, editing sent messages, queued messages while
-  the agent works, chat history, chats that keep running in the background,
-  and clickable file links in answers.
+<p align="center"><img src="assets/chat-input.png" alt="The chat input: todo list, changed files with Keep and Undo, model, thinking level, tools, the 5-hour limit, cache hit and context size" width="760"></p>
+
+## Key features
+
+- **Every subscription in one picker.** Codex with a ChatGPT account, Claude,
+  Cursor, Snowflake Coco, DeepSeek, custom APIs and local llama.cpp servers.
+  The picker groups models by provider, has search and stars, and shows each
+  provider's 5-hour and weekly limits or its balance. Several ChatGPT and
+  Claude accounts work side by side.
+- **Limits that wait for you.** The limits chip shows the selected
+  subscription's window; click it for every provider and its reset time. When
+  the 5-hour Codex or Claude window stops an answer, the chat continues it by
+  itself after the reset, also in a background chat and after a reload. With a
+  second subscription the limit card offers **Continue on Codex 2** or
+  **Continue on Claude 2**.
+- **Subagents on cheaper models.** The agent hands bounded steps to cheaper
+  models such as DeepSeek Flash or GPT-6-Luna: up to three in parallel, in the
+  background while it keeps working, or kept open for follow-up tasks with
+  their own context. Each report lists the files the subagent changed. A model
+  whose limit is used up answers at once instead of starting.
+- **Tools with approvals.** Files, search, terminals, project checks
+  (`run_checks`), questions to you and a todo list, plus tools of other
+  extensions and MCP servers when you enable them. Dangerous commands and
+  changes outside the workspace ask first; **Always allow** approves that kind
+  of action once, for every workspace.
+- **Keep/Undo and diffs.** Every file a turn changed, subagents' edits
+  included, waits for Keep or Undo. `changes_diff` gives the agent, or a
+  reviewer subagent, the same changes as a diff.
+- **One working context.** Switching models hands the conversation over,
+  compacted when it is too long. A long chat cleans itself: over its budget
+  (200,000 tokens by default, `llamacpp.chatContextBudget`), stale tool results
+  and then older turns leave the model's context, and the full history stays
+  in the chat. You do not need to start a new chat. The counter shows the
+  prompt size against the window, **cache N%** the prompt-cache hit.
+- **Chats in the background.** Several chats run at once. The header badge
+  counts running, waiting and finished chats, and the system notifies you when
+  a turn finishes or needs an approval while VS Code is not focused.
+- **Shared memory.** Preferences, decisions and project facts the agent saves
+  reach every model in later chats.
+- **Everyday work:** attachments and pasted images, editing sent messages,
+  queued messages while the agent works, chat history, and clickable file
+  links in answers.
+- **Diagnostics.** Session Quality and Live Report show usage, cache, context
+  and slow steps.
+
+| Model picker | Subscription limits | Context settings |
+| :---: | :---: | :---: |
+| <img src="assets/model-picker.png" alt="Model picker grouped by provider, with stars, limits and a used-up Codex week" width="240"> | <img src="assets/subscription-limits.png" alt="Codex and Claude 5-hour and weekly windows with reset times, and the DeepSeek balance" width="240"> | <img src="assets/context-settings.png" alt="Shared context and model switch sliders" width="240"> |
+
+<p align="center"><img src="assets/subagents.png" alt="Three DeepSeek Flash subagents finished in parallel, each with its steps and time" width="760"></p>
 
 See [the chat guide](docs/CHAT.md).
 
@@ -169,22 +204,6 @@ Its commands run in visible `Coco` terminals where you can type, interrupt or
 close them. Images and reasoning choices depend on the connected runtime.
 Coco keeps conversation sessions across requests and reloads and reports
 native token and cache usage. See [Coco setup and behavior](docs/COCO.md).
-
-## More features
-
-- **Session Quality / Live Report:** inspect usage, cache, context and slow steps.
-- **Shared Memory:** save and retrieve project information across conversations.
-
-<details>
-<summary>Screenshots: Quick Access, Session Quality and Live Report</summary>
-
-<p align="center">
-<a href="assets/quick_panel.png"><img src="assets/quick_panel.png" alt="Quick Access" width="240"></a>
-<a href="assets/turn_details.png"><img src="assets/turn_details.png" alt="Session Quality" width="240"></a>
-<a href="assets/Live_report.png"><img src="assets/Live_report.png" alt="Live Report" width="240"></a>
-</p>
-
-</details>
 
 ## Documentation
 
