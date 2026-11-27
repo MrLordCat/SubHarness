@@ -276,6 +276,12 @@ interface OpenSubagent extends StoredSubagent {
 }
 
 /** One line of at most max characters. */
+/** What every request carries besides the history: the system prompt and the tool schemas. */
+export function requestFixedTokens(system: string | undefined, tools: readonly vscode.LanguageModelChatTool[]): number {
+	const catalog = tools.map(tool => `${tool.name}\n${tool.description}\n${JSON.stringify(tool.inputSchema ?? {})}`).join("\n");
+	return (system ? estimateTextTokens(system) : 0) + (catalog ? estimateTextTokens(catalog) : 0);
+}
+
 function oneLine(text: string, max: number): string {
 	const line = text.replace(/\s+/g, " ").trim();
 	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
@@ -1866,10 +1872,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			// Subagents get the prompt without the delegation guide: they cannot start subagents.
 			const system = await this._systemPrompt({ subagents: source.tools.some(tool => tool.name === SUBAGENT_TOOL_NAME) });
 			const thinking = this._thinkingFor(model.id);
-			const cleaned = await this._cleanContext(running, model, history, system);
+			const fixedTokens = requestFixedTokens(system, source.tools);
+			const cleaned = await this._cleanContext(running, model, history, fixedTokens);
 			// A model switch compacts the cleaned history, and only when it is still over the switch limit.
 			const current: ChatMessage = { id: running.message.id, role: "assistant", turn, createdAt: running.message.createdAt, parts: [...cleaned] };
-			const initialParts = [...cleaned, ...await this._compactForModel(running, model, cleaned.length > 0 ? [...history, current] : history, system)];
+			const initialParts = [...cleaned, ...await this._compactForModel(running, model, cleaned.length > 0 ? [...history, current] : history, fixedTokens)];
 			await runAgentTurn({
 				backend: this._deps.backend,
 				model,
@@ -2396,14 +2403,13 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		running: RunningTurn,
 		model: vscode.LanguageModelChatInformation,
 		history: readonly ChatMessage[],
-		system: string | undefined,
+		fixedTokens: number,
 	): Promise<ChatPart[]> {
 		const compaction = this._deps.compaction;
 		const budget = compaction?.cleaningBudget?.() ?? 0;
 		if (!compaction || budget <= 0) {
 			return [];
 		}
-		const fixedTokens = system ? estimateTextTokens(system) : 0;
 		// The first request after a cleaning replays the history into a new session, within the switch limit.
 		const replayTokens = Math.floor(compaction.limits().triggerTokens * CONTEXT_CLEANING_REPLAY_RATIO);
 		const plan = planContextCleaning(history, { budgetTokens: budget, fixedTokens, replayTokens });
@@ -2449,7 +2455,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				}
 			}
 		}
-		part ??= plan.newStale > 0 ? staleOnlyCompaction(history, plan) : undefined;
+		part ??= plan.newStale > 0 || plan.newStaleMemoryIndex > 0 ? staleOnlyCompaction(history, plan) : undefined;
 		if (!part || !cleaningPaysOff(part, budget)) {
 			this._log("chat.cleaning.skipped", {
 				reason: part ? "small_saving" : "nothing_to_clean",
@@ -2470,6 +2476,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			estimateAfterStubs: plan.tokensAfterStubs,
 			staleResults: part.cleaning?.staleResults ?? 0,
 			stubbedTotal: part.staleResults?.length ?? 0,
+			staleMemoryIndex: part.staleMemoryIndex?.length ?? 0,
 			summary: part.cleaning?.summary ?? false,
 			summarizedMessages: part.cleaning?.summarizedMessages ?? 0,
 			trimmedRounds: part.cleaning?.summary ? part.trimmedTurn?.rounds ?? 0 : 0,
@@ -2505,14 +2512,14 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		running: RunningTurn,
 		model: vscode.LanguageModelChatInformation,
 		history: readonly ChatMessage[],
-		system: string | undefined,
+		fixedTokens: number,
 	): Promise<ChatPart[]> {
 		const compaction = this._deps.compaction;
 		const previous = previousModelId(history);
 		if (!compaction || !previous || previous === model.id) {
 			return [];
 		}
-		const limits: ChatCompactionLimits = { ...compaction.limits(), fixedTokens: system ? estimateTextTokens(system) : 0 };
+		const limits: ChatCompactionLimits = { ...compaction.limits(), fixedTokens };
 		const plan = planChatCompaction(history, limits);
 		if (!plan) {
 			return [];

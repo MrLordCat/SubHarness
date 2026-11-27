@@ -274,6 +274,20 @@ suite("Shared memory", () => {
 		assert.strictEqual(clipMemoryContent("short"), "short");
 	});
 
+	test("search declares full and returns complete entries when it is true", async () => {
+		const long = `${"segment ".repeat(200)}END-OF-ENTRY`;
+		await memory.upsert({ title: "Long entry", content: long });
+		const tools = new Map(createMemoryTools(memory).map(tool => [tool.name, tool]));
+		const search = tools.get(MEMORY_TOOL_NAMES.search)!;
+		assert.deepStrictEqual(
+			Object.keys((search.inputSchema as { properties: Record<string, unknown> }).properties),
+			["query", "limit", "includeExpired", "scope", "full"]
+		);
+		const token = new vscode.CancellationTokenSource().token;
+		assert.match(String(await search.invoke({ query: "Long entry" }, token)), /chars omitted/);
+		assert.ok(String(await search.invoke({ query: "Long entry", full: true }, token)).includes(long));
+	});
+
 	test("health report lists duplicates and the longest entries", async () => {
 		await memory.upsert({ title: "API limit", content: "API rate limit is 60 requests per minute." });
 		await memory.upsert({ title: "API limit", content: "API rate limit is 60 requests per minute (verified)." });

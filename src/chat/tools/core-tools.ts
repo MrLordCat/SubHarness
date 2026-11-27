@@ -5,7 +5,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { DELETE_FOLDER, WRITE_OUTSIDE_WORKSPACE } from "../approvals";
 import { defaultEditDiagnosticsSource, reportEditErrors, snapshotDiagnostics, type EditDiagnosticsSource } from "./edit-diagnostics";
-import { CHAT_TOOL_GROUPS, MAX_IMAGE_BYTES, type ChatTool, type ChatToolConfirmation, type ChatToolOutput } from "./types";
+import { CHAT_TOOL_GROUPS, MAX_IMAGE_BYTES, TOOL_INPUT_NOT_OBJECT, type ChatTool, type ChatToolConfirmation, type ChatToolOutput } from "./types";
 import {
 	displayPath,
 	isInsideWorkspace,
@@ -39,7 +39,7 @@ interface GrepRequest {
 
 export function inputRecord(input: unknown): Record<string, unknown> {
 	if (typeof input !== "object" || input === null || Array.isArray(input)) {
-		throw new Error("Tool input must be an object.");
+		throw new Error(TOOL_INPUT_NOT_OBJECT);
 	}
 	return input as Record<string, unknown>;
 }
@@ -77,6 +77,11 @@ function booleanField(record: Record<string, unknown>, key: string, fallback: bo
 	return value;
 }
 
+/** A received value as the model wrote it, for error messages. */
+function shownValue(value: unknown): string {
+	return typeof value === "string" ? JSON.stringify(value) : String(value);
+}
+
 export function integerField(
 	record: Record<string, unknown>,
 	key: string,
@@ -88,11 +93,8 @@ export function integerField(
 	if (value === undefined) {
 		return fallback;
 	}
-	if (typeof value !== "number" || !Number.isInteger(value)) {
-		throw new Error(`"${key}" must be an integer.`);
-	}
-	if (value < minimum) {
-		throw new Error(`"${key}" must be at least ${minimum}.`);
+	if (typeof value !== "number" || !Number.isInteger(value) || value < minimum) {
+		throw new Error(`"${key}" must be a whole number ≥ ${minimum}; got ${shownValue(value)}. Omit it to use the default.`);
 	}
 	return maximum === undefined ? value : Math.min(value, maximum);
 }
@@ -646,7 +648,7 @@ export function createCoreTools(options: {
 		name: "read_file",
 		group: CHAT_TOOL_GROUPS.files,
 		readOnly: true,
-		description: "Reads a text file from the workspace. Returns at most 2000 lines or 200,000 characters; use startLine and endLine to page through larger files.",
+		description: "Reads a text file from the workspace. Returns at most 2000 lines or 200,000 characters; use startLine and endLine to page through larger files. The model provider may cut very long results, so read long files in line ranges.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -678,7 +680,7 @@ export function createCoreTools(options: {
 			});
 			checkCancellation(token);
 			if (buffer.subarray(0, BINARY_SAMPLE_BYTES).includes(0)) {
-				throw new Error(`${shown} looks like a binary file.`);
+				throw new Error(`${shown} looks like a binary file; read_file only reads text. Use view_image for an image, or inspect another binary file with a terminal command.`);
 			}
 			const allLines = buffer.toString("utf8").split(/\r?\n/);
 			if (allLines.length > 0 && allLines[allLines.length - 1] === "") {
@@ -957,7 +959,7 @@ export function createCoreTools(options: {
 				newString
 			);
 			if (!(await vscode.workspace.applyEdit(edit))) {
-				throw new Error(`Could not apply the edit to ${shown}.`);
+				throw new Error(`Could not apply the edit to ${shown}: the file may have changed on disk or be read-only. Read the file again, then retry the edit.`);
 			}
 			await document.save();
 		} else {
@@ -1010,6 +1012,7 @@ export function createCoreTools(options: {
 					type: "array",
 					minItems: 1,
 					maxItems: 50,
+					description: "Edits to apply in order; each oldString must match exactly once at the time it is applied.",
 					items: {
 						type: "object",
 						properties: {

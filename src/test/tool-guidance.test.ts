@@ -5,9 +5,11 @@ import { BASE_CHAT_INSTRUCTIONS } from "../chat/prompt/instructions";
 import { SUBAGENT_INSTRUCTIONS } from "../chat/subagent-runner";
 import { createCoreTools } from "../chat/tools/core-tools";
 import { createAskQuestionsTool, createTodoTool } from "../chat/tools/interaction-tools";
-import { createCloseSubagentTool, createSubagentTool } from "../chat/tools/subagent-tool";
+import { createCloseSubagentTool, createSubagentTool, createWaitSubagentsTool } from "../chat/tools/subagent-tool";
 import { createSymbolTools } from "../chat/tools/symbol-tools";
 import { createChatTerminalTools } from "../chat/tools/terminal-tools";
+import { createCheckTool } from "../chat/tools/check-tools";
+import { createChangesDiffTool } from "../chat/tools/changes-tools";
 import { createToolAccessTools } from "../chat/tools/tool-access-tools";
 import type { ChatTool } from "../chat/tools/types";
 import { createWebTools } from "../chat/tools/web-tools";
@@ -30,13 +32,16 @@ suite("Tool descriptions and guidance", () => {
 			...createWebTools(),
 			...createSymbolTools(),
 			createTodoTool(),
+			createChangesDiffTool(),
 			createAskQuestionsTool(),
 			...createToolAccessTools(),
 			...createChatTerminalTools({
 				manager: { run: unusedRun, read: unusedRun, send: unusedSync, kill: unusedSync },
 				rules: () => [],
 			}),
+			createCheckTool({ logDir: "unused-by-this-test", rules: () => [] }),
 			createSubagentTool({ models: () => [] }),
+			createWaitSubagentsTool({ models: () => [] }),
 			createCloseSubagentTool({ models: () => [] }),
 			// The memory tools only use the service when they run.
 			...createMemoryTools({} as SharedMemoryService),
@@ -47,8 +52,40 @@ suite("Tool descriptions and guidance", () => {
 		return description.replace(/\s+/g, " ").trim().length;
 	}
 
-	test("every bridge chat tool description fits the Coco CLI budget", () => {
+	/** Arguments of a schema that lack a description, nested object items included. */
+	function undocumentedArguments(schema: unknown, path = ""): string[] {
+		if (typeof schema !== "object" || schema === null) {
+			return [];
+		}
+		const missing: string[] = [];
+		const properties = (schema as { properties?: unknown }).properties;
+		if (typeof properties === "object" && properties !== null && !Array.isArray(properties)) {
+			for (const [name, property] of Object.entries(properties as Record<string, unknown>)) {
+				const description = typeof property === "object" && property !== null
+					? (property as { description?: unknown }).description
+					: undefined;
+				if (typeof description !== "string" || description.trim() === "") {
+					missing.push(`${path}${name}`);
+				}
+				missing.push(...undocumentedArguments(property, `${path}${name}.`));
+			}
+		}
+		const items = (schema as { items?: unknown }).items;
+		if (typeof items === "object" && items !== null) {
+			missing.push(...undocumentedArguments(items, `${path}[].`));
+		}
+		return missing;
+	}
+
+	test("every built-in tool argument has a description", () => {
 		for (const tool of bridgeTools()) {
+			assert.deepStrictEqual(undocumentedArguments(tool.inputSchema), [], `${tool.name} has arguments without a description`);
+		}
+	});
+
+	test("every bridge chat tool description is present and fits the Coco CLI budget", () => {
+		for (const tool of bridgeTools()) {
+			assert.ok(tool.description.trim().length > 0, `${tool.name} has no description`);
 			const size = length(tool.description);
 			assert.ok(size <= COCO_TOOL_DESCRIPTION_LIMIT, `${tool.name}: ${size} characters, limit ${COCO_TOOL_DESCRIPTION_LIMIT}`);
 		}

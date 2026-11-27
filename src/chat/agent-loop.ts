@@ -283,7 +283,7 @@ export async function runAgentTurn(request: AgentTurnRequest): Promise<{ rounds:
 			return { rounds: round, stopReason: "yielded" };
 		}
 	}
-	const notice: ChatStructuredPart = { kind: "notice", level: "warning", text: `The turn stopped after ${maxRounds} tool rounds.` };
+	const notice: ChatStructuredPart = { kind: "notice", level: "warning", text: `The turn stopped after ${maxRounds} tool rounds. Continue with a narrower follow-up task, or split the work into smaller steps.` };
 	request.sink.part(notice);
 	parts.push(notice);
 	return { rounds: maxRounds, stopReason: "maxRounds" };

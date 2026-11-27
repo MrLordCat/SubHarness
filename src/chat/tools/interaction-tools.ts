@@ -30,12 +30,13 @@ export function createTodoTool(): ChatTool {
 				todoList: {
 					type: "array",
 					maxItems: 50,
+					description: "Every todo item; it replaces the previous list, so send the whole list each time.",
 					items: {
 						type: "object",
 						properties: {
-							id: { type: "integer", minimum: 1 },
+							id: { type: "integer", minimum: 1, description: "Item number, kept stable across updates." },
 							title: { type: "string", description: "3-7 word action label." },
-							status: { type: "string", enum: ["not-started", "in-progress", "completed"] },
+							status: { type: "string", enum: ["not-started", "in-progress", "completed"], description: "Where the item stands now." },
 						},
 						required: ["id", "title", "status"],
 					},
@@ -188,26 +189,28 @@ export function createAskQuestionsTool(): ChatTool {
 					type: "array",
 					minItems: 1,
 					maxItems: 5,
+					description: "Questions to ask, from 1 to 5.",
 					items: {
 						type: "object",
 						properties: {
 							header: { type: "string", maxLength: 50, description: "Short unique label, used to match the answer." },
-							question: { type: "string", maxLength: 300 },
+							question: { type: "string", maxLength: 300, description: "The question text." },
 							message: { type: "string", description: "Optional extra context shown under the question." },
 							options: {
 								type: "array",
 								maxItems: 10,
+								description: "Choices to offer; omit for a free-text answer.",
 								items: {
 									type: "object",
 									properties: {
-										label: { type: "string" },
-										description: { type: "string" },
-										recommended: { type: "boolean" },
+										label: { type: "string", description: "Short answer shown on the button." },
+										description: { type: "string", description: "Optional detail shown under the label." },
+										recommended: { type: "boolean", description: "Marks the choice you recommend (default false)." },
 									},
 									required: ["label"],
 								},
 							},
-							multiSelect: { type: "boolean" },
+							multiSelect: { type: "boolean", description: "Allow several choices at once (default false)." },
 							allowFreeformInput: { type: "boolean", description: "Lets the user type an answer; default true." },
 						},
 						required: ["header", "question"],

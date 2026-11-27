@@ -28,6 +28,6 @@ suite("changes_diff tool", () => {
 		});
 		assert.deepStrictEqual(result, { text: "1 file changed in this turn", isError: false });
 		assert.deepStrictEqual(asked, [{ scope: "turn", paths: ["a.ts"] }]);
-		await assert.rejects(tool.invoke({}, token, {}), /does not track file changes/);
+		await assert.rejects(tool.invoke({}, token, {}), /does not track file changes.*Review the changed files with read_file/);
 	});
 });

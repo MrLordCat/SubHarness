@@ -74,6 +74,7 @@ const SEARCH_SCHEMA = {
 		limit: { type: "number", minimum: 1, maximum: 50, description: "Maximum number of entries to return." },
 		includeExpired: { type: "boolean", description: "Include expired entries for maintenance and review." },
 		scope: { type: "string", enum: SCOPE_ENUM, description: "Optionally restrict results to global memory or memory owned by the current project." },
+		full: { type: "boolean", description: "Return the complete text of every entry instead of clipping long ones (default false)." },
 	},
 	additionalProperties: false,
 };

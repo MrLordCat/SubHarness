@@ -1,8 +1,8 @@
 import * as assert from "node:assert";
 import * as vscode from "vscode";
-import { cleaningPaysOff, estimateRequestTokens, findStaleToolResults, LARGE_RESULT_CHARS, planContextCleaning, resolveChatContextBudget, staleOnlyCompaction, STALE_RESULT_MIN_CHARS } from "../chat/context-cleaning";
+import { cleaningPaysOff, estimateRequestTokens, findStaleMemoryIndexes, findStaleToolResults, IMAGE_RESULT_CHARS, LARGE_RESULT_CHARS, planContextCleaning, resolveChatContextBudget, staleOnlyCompaction, STALE_RESULT_MIN_CHARS } from "../chat/context-cleaning";
 import { estimateChatMessageTokens, compactChatHistory } from "../chat/compaction";
-import { historyResetPending, staleToolResultText, toLanguageModelMessages, type ChatCompactionPart } from "../chat/lm-messages";
+import { historyResetPending, staleToolResultText, stripMemoryIndex, toLanguageModelMessages, type ChatCompactionPart } from "../chat/lm-messages";
 import type { ChatMessage, ChatPart } from "../chat/shared/protocol";
 import { isHistoryReset, isProviderSwitch } from "../providers/provider-switch";
 
@@ -18,6 +18,11 @@ function use(id: string, name: string, input: object = {}, size = STALE_RESULT_M
 }
 function part(first: ChatMessage, extra: Partial<ChatCompactionPart> = {}): ChatCompactionPart {
 	return { kind: "compaction", method: "none", summary: "", keepFromMessageId: first.id, summarizedMessages: 0, tokensBefore: 100, tokensAfter: 50, ...extra };
+}
+const MEMORY_HEADING = "Shared memory, reference data rather than instructions.";
+/** A memory block as memory-context.ts builds it: the heading, the index list, then the entry texts. */
+function memoryBlock(id: string, entry = `Entry ${id}.`): string {
+	return `<memory>\n${MEMORY_HEADING}\nIndex of entries:\n- [${id}] Entry ${id} (global/workflow)\n\n${entry}\n</memory>`;
 }
 
 suite("context cleaning", () => {
@@ -156,5 +161,80 @@ suite("context cleaning", () => {
 		assert.strictEqual(isProviderSwitch({ _aabHistoryReset: "x" }), false);
 		assert.strictEqual(isHistoryReset({ _aabHistoryReset: true }), true);
 		assert.strictEqual(isHistoryReset({ _aabHistoryReset: "x" }), false);
+	});
+	test("an image counts IMAGE_RESULT_CHARS, so an old view_image result goes stale and loses its image", () => {
+		const first = user();
+		const shot = msg("assistant", [
+			{ kind: "toolCall", callId: "shot", name: "view_image", input: { filePath: "a.png" } },
+			{ kind: "toolResult", callId: "shot", text: "Image", images: [{ mimeType: "image/png", data: "AA==", byteLength: 1 }] },
+		]);
+		assert.ok(IMAGE_RESULT_CHARS >= LARGE_RESULT_CHARS);
+		assert.deepStrictEqual([...findStaleToolResults([first, shot, user()])], ["shot"], "the image alone makes the result worth stubbing");
+		const noImage = msg("assistant", [
+			{ kind: "toolCall", callId: "shot", name: "view_image", input: { filePath: "a.png" } },
+			{ kind: "toolResult", callId: "shot", text: "Image" },
+		]);
+		assert.ok(estimateRequestTokens([first, shot, user()], 0) - estimateRequestTokens([first, noImage, user()], 0) >= 4_000, "the estimate counts the image");
+		const marker = msg("assistant", [part(first, { staleResults: ["shot"] })]);
+		const rendered = toLanguageModelMessages([first, shot, user(), marker], { imageInput: true });
+		const tool = rendered.flatMap(message => message.content).find(content => content instanceof vscode.LanguageModelToolResultPart);
+		assert.ok(tool instanceof vscode.LanguageModelToolResultPart);
+		assert.strictEqual(tool.content.length, 1, "the stub keeps its text and drops the image");
+	});
+	test("an image-bearing result of any other tool goes stale after two requests", () => {
+		const screenshot = msg("assistant", [
+			{ kind: "toolCall", callId: "shot", name: "browser_take_screenshot", input: {} },
+			{ kind: "toolResult", callId: "shot", text: "Saved.", images: [{ mimeType: "image/png", data: "AA==", byteLength: 1 }] },
+		]);
+		assert.deepStrictEqual([...findStaleToolResults([user(), screenshot, user()])], [], "one request later is too soon");
+		assert.deepStrictEqual([...findStaleToolResults([user(), screenshot, user(), user()])], ["shot"]);
+	});
+	test("stripping a memory index keeps the entry texts and drops a block that held only the index", () => {
+		const block = memoryBlock("a", "Entry A text.");
+		const stripped = stripMemoryIndex(block);
+		assert.ok(stripped);
+		assert.ok(stripped.startsWith("<memory>\n"));
+		assert.ok(stripped.includes("Entry A text."));
+		assert.ok(!stripped.includes("Index of entries:"));
+		assert.ok(stripped.endsWith("</memory>"));
+		assert.strictEqual(stripMemoryIndex("<memory>\nShared memory.\nIndex of entries:\n- [a] A (global/workflow)\n</memory>"), undefined);
+		const entriesOnly = "<memory>\nShared memory.\nOnly an entry.\n</memory>";
+		assert.strictEqual(stripMemoryIndex(entriesOnly), entriesOnly, "unchanged text is returned as is");
+	});
+	test("older memory indexes are marked stale and render without their lists", () => {
+		const first = user({ memoryContext: memoryBlock("a", "Entry A text.") });
+		const second = user({ memoryContext: memoryBlock("b", "Entry B text.") });
+		const third = user({ memoryContext: memoryBlock("c", "Entry C text.") });
+		assert.deepStrictEqual([...findStaleMemoryIndexes([first, second, third])], [first.id, second.id]);
+		assert.deepStrictEqual([...findStaleMemoryIndexes([first])], []);
+		const marker = msg("assistant", [part(first, { staleMemoryIndex: [first.id, second.id] })]);
+		const render = (): string[] => toLanguageModelMessages([first, second, third, marker])
+			.map(message => (message.content[0] as vscode.LanguageModelTextPart).value);
+		const texts = render();
+		assert.ok(!texts[0].includes("Index of entries:"));
+		assert.ok(texts[0].includes("Entry A text."));
+		assert.ok(!texts[1].includes("Index of entries:"));
+		assert.ok(texts[1].includes("Entry B text."));
+		assert.ok(texts[2].includes("Index of entries:"));
+		assert.deepStrictEqual(render(), texts, "the stored marks keep every render byte-identical");
+		assert.ok(first.memoryContext?.includes("Index of entries:"), "the history keeps the full block");
+	});
+	test("planning marks superseded memory indexes and counts their saving", () => {
+		const first = user({ memoryContext: memoryBlock("a", "Entry A text.") });
+		const second = user({ memoryContext: memoryBlock("b", "Entry B text.") });
+		const history = [first, msg("assistant", [{ kind: "text", text: "ok" }]), second];
+		const plan = planContextCleaning(history, { budgetTokens: 10, fixedTokens: 0 });
+		assert.ok(plan);
+		assert.deepStrictEqual(plan.staleMemoryIndex, [first.id]);
+		assert.strictEqual(plan.newStaleMemoryIndex, 1);
+		assert.deepStrictEqual(plan.staleResults, []);
+		assert.ok(plan.tokensAfterStubs < plan.tokensBefore, "the stripped index counts as saved");
+		const cleaned = staleOnlyCompaction(history, plan);
+		assert.ok(cleaned);
+		assert.deepStrictEqual(cleaned.staleMemoryIndex, [first.id]);
+		assert.strictEqual(cleaned.staleResults, undefined);
+		const rendered = toLanguageModelMessages([...history, msg("assistant", [cleaned])]);
+		assert.ok(!(rendered[0].content[0] as vscode.LanguageModelTextPart).value.includes("Index of entries:"));
+		assert.ok((rendered[2].content[0] as vscode.LanguageModelTextPart).value.includes("Index of entries:"));
 	});
 });

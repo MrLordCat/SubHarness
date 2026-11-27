@@ -375,7 +375,7 @@ async function fetchPage(
 		if (type === "text/html" || type === "application/xhtml+xml") {
 			text = htmlToText(text);
 		} else if (!isTextType(type)) {
-			throw new Error(`Unsupported content type ${type}.`);
+			throw new Error(`Unsupported content type ${type}. fetch_webpage reads HTML, plain text, JSON and XML; try another URL that serves one of those.`);
 		}
 		text = limitText(text, query);
 		if (body.cut) {

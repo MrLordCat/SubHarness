@@ -94,6 +94,14 @@ suite("Chat core tools", () => {
 		await assert.rejects(invoke("read_file", { filePath: "folder" }), /use list_dir/);
 	});
 
+	test("read_file names a bad line number and says how to recover", async () => {
+		await fsp.writeFile(path.join(tmpDir, "two.txt"), "a\nb\n", "utf8");
+		await assert.rejects(
+			invoke("read_file", { filePath: "two.txt", startLine: 1.5 }),
+			/"startLine" must be a whole number ≥ 1; got 1\.5\. Omit it to use the default\./
+		);
+	});
+
 	test("view_image returns a PNG as text and base64 image data", async () => {
 		const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 		await fsp.writeFile(path.join(tmpDir, "pixel.png"), png);

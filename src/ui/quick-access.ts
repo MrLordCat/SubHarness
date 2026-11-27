@@ -421,7 +421,7 @@ function usageLimitItem(id: string, label: string, description: string, source: 
 
 function codexUsageLimitItem(id: string, label: string, description: string): QuickAccessItem {
 	return usageLimitItem(id, label, description, {
-		tooltip: "ChatGPT subscription usage windows from the official Codex rate-limits endpoint (5-hour and weekly windows on Plus/Pro plans). Refreshes automatically every minute so you can see when each limit resets.",
+		tooltip: "ChatGPT subscription usage windows from the official Codex rate-limits endpoint (5-hour and weekly windows on Plus/Pro plans). Refreshes after each request, when Quick Access opens, after a reset and every 15 minutes.",
 		resetTooltip: "Reset moment of this subscription window (local time), reported by the Codex rate-limits endpoint.",
 		command: command("llamacpp.codexShowStatus", "Show Codex Subscription Status"),
 	});
@@ -775,7 +775,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 				}),
 				new QuickAccessItem("deepseek.balance", "Balance", {
 					description: this.getDeepSeekBalance() ?? "n/a",
-					tooltip: "DeepSeek account balance from the official /user/balance endpoint. Refreshes automatically every minute.",
+					tooltip: "DeepSeek account balance from the official /user/balance endpoint. Refreshes after each DeepSeek request, when Quick Access opens and every 15 minutes.",
 					icon: new vscode.ThemeIcon("credit-card"),
 					command: command("llamacpp.openSettings", "Open Settings"),
 				}),

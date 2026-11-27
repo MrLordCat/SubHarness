@@ -99,7 +99,7 @@ export function createCloseSubagentTool(options: SubagentToolOptions): ChatTool 
 		name: CLOSE_SUBAGENT_TOOL_NAME,
 		group: CHAT_TOOL_GROUPS.agents,
 		description: "Close an open subagent of this chat once its work is accepted; it frees its context and its idle terminals. Open subagents are listed in the host context.",
-		inputSchema: { type: "object", properties: { subagentId: { type: "string" } }, required: ["subagentId"] },
+		inputSchema: { type: "object", properties: { subagentId: { type: "string", description: "Id of the open subagent, as returned when it was started or shown in the host context." } }, required: ["subagentId"] },
 		available: () => options.models().length > 0,
 		invoke: async (input, _token, context) => {
 			if (!context?.closeSubagent) {

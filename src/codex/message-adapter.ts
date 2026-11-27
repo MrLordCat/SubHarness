@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as vscode from "vscode";
 
 import { bytesToBase64, isCacheControlPart } from "../utils";
+import { toolResultCharLimit } from "../tools/tool-result-limits";
 import type { CodexDynamicToolCallResponse } from "./dynamic-tools";
 
 interface SerializedConversationMessage {
@@ -31,6 +32,8 @@ export interface CodexConversationSerializationOptions {
 
 export interface CodexToolContinuation {
 	callId: string;
+	/** Name of the tool call the result answers, when the call is in the messages. */
+	name?: string;
 	messages: readonly vscode.LanguageModelChatRequestMessage[];
 	result: vscode.LanguageModelToolResultPart;
 }
@@ -432,6 +435,7 @@ export function serializeCodexConversation(
 		Math.min(MAX_MAX_TOOL_RESULT_CHARS, configuredToolResultMax)
 	);
 	let truncatedToolResultCount = 0;
+	const callNames = new Map<string, string>();
 
 	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
 		const message = messages[messageIndex];
@@ -442,11 +446,12 @@ export function serializeCodexConversation(
 				continue;
 			}
 			if (part instanceof vscode.LanguageModelToolCallPart) {
+				callNames.set(part.callId, part.name);
 				content.push(`[VS Code tool call: ${part.name}, call id: ${part.callId}]\n${JSON.stringify(part.input ?? {})}`);
 				continue;
 			}
 			if (part instanceof vscode.LanguageModelToolResultPart) {
-				const toolResult = collectToolResultContent(part, maxToolResultChars);
+				const toolResult = collectToolResultContent(part, toolResultCharLimit(callNames.get(part.callId), maxToolResultChars));
 				if (toolResult.truncated) {
 					truncatedToolResultCount++;
 				}
@@ -567,6 +572,14 @@ export function findCodexToolContinuations(
 ): CodexToolContinuation[] {
 	const found = new Map<string, CodexToolContinuation>();
 	const tailStart = codexTurnTailStart(messages);
+	const callNames = new Map<string, string>();
+	for (const message of messages) {
+		for (const part of message.content) {
+			if (part instanceof vscode.LanguageModelToolCallPart) {
+				callNames.set(part.callId, part.name);
+			}
+		}
+	}
 	for (let messageIndex = messages.length - 1; messageIndex >= tailStart; messageIndex--) {
 		const message = messages[messageIndex];
 		for (let partIndex = message.content.length - 1; partIndex >= 0; partIndex--) {
@@ -576,8 +589,10 @@ export function findCodexToolContinuations(
 				&& pendingCallIds.has(part.callId)
 				&& !found.has(part.callId)
 			) {
+				const name = callNames.get(part.callId);
 				found.set(part.callId, {
 					callId: part.callId,
+					...(name ? { name } : {}),
 					messages: messages.slice(messageIndex),
 					result: part,
 				});
@@ -589,12 +604,13 @@ export function findCodexToolContinuations(
 
 export function convertCodexToolResult(
 	part: vscode.LanguageModelToolResultPart,
-	maxChars: number
+	maxChars: number,
+	toolName?: string
 ): CodexDynamicToolCallResponse {
-	const boundedMaxChars = Math.max(
+	const boundedMaxChars = toolResultCharLimit(toolName, Math.max(
 		MIN_MAX_TOOL_RESULT_CHARS,
 		Math.min(MAX_MAX_TOOL_RESULT_CHARS, Number.isFinite(maxChars) ? Math.floor(maxChars) : DEFAULT_MAX_TOOL_RESULT_CHARS)
-	);
+	));
 	const contentItems: CodexDynamicToolCallResponse["contentItems"] = [];
 	const textParts: string[] = [];
 	for (const content of part.content) {

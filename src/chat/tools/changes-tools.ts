@@ -66,7 +66,7 @@ export function createChangesDiffTool(): ChatTool {
 		invoke: async (input, _token, context) => {
 			const request = parseChangesDiffInput(input);
 			if (!context?.changesDiff) {
-				throw new Error("This chat does not track file changes, so there is no diff to show.");
+				throw new Error("This chat does not track file changes, so there is no diff to show. Review the changed files with read_file, or run git diff in a terminal.");
 			}
 			return context.changesDiff(request);
 		},

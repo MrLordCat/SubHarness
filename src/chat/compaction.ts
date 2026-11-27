@@ -11,7 +11,7 @@ import { estimateSharedMessageTokens } from "../context/provider-handoff";
 import { parseProviderModelId } from "../model-sources/source-routing";
 import { detectBalanceError } from "../providers/balance-errors";
 import type { OpenAIChatMessage, OpenAIToolCall } from "../types";
-import { activeCompaction, compactionSummaryText, compactionWindow, hasCompactionSummary, renderChatMessage, shortenToolResults, type ChatCompactionPart } from "./lm-messages";
+import { activeCompaction, compactionSummaryText, compactionWindow, hasCompactionSummary, hasMemoryIndex, renderChatMessage, shortenToolResults, withoutMemoryIndex, type ChatCompactionPart } from "./lm-messages";
 import type { ChatMessage, ChatPart } from "./shared/protocol";
 
 /** Size a chat is cut down to before another model takes it over. */
@@ -56,6 +56,8 @@ export interface ChatCompactionPlan {
 	trimmedTurn?: ChatCompactionPart["trimmedTurn"];
 	/** Kept messages before this user message reach the model with long tool results shortened. */
 	abbreviatedUntil?: string;
+	/** Ids of kept user messages whose memory index a later message's index replaces. */
+	staleMemoryIndex?: string[];
 	/** The user's summarized requests, verbatim, for the new part. */
 	requests?: string[];
 }
@@ -258,10 +260,15 @@ export function planChatCompaction(history: readonly ChatMessage[], limits: Chat
 	if (latestUser < 0) {
 		return undefined;
 	}
-	const kept = window.map((message, index) => {
+	// A later memory block supersedes every earlier index: the kept messages lose the lists but keep their entries.
+	const earlierMemory = new Set(active?.part.staleMemoryIndex ?? []);
+	const withIndex = window.filter(message => message.role === "user" && hasMemoryIndex(message.memoryContext));
+	const staleMemory = new Set([...withIndex.slice(0, -1).map(message => message.id), ...earlierMemory]);
+	const shortened = window.map((message, index) => {
 		const parts = index < latestUser ? shortenToolResults(message.parts) : message.parts;
 		return parts === message.parts ? message : { ...message, parts };
 	});
+	const kept = shortened.map(message => staleMemory.has(message.id) ? withoutMemoryIndex(message) : message);
 	const costs = kept.map(estimateChatMessageTokens);
 	const sum = (from: number, to: number): number => costs.slice(from, to).reduce((total, cost) => total + cost, 0);
 	const budget = limits.targetTokens - fixed - CHAT_COMPACTION_SUMMARY_RESERVE_TOKENS;
@@ -300,7 +307,9 @@ export function planChatCompaction(history: readonly ChatMessage[], limits: Chat
 		const fromPart = view.partOffsets[keepFrom + 1] + trim.fromPart;
 		trimmedTurn = { messageId: original.id, fromPart, rounds: Math.max(1, roundStarts(original.parts).indexOf(fromPart) + 1) };
 	}
-	const abbreviated = kept.some((message, index) => index >= keepFrom && index < latestUser && message !== window[index]);
+	const abbreviated = shortened.some((message, index) => index >= keepFrom && index < latestUser && message !== window[index]);
+	// Only messages the new part keeps reach the model; the marks of the summarized ones go with them.
+	const staleMemoryIndex = window.flatMap((message, index) => index >= keepFrom && staleMemory.has(message.id) ? [message.id] : []);
 	return {
 		keepFrom: start + keepFrom,
 		dropped,
@@ -310,6 +319,7 @@ export function planChatCompaction(history: readonly ChatMessage[], limits: Chat
 		keptTokens: fixed + keptCost,
 		...(trimmedTurn ? { trimmedTurn } : {}),
 		...(abbreviated ? { abbreviatedUntil: window[latestUser].id } : {}),
+		...(staleMemoryIndex.length > 0 ? { staleMemoryIndex } : {}),
 		...(requests.length > 0 ? { requests } : {}),
 	};
 }
@@ -517,6 +527,7 @@ export async function compactChatHistory(history: readonly ChatMessage[], option
 		...(result.fallbackReason ? { fallbackReason: result.fallbackReason } : {}),
 		...(options.transcriptPath ? { transcriptPath: options.transcriptPath } : {}),
 		...(stale.length > 0 ? { staleResults: stale } : {}),
+		...(plan.staleMemoryIndex?.length ? { staleMemoryIndex: [...plan.staleMemoryIndex] } : {}),
 	};
 	part.tokensAfter = plan.keptTokens + estimateTextTokens(compactionSummaryText(part));
 	return part;

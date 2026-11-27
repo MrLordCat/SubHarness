@@ -49,6 +49,7 @@ suite("chat check tools", () => {
 		const source = new vscode.CancellationTokenSource();
 		try {
 			await assert.rejects(tool.invoke(input, source.token), /Unknown check missing\. Available: ok\./);
+			await assert.rejects(tool.invoke({ checks: "ok" }, source.token), /checks must be an array of check names\. Available: ok\./);
 		} finally {
 			source.dispose();
 		}

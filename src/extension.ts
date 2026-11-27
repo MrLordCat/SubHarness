@@ -828,7 +828,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	});
 	context.subscriptions.push(updater.onDidChange(() => quickActionsProvider.refresh()));
 	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => { if (event.affectsConfiguration(`${CONFIG_SECTION}.autoUpdate`)) { quickActionsProvider.refresh(); } }));
-	context.subscriptions.push(vscode.window.registerTreeDataProvider("llamacpp-quick-actions", quickActionsProvider));
+	const quickActionsView = vscode.window.createTreeView("llamacpp-quick-actions", { treeDataProvider: quickActionsProvider });
+	context.subscriptions.push(quickActionsView);
 	context.subscriptions.push(quickActionsProvider);
 	context.subscriptions.push(apiProviderService.onDidChangeContext(() => {
 		// A loaded catalog is also availability evidence (Cursor's probe can lag).
@@ -1006,11 +1007,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	for (const [accountId, provider] of allCodexProviders()) {
 		void provider.refreshStatus().then(status => {
 			subscriptionStatuses.set(codexAccountStatusKey(accountId), { state: status.state, summary: status.summary });
+			subscriptionUsage.observe(accountId ? `codex:${accountId}` : "codex", provider.subscriptionWindows);
 		}).catch(error => logService.logError("codex.initial_status.failed", error));
 	}
 	for (const [accountId, provider] of allClaudeProviders()) {
 		void provider.refreshStatus().then(status => {
 			subscriptionStatuses.set(claudeAccountStatusKey(accountId), { state: status.state, summary: status.summary });
+			subscriptionUsage.observe(accountId ? `claude:${accountId}` : "claude", provider.subscriptionWindows);
 		}).catch(error => logService.logError("claude.initial_status.failed", error));
 	}
 	// A freshly added account signs in right after the reload that created it.
@@ -1050,28 +1053,116 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		timer.unref?.();
 	}
 	void providerDirectory.recheck().catch(error => logService.logError("providers.initial_recheck.failed", error));
+	// The DeepSeek balance endpoint is skipped by the provider when no DeepSeek key is saved.
 	void llamaProvider.refreshDeepSeekBalance().catch(error => logService.logError("deepseek.balance.initial_failed", error));
 
-	// Auto-refresh provider usage limits and balances so Quick Access shows when
-	// a subscription window resets without requiring a manual refresh. Every
-	// provider refresh is internally TTL-guarded, so this stays lightweight.
-	const usageLimitRefreshTimer = setInterval(() => {
-		quickActionsProvider.refresh();
-		ApiProviderManagerPanel.refreshIfOpen();
-		void llamaProvider.refreshDeepSeekBalance().catch(error => logService.logError("deepseek.periodic_balance.failed", error));
+	/**
+	 * Provider usage windows and balances (DeepSeek balance, Codex status, Claude
+	 * usage) cost a network or IPC request each. They are refreshed at startup
+	 * (above), when Quick Access becomes visible, from the manual refresh, and by
+	 * the idle 15-minute timer below: never from the cheap 60-second UI timer.
+	 */
+	let providerUsageRefresh: Promise<void> | undefined;
+	const refreshProviderUsage = (force = false): Promise<void> => {
+		if (providerUsageRefresh) {
+			return providerUsageRefresh;
+		}
+		const deepSeekEnabled = vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>("enableDeepSeek", true) !== false;
+		const tasks: Array<Promise<unknown>> = [];
+		if (deepSeekEnabled) {
+			tasks.push(llamaProvider.refreshDeepSeekBalance(force).catch(error => logService.logError("deepseek.periodic_balance.failed", error)));
+		}
 		for (const [accountId, provider] of allCodexProviders()) {
 			subscriptionUsage.observe(accountId ? `codex:${accountId}` : "codex", provider.subscriptionWindows);
-			void provider.refreshStatus().catch(error => logService.logError("codex.periodic_status.failed", error));
+			tasks.push(provider.refreshStatus().catch(error => logService.logError("codex.periodic_status.failed", error)));
 		}
 		for (const [accountId, provider] of allClaudeProviders()) {
 			const ledgerProvider: SubscriptionProvider = accountId ? `claude:${accountId}` : "claude";
 			subscriptionUsage.observe(ledgerProvider, provider.subscriptionWindows);
-			void provider.refreshSubscriptionUsage().catch(error => logService.logError("claude.periodic_usage.failed", error));
+			// Forcing skips the idle grace that otherwise keeps the Claude CLI
+			// probe off; only an account that can answer is worth probing.
+			tasks.push(provider.refreshSubscriptionUsage(force && !provider.needsSignIn)
+				.catch(error => logService.logError("claude.periodic_usage.failed", error)));
 		}
-		void subscriptionUsage.refresh().catch(error => logService.logError("subscription_usage.refresh_failed", error));
+		tasks.push(subscriptionUsage.refresh().catch(error => logService.logError("subscription_usage.refresh_failed", error)));
+		providerUsageRefresh = Promise.allSettled(tasks).then(() => {
+			providerUsageRefresh = undefined;
+		});
+		return providerUsageRefresh;
+	};
+
+	// A known window reset that has already passed: refresh that provider once
+	// so the chat and Quick Access do not keep showing a used-up window.
+	const refreshedExpiredResets = new Set<string>();
+	const refreshAfterExpiredWindows = (): void => {
+		const now = Date.now();
+		const expiredReset = (windows: { fiveHour?: { utilization: number; resetsAt?: string }; weekly?: { utilization: number; resetsAt?: string } }): string | undefined => {
+			for (const window of [windows.fiveHour, windows.weekly]) {
+				if (window && window.utilization >= 100 && window.resetsAt !== undefined) {
+					const resetAt = Date.parse(window.resetsAt);
+					if (Number.isFinite(resetAt) && resetAt <= now) {
+						return window.resetsAt;
+					}
+				}
+			}
+			return undefined;
+		};
+		for (const [accountId, provider] of allCodexProviders()) {
+			const resetsAt = expiredReset(provider.subscriptionWindows);
+			const key = `codex:${accountId}:${resetsAt}`;
+			if (resetsAt === undefined || refreshedExpiredResets.has(key)) {
+				continue;
+			}
+			refreshedExpiredResets.add(key);
+			void provider.refreshStatus().catch(error => logService.logError("codex.reset_refresh.failed", error));
+		}
+		for (const [accountId, provider] of allClaudeProviders()) {
+			const resetsAt = expiredReset(provider.subscriptionWindows);
+			const key = `claude:${accountId}:${resetsAt}`;
+			if (resetsAt === undefined || refreshedExpiredResets.has(key)) {
+				continue;
+			}
+			refreshedExpiredResets.add(key);
+			if (!provider.needsSignIn) {
+				void provider.refreshSubscriptionUsage(true).catch(error => logService.logError("claude.reset_refresh.failed", error));
+			}
+		}
+	};
+
+	// Cheap local re-render only: labels such as "resets in N min" stay fresh
+	// while the view is visible, and nothing is redrawn while it is hidden.
+	const usageLimitRefreshTimer = setInterval(() => {
+		if (quickActionsView.visible) {
+			quickActionsProvider.refresh();
+		}
+		ApiProviderManagerPanel.refreshIfOpen();
 		SessionQualityPanel.refreshIfOpen();
+		refreshAfterExpiredWindows();
 	}, 60_000);
-	context.subscriptions.push(new vscode.Disposable(() => clearInterval(usageLimitRefreshTimer)));
+	const providerUsageRefreshTimer = setInterval(() => {
+		void refreshProviderUsage();
+	}, 15 * 60_000);
+	context.subscriptions.push(
+		new vscode.Disposable(() => clearInterval(usageLimitRefreshTimer)),
+		new vscode.Disposable(() => clearInterval(providerUsageRefreshTimer))
+	);
+
+	// Opening Quick Access is the user asking to see the current limits. At most
+	// one full (network/IPC) refresh per 5 minutes; re-opening sooner only
+	// re-renders the already updated data.
+	const VISIBILITY_USAGE_REFRESH_MS = 5 * 60_000;
+	// Startup already refreshed everything; opening the view right after must not double it.
+	let lastVisibilityUsageRefreshAt = Date.now();
+	context.subscriptions.push(quickActionsView.onDidChangeVisibility(event => {
+		if (!event.visible) {
+			return;
+		}
+		if (Date.now() - lastVisibilityUsageRefreshAt >= VISIBILITY_USAGE_REFRESH_MS) {
+			lastVisibilityUsageRefreshAt = Date.now();
+			void refreshProviderUsage(true);
+		}
+		quickActionsProvider.refresh();
+	}));
 
 const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 95);
 	performanceStatusBar.name = "Local LLM Throughput";
@@ -2341,12 +2432,8 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 			refreshAllCodexCatalogs();
 			refreshAllClaudeCatalogs();
 			cocoProvider.refreshLanguageModelChatInformation();
-			for (const provider of codexProviders.values()) {
-				void provider.refreshStatus();
-			}
-			for (const provider of claudeProviders.values()) {
-				void provider.refreshStatus();
-			}
+			// Also refreshes the DeepSeek balance and the usage windows Quick Access shows.
+			void refreshProviderUsage(true);
 			quickActionsProvider.refresh();
 			vscode.window.showInformationMessage("Local, DeepSeek, Codex, Claude, and Coco models refreshed.");
 		})

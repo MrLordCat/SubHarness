@@ -67,6 +67,11 @@ export type ChatPart =
 		requests?: string[];
 		/** Call ids of tool results in kept messages that reach the model as a one-line stub. */
 		staleResults?: string[];
+		/**
+		 * Ids of kept user messages whose memory index a later message's index replaces: the model sees their memory
+		 * blocks without the index list, while their entry texts stay.
+		 */
+		staleMemoryIndex?: string[];
 		/** Set when self-cleaning over the chat context budget made the part, not a model switch. */
 		cleaning?: ChatContextCleaning;
 	}

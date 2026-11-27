@@ -120,6 +120,92 @@ export function stubStaleToolResults(parts: ChatPart[], stale: ReadonlySet<strin
 	return changed ? stubbed : parts;
 }
 
+const MEMORY_OPEN = "<memory>";
+const MEMORY_CLOSE = "</memory>";
+const MEMORY_INDEX_HEADER = "Index of entries:";
+
+/**
+ * Where the index list of the memory block opening at `open` starts: right after the block's heading line. Entry
+ * texts follow a blank line, so none of them is mistaken for the list.
+ */
+function memoryIndexMarker(lines: readonly string[], open: number): number | undefined {
+	const heading = open + 1;
+	if (lines[heading] === undefined || lines[heading].trim() === MEMORY_CLOSE) {
+		return undefined;
+	}
+	return lines[heading + 1]?.trim() === MEMORY_INDEX_HEADER ? heading + 1 : undefined;
+}
+
+/** True when a memory context carries the index list of the shared memory. */
+export function hasMemoryIndex(memoryContext: string | undefined): boolean {
+	if (memoryContext === undefined) {
+		return false;
+	}
+	const lines = memoryContext.split(/\r?\n/);
+	return lines.some((line, index) => line.trim() === MEMORY_OPEN && memoryIndexMarker(lines, index) !== undefined);
+}
+
+/** A line of an index list: an entry line, or the note that lists how many entries are left out. */
+function memoryIndexLine(line: string): boolean {
+	const trimmed = line.trim();
+	return trimmed.startsWith("- [") || /^\(\d+ more; use llamacpp_search_memory\)$/.test(trimmed);
+}
+
+/**
+ * A memory context without its index lists: a list is redundant once a later message carries a newer one, while the
+ * entry texts stay, as an older block may hold the only copy of an entry. Returns the same text when there is no
+ * list, and undefined when nothing but the heading remains, so the message loses its memory block.
+ */
+export function stripMemoryIndex(memoryContext: string): string | undefined {
+	const lines = memoryContext.split(/\r?\n/);
+	const kept: string[] = [];
+	let changed = false;
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index];
+		kept.push(line);
+		if (line.trim() !== MEMORY_OPEN) {
+			continue;
+		}
+		const marker = memoryIndexMarker(lines, index);
+		if (marker === undefined) {
+			continue;
+		}
+		kept.push(lines[index + 1]);
+		changed = true;
+		index = marker;
+		while (index + 1 < lines.length && memoryIndexLine(lines[index + 1])) {
+			index++;
+		}
+	}
+	if (!changed) {
+		return memoryContext;
+	}
+	const content = kept.filter(line => {
+		const trimmed = line.trim();
+		return trimmed !== "" && trimmed !== MEMORY_OPEN && trimmed !== MEMORY_CLOSE;
+	});
+	// The block held nothing but its heading and the index: the message keeps no memory block at all.
+	return content.length > 1 ? kept.join("\n") : undefined;
+}
+
+/** A message whose memory block loses its index list; the same message when it has no list or is not a user message. */
+export function withoutMemoryIndex(message: ChatMessage): ChatMessage {
+	if (message.role !== "user" || message.memoryContext === undefined) {
+		return message;
+	}
+	const memoryContext = stripMemoryIndex(message.memoryContext);
+	if (memoryContext === message.memoryContext) {
+		return message;
+	}
+	const stripped: ChatMessage = { ...message };
+	if (memoryContext === undefined) {
+		delete stripped.memoryContext;
+	} else {
+		stripped.memoryContext = memoryContext;
+	}
+	return stripped;
+}
+
 export interface CompactionWindow {
 	compaction?: { part: ChatCompactionPart; start: number };
 	/** The messages the model receives after the summary, as it receives them. */
@@ -128,7 +214,7 @@ export interface CompactionWindow {
 	partOffsets: number[];
 }
 
-/** The active compaction and the kept messages, with stale results stubbed, the trimmed turn cut and older tool outputs shortened. */
+/** The active compaction and the kept messages, with stale results stubbed, superseded memory indexes dropped, the trimmed turn cut and older tool outputs shortened. */
 export function compactionWindow(messages: readonly ChatMessage[]): CompactionWindow {
 	const compaction = activeCompaction(messages);
 	if (!compaction) {
@@ -137,6 +223,7 @@ export function compactionWindow(messages: readonly ChatMessage[]): CompactionWi
 	const kept = messages.slice(compaction.start);
 	const { trimmedTurn, abbreviatedUntil } = compaction.part;
 	const stale = new Set(compaction.part.staleResults ?? []);
+	const staleMemory = new Set(compaction.part.staleMemoryIndex ?? []);
 	const until = abbreviatedUntil ? kept.findIndex(message => message.id === abbreviatedUntil) : -1;
 	const partOffsets = kept.map(() => 0);
 	const view = kept.map((message, index) => {
@@ -148,7 +235,8 @@ export function compactionWindow(messages: readonly ChatMessage[]): CompactionWi
 		if (index < until) {
 			parts = shortenToolResults(parts);
 		}
-		return parts === message.parts ? message : { ...message, parts };
+		const rendered = parts === message.parts ? message : { ...message, parts };
+		return staleMemory.has(rendered.id) ? withoutMemoryIndex(rendered) : rendered;
 	});
 	return { compaction, messages: view, partOffsets };
 }

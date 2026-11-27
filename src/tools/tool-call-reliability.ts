@@ -197,7 +197,7 @@ function valueMatchesType(value: unknown, type: unknown): boolean {
 	}
 }
 
-function validateValue(value: unknown, schemaValue: unknown, path: string, issues: string[]): void {
+function validateValue(value: unknown, schemaValue: unknown, path: string, issues: string[], toolName?: string): void {
 	if (!schemaValue || typeof schemaValue !== "object") {
 		return;
 	}
@@ -205,7 +205,7 @@ function validateValue(value: unknown, schemaValue: unknown, path: string, issue
 	if (Array.isArray(schema.anyOf)) {
 		const matched = schema.anyOf.some(candidate => {
 			const candidateIssues: string[] = [];
-			validateValue(value, candidate, path, candidateIssues);
+			validateValue(value, candidate, path, candidateIssues, toolName);
 			return candidateIssues.length === 0;
 		});
 		if (!matched) {
@@ -215,7 +215,7 @@ function validateValue(value: unknown, schemaValue: unknown, path: string, issue
 	if (Array.isArray(schema.oneOf)) {
 		const matches = schema.oneOf.filter(candidate => {
 			const candidateIssues: string[] = [];
-			validateValue(value, candidate, path, candidateIssues);
+			validateValue(value, candidate, path, candidateIssues, toolName);
 			return candidateIssues.length === 0;
 		}).length;
 		if (matches !== 1) {
@@ -224,7 +224,7 @@ function validateValue(value: unknown, schemaValue: unknown, path: string, issue
 	}
 	if (Array.isArray(schema.allOf)) {
 		for (const candidate of schema.allOf) {
-			validateValue(value, candidate, path, issues);
+			validateValue(value, candidate, path, issues, toolName);
 		}
 	}
 	if (!valueMatchesType(value, schema.type)) {
@@ -275,7 +275,7 @@ function validateValue(value: unknown, schemaValue: unknown, path: string, issue
 		}
 	}
 	if (Array.isArray(value) && schema.items) {
-		value.forEach((item, index) => validateValue(item, schema.items, `${path}[${index}]`, issues));
+		value.forEach((item, index) => validateValue(item, schema.items, `${path}[${index}]`, issues, toolName));
 	}
 	if (Array.isArray(value)) {
 		if (typeof schema.minItems === "number" && value.length < schema.minItems) {
@@ -306,11 +306,14 @@ function validateValue(value: unknown, schemaValue: unknown, path: string, issue
 		}
 		for (const [name, child] of Object.entries(objectValue)) {
 			if (name in properties) {
-				validateValue(child, properties[name], `${path}.${name}`, issues);
+				validateValue(child, properties[name], `${path}.${name}`, issues, toolName);
 			} else if (schema.additionalProperties === false) {
-				issues.push(`${path}.${name} is not allowed`);
+				const allowed = Object.keys(properties);
+				issues.push(toolName && path === "$"
+					? `${toolName} does not take "${name}"; allowed: ${allowed.length > 0 ? allowed.join(", ") : "no arguments"}`
+					: `${path}.${name} is not allowed`);
 			} else if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
-				validateValue(child, schema.additionalProperties, `${path}.${name}`, issues);
+				validateValue(child, schema.additionalProperties, `${path}.${name}`, issues, toolName);
 			}
 		}
 		const propertyCount = Object.keys(objectValue).length;
@@ -323,9 +326,9 @@ function validateValue(value: unknown, schemaValue: unknown, path: string, issue
 	}
 }
 
-export function validateToolArguments(argumentsValue: Record<string, unknown>, schema: object | undefined): string[] {
+export function validateToolArguments(argumentsValue: Record<string, unknown>, schema: object | undefined, toolName?: string): string[] {
 	const issues: string[] = [];
-	validateValue(argumentsValue, schema, "$", issues);
+	validateValue(argumentsValue, schema, "$", issues, toolName);
 	return issues.slice(0, 8);
 }
 
@@ -541,13 +544,13 @@ export class ToolCallReliabilityGuard {
 			}
 		}
 		if (this.options.validateSchema && definition) {
-			let issues = validateToolArguments(parsed.value, definition.function.parameters);
+			let issues = validateToolArguments(parsed.value, definition.function.parameters, name);
 			const unknown = issues.length > 0 && this.options.repairEnabled
 				? unknownTopLevelProperties(parsed.value, definition.function.parameters)
 				: [];
 			if (unknown.length > 0) {
 				const trimmed = Object.fromEntries(Object.entries(parsed.value).filter(([name]) => !unknown.includes(name)));
-				if (validateToolArguments(trimmed, definition.function.parameters).length === 0) {
+				if (validateToolArguments(trimmed, definition.function.parameters, name).length === 0) {
 					for (const name of unknown) {
 						delete parsed.value[name];
 					}

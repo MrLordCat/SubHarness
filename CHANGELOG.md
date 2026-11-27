@@ -1,5 +1,46 @@
 # Changelog
 
+## 2.1.1 (development build) - 2026-11-26
+
+- Fixed: a subagent report reaches the agent whole. Claude cut every tool
+  result to 16,000 characters (Codex 12,000, HTTP 24,000) and dropped its
+  middle, so the main agent lost most of a long report it cannot fetch again.
+  `subagent` and `wait_subagents` results now pass up to 60,000 characters on
+  Claude, Codex (also in a replayed conversation) and HTTP models; longer ones
+  still keep their head and tail. Other tools keep the provider's limit.
+- Changed: context cleaning also removes old images. An image counts about
+  4,096 tokens, so a `view_image` result goes stale one request later and an
+  image in another tool's result counts as a large result; the stub keeps the
+  call and its path.
+- Changed: context cleaning keeps only the newest copy of the shared memory
+  index; older user messages lose their index, the entry texts stay.
+- Fixed: the cleaning budget counts the tool schemas, not only the system
+  prompt, so a chat with many tools is cleaned before it goes over.
+- Changed: provider usage is refreshed when it is needed instead of every
+  minute. The DeepSeek balance (only with `llamacpp.enableDeepSeek`), Codex
+  status and Claude usage refresh at startup, after requests, when Quick
+  Access opens (at most every 5 minutes), from its refresh button, once after
+  a known window reset, and every 15 minutes otherwise; the minute timer only
+  redraws a visible Quick Access. Catalog probes of API profiles run every 15
+  minutes instead of 5. An idle window sent about 47 such requests an hour.
+- Fixed: a Codex window whose reset time has passed no longer counts as used
+  up because of an old snapshot, and the Codex limit text names the window
+  that blocks with its own percent (a used-up week showed "(1%)").
+- Changed: DeepSeek reasoning is kept in `deepseek-reasoning-map.json` in the
+  extension's global storage instead of VS Code's state database (4 MB
+  rewritten every turn, with VS Code's "large extension state" warnings). It
+  is written only when it changes; the old key is moved once and cleared.
+- Changed: clearer tool errors and schemas. An unknown argument names the
+  allowed ones (`run_in_terminal does not take "maxResults"; allowed: …`), a
+  missing tool points to `list_tools` and `request_tools`, and edit, rename,
+  binary-file, web, `run_checks` and round-limit errors say what to do next.
+  `send_to_terminal` says that `text` is required unless `interrupt` is true,
+  memory search takes `full`, and every terminal and check parameter has a
+  description.
+- Changed: `chat.tool_results.execution_errors` and
+  `chat.tool_results.truncated` log the tool names and the start of each
+  error.
+
 ## 2.1.0 (stable release) - 2026-11-26
 
 Consolidates the 2.0.12 and 2.0.13 development builds below.

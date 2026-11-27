@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { estimateChatMessageTokens, estimateTextTokens } from "./compaction";
-import { activeCompaction, compactionSummaryText, compactionWindow, hasCompactionSummary, stubStaleToolResults, type ChatCompactionPart } from "./lm-messages";
+import { activeCompaction, compactionSummaryText, compactionWindow, hasCompactionSummary, hasMemoryIndex, stubStaleToolResults, withoutMemoryIndex, type ChatCompactionPart } from "./lm-messages";
 import type { ChatMessage, ChatPart } from "./shared/protocol";
 import { ASK_QUESTIONS_TOOL_NAME, TODO_TOOL_NAME } from "./tools/interaction-tools";
 import { CLOSE_SUBAGENT_TOOL_NAME, SUBAGENT_TOOL_NAME, WAIT_SUBAGENTS_TOOL_NAME } from "./tools/subagent-tool";
@@ -25,6 +25,11 @@ export const STALE_RESULT_MIN_CHARS = 1_200;
 /** Results this long go stale after LARGE_RESULT_MIN_AGE requests whatever the tool. */
 export const LARGE_RESULT_CHARS = 8_000;
 export const LARGE_RESULT_MIN_AGE = 2;
+/**
+ * What one image adds to a tool result's size. The chat's own estimate counts an image as about 4,096 tokens
+ * (estimateSharedMessageTokens) at two characters per token, so an image weighs like this many characters.
+ */
+export const IMAGE_RESULT_CHARS = 8_192;
 /** The chat's estimate counts two bytes a token; providers report about half that. */
 const DEFAULT_TOKEN_SCALE = 0.5;
 const MIN_TOKEN_SCALE = 0.2;
@@ -136,7 +141,8 @@ function toolUses(messages: readonly ChatMessage[]): ToolUse[] {
 			} else if (part.kind === "toolResult") {
 				const call = calls.get(part.callId);
 				if (call) {
-					uses.push({ callId: part.callId, name: call.name, input: record(call.input), message: index, age: requestsAfter[index], resultChars: part.text.length });
+					const images = part.images?.length ?? 0;
+					uses.push({ callId: part.callId, name: call.name, input: record(call.input), message: index, age: requestsAfter[index], resultChars: part.text.length + images * IMAGE_RESULT_CHARS });
 				}
 			}
 		}
@@ -148,7 +154,8 @@ function toolUses(messages: readonly ChatMessage[]): ToolUse[] {
  * Tool results of earlier requests that no longer help: a file read that a later call rewrote or read again in
  * full, a command or check that ran again later, a lookup from an earlier request, or a large result
  * LARGE_RESULT_MIN_AGE requests old. Results of the current request, subagent reports, answers, the todo plan and
- * memory are kept.
+ * memory are kept. An image counts IMAGE_RESULT_CHARS, so a view_image result goes stale one request later and an
+ * image-bearing result of any other tool counts as a large result.
  */
 export function findStaleToolResults(messages: readonly ChatMessage[]): Set<string> {
 	const uses = toolUses(messages);
@@ -179,6 +186,15 @@ export function findStaleToolResults(messages: readonly ChatMessage[]): Set<stri
 		}
 	});
 	return stale;
+}
+
+/**
+ * User messages whose memory index a later message's index replaces: every index-bearing message but the newest.
+ * The entry texts stay in every message, so an older block may still hold the only copy of an entry.
+ */
+export function findStaleMemoryIndexes(messages: readonly ChatMessage[]): Set<string> {
+	const withIndex = messages.filter(message => message.role === "user" && hasMemoryIndex(message.memoryContext));
+	return new Set(withIndex.slice(0, -1).map(message => message.id));
 }
 
 /** The prompt tokens the provider reported for the chat's last request. */
@@ -235,6 +251,10 @@ export interface ContextCleaningPlan {
 	newStale: number;
 	/** Their call ids. */
 	freshResults: string[];
+	/** Every user message whose memory index the cleaned history strips: the earlier ones still kept and the new ones. */
+	staleMemoryIndex: string[];
+	/** Memory indexes this cleaning strips for the first time. */
+	newStaleMemoryIndex: number;
 	/** Provider tokens per estimated token, from the last reported request. */
 	scale: number;
 	/** In estimate units. */
@@ -268,6 +288,9 @@ export function planContextCleaning(history: readonly ChatMessage[], options: Co
 	const earlier = new Set(active?.part.staleResults ?? []);
 	const found = findStaleToolResults(window);
 	const fresh = new Set([...found].filter(callId => !earlier.has(callId)));
+	const earlierIndex = new Set(active?.part.staleMemoryIndex ?? []);
+	const foundIndex = findStaleMemoryIndexes(window);
+	const freshIndex = new Set([...foundIndex].filter(id => !earlierIndex.has(id)));
 	const stubbed = history.map((message, index) => {
 		if (index < start || fresh.size === 0) {
 			return message;
@@ -276,21 +299,30 @@ export function planContextCleaning(history: readonly ChatMessage[], options: Co
 		return parts === message.parts ? message : { ...message, parts };
 	});
 	const staleResults: string[] = [];
+	const staleMemoryIndex: string[] = [];
 	for (const message of history.slice(start)) {
+		if (message.role === "user" && message.memoryContext !== undefined && (earlierIndex.has(message.id) || foundIndex.has(message.id))) {
+			staleMemoryIndex.push(message.id);
+		}
 		for (const part of message.parts) {
 			if (part.kind === "toolResult" && (earlier.has(part.callId) || fresh.has(part.callId))) {
 				staleResults.push(part.callId);
 			}
 		}
 	}
+	// The saved tokens are those of the history as the cleaning part renders it: stubs and stripped memory indexes.
+	const marked = new Set(staleMemoryIndex);
+	const rendered = marked.size === 0 ? stubbed : stubbed.map(message => marked.has(message.id) ? withoutMemoryIndex(message) : message);
 	return {
 		stubbed,
 		staleResults,
 		newStale: fresh.size,
 		freshResults: [...fresh],
+		staleMemoryIndex,
+		newStaleMemoryIndex: freshIndex.size,
 		scale,
 		tokensBefore,
-		tokensAfterStubs: estimateRequestTokens(stubbed, options.fixedTokens),
+		tokensAfterStubs: estimateRequestTokens(rendered, options.fixedTokens),
 		targetTokens: Math.floor(Math.min(
 			options.budgetTokens * CONTEXT_CLEANING_TARGET_RATIO / scale,
 			options.replayTokens ?? Number.POSITIVE_INFINITY,
@@ -326,13 +358,15 @@ export function staleOnlyCompaction(history: readonly ChatMessage[], plan: Conte
 	const base: ChatCompactionPart = active
 		? { ...active }
 		: { kind: "compaction", summary: "", keepFromMessageId: first.id, summarizedMessages: 0, tokensBefore: 0, tokensAfter: 0, method: "none" };
-	// The plan lists every result still stubbed; an earlier list must not outlive it.
+	// The plan lists every result still stubbed and every memory index still stripped; earlier lists must not outlive it.
 	delete base.staleResults;
+	delete base.staleMemoryIndex;
 	return {
 		...base,
 		tokensBefore: Math.round(plan.tokensBefore * plan.scale),
 		tokensAfter: Math.round(plan.tokensAfterStubs * plan.scale),
 		...(plan.staleResults.length > 0 ? { staleResults: [...plan.staleResults] } : {}),
+		...(plan.staleMemoryIndex.length > 0 ? { staleMemoryIndex: [...plan.staleMemoryIndex] } : {}),
 		cleaning: { staleResults: plan.newStale, summary: false, summarizedMessages: 0, budgetTokens: plan.budgetTokens },
 	};
 }

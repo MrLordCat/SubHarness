@@ -1442,7 +1442,7 @@ function renderSubscriptionProvider(provider) {
 	h += '<div class="section-heading"><h2>Current windows</h2><span class="section-note">Counted from the start of the provider window</span></div>';
 	const current = provider.current;
 	if (!current.length) {
-		h += '<div class="empty">No window has been observed yet. Limits refresh every minute while the provider is signed in.</div>';
+		h += '<div class="empty">No window has been observed yet. Limits refresh after each request and every 15 minutes while the provider is signed in.</div>';
 	} else {
 		h += '<div class="table-shell"><table><thead><tr><th>Window</th><th>Started</th><th>Used</th><th>Resets</th><th>Requests</th><th>Input</th><th>Cached</th><th>Output</th><th>Cache hit</th></tr></thead><tbody>';
 		for (const record of current) {
@@ -1490,7 +1490,7 @@ function renderSubscriptionProvider(provider) {
 function renderSubscriptionsTab(d) {
 	const data = d.subscriptions;
 	if (!data || !Array.isArray(data.providers) || !data.providers.length) {
-		return '<div class="empty">No subscription usage recorded yet.<br>Codex and Claude limits are read every minute; token totals appear after the next completed request.</div>';
+		return '<div class="empty">No subscription usage recorded yet.<br>Codex and Claude limits are read after each request and every 15 minutes; token totals appear after the next completed request.</div>';
 	}
 	let h = '<p class="section-note">This ledger lives in extension global storage, so every VS Code window of this profile adds to the same numbers (last read '
 		+ CLOCK(data.generatedAt) + '). Each request counts in the provider window it ran in, and only windows tracked from their start to their end are saved, so window totals and capacity never mix in partial periods.</p>';

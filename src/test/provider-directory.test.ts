@@ -1,6 +1,7 @@
 import * as assert from "node:assert";
 
 import {
+	DEFAULT_PROVIDER_PROBE_INTERVAL_MS,
 	ProviderDirectory,
 	resolveSubscriptionState,
 	type ApiProviderSource,
@@ -372,5 +373,12 @@ suite("provider directory", () => {
 			await directory.recheck();
 			assert.strictEqual(probes, 2, "the settings change clears the pause");
 		} finally { directory.dispose(); }
+	});
+
+	test("idle catalog rechecks run every 15 minutes", () => {
+		// A profile change rechecks immediately and a manual refresh rechecks too,
+		// so the idle probe only catches a remote endpoint coming back; 5 minutes
+		// made an idle window too noisy.
+		assert.strictEqual(DEFAULT_PROVIDER_PROBE_INTERVAL_MS, 15 * 60_000);
 	});
 });

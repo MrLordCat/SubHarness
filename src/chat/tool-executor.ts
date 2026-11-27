@@ -1,6 +1,6 @@
 import type * as vscode from "vscode";
 import type { ChatToolGroup, ChatToolImage } from "./shared/protocol";
-import type { ChatTool, ChatToolConfirmation, ChatToolInvokeContext } from "./tools/types";
+import { TOOL_INPUT_NOT_OBJECT, type ChatTool, type ChatToolConfirmation, type ChatToolInvokeContext } from "./tools/types";
 
 export interface ChatToolCallContext extends ChatToolInvokeContext {
 	/** Resolves true when the user allows the call; a cancelled turn resolves false. */
@@ -36,6 +36,37 @@ function confirmationFor(tool: ChatTool, input: unknown): ChatToolConfirmation |
 	}
 }
 
+/**
+ * A call of a tool the chat cannot offer. The main agent can look the tool up and ask for it; a subagent has no
+ * list_tools or request_tools, so it can only pick among the tools it was given.
+ */
+function missingToolText(name: string, context?: ChatToolCallContext): string {
+	const guidance = context?.listTools && context?.requestTools
+		? "Call list_tools to see available tools, then request_tools with the exact name."
+		: "Use one of the tools you were given.";
+	return `Tool "${name}" is not enabled. ${guidance}`;
+}
+
+/** The top-level arguments of a schema, with required ones marked. */
+function expectedFields(schema: object): string[] {
+	const properties = (schema as { properties?: unknown }).properties;
+	if (typeof properties !== "object" || properties === null || Array.isArray(properties)) {
+		return [];
+	}
+	const required = (schema as { required?: unknown }).required;
+	const names = Array.isArray(required) ? required.filter((name): name is string => typeof name === "string") : [];
+	return Object.keys(properties).map(name => names.includes(name) ? `${name} (required)` : name);
+}
+
+/** Names the tool and its fields when the call's arguments are not an object, a message only they can explain. */
+function describeInvokeError(error: unknown, tool: ChatTool): unknown {
+	if (!(error instanceof Error) || error.message !== TOOL_INPUT_NOT_OBJECT) {
+		return error;
+	}
+	const fields = expectedFields(tool.inputSchema);
+	return new Error(`Tool input for ${tool.name} must be a JSON object${fields.length > 0 ? ` with these fields: ${fields.join(", ")}` : ""}.`);
+}
+
 /** Offers the enabled catalog tools to the agent loop and holds calls that need the user's approval. */
 export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSource {
 	return {
@@ -45,7 +76,7 @@ export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSour
 		async invoke(name, input, token, context) {
 			const tool = catalog.enabledTools().find(candidate => candidate.name === name);
 			if (!tool) {
-				return { text: `Unknown or disabled tool: ${name}`, isError: true };
+				return { text: missingToolText(name, context), isError: true };
 			}
 			const confirmation = confirmationFor(tool, input);
 			if (confirmation && !(context && await context.approve(confirmation))) {
@@ -61,6 +92,8 @@ export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSour
 				listTools: context?.listTools,
 				requestTools: context?.requestTools,
 				changesDiff: context?.changesDiff,
+			}).catch(error => {
+				throw describeInvokeError(error, tool);
 			});
 			const result = typeof output === "string" ? { text: output } : output;
 			return { text: result.text, isError: false, ...(result.images && result.images.length > 0 ? { images: result.images } : {}) };

@@ -145,7 +145,7 @@ suite("Chat web tools", () => {
 
 	test("fetch_webpage rejects non-http schemes and unsupported content types", async () => {
 		await assert.rejects(invoke({ urls: ["ftp://example.com/file"] }), /Only http and https URLs are supported\./);
-		await assert.rejects(invoke({ urls: [`${origin}/binary`] }), /Unsupported content type image\/png\./);
+		await assert.rejects(invoke({ urls: [`${origin}/binary`] }), /Unsupported content type image\/png\. fetch_webpage reads HTML, plain text, JSON and XML/);
 		await assert.rejects(invoke({ urls: ["://bad"] }), /Invalid URL: :\/\/bad/);
 	});
 

@@ -122,12 +122,26 @@ export type CodexLimitGateDecision =
 	| { kind: "limited"; match: LimitMatch };
 
 /**
- * Decides the fail-fast gate from Codex's own rate-limit windows. Only a window
- * that is actually at 100% blocks the chat: `rateLimitReachedType` keeps its old
- * value after the window resets, and a bare clock time parsed from an old error
- * message would otherwise hold the chat for up to a day past the real reset.
+ * Whether a reported Codex window is still used up. The reset named by the
+ * window ends the block even when the snapshot is old: background refreshes
+ * run at most every 15 minutes, and a stale 100% must not keep the chat or a
+ * subagent model unavailable after that reset.
  */
-export function resolveCodexLimitGate(snapshot: CodexRateLimitSnapshot | undefined): CodexLimitGateDecision {
+export function codexWindowExhausted(window: CodexRateLimitWindow | null | undefined, now = Date.now()): boolean {
+	if (!window || !Number.isFinite(window.usedPercent) || window.usedPercent < 100) {
+		return false;
+	}
+	const resetAt = window.resetsAt ? new Date(window.resetsAt * 1_000) : undefined;
+	return resetAt === undefined || Number.isNaN(resetAt.getTime()) || resetAt.getTime() > now;
+}
+
+/**
+ * Decides the fail-fast gate from Codex's own rate-limit windows. Only a window
+ * that is at 100% and has not reset blocks the chat: rateLimitReachedType keeps
+ * its old value after the window resets, and a clock time parsed from an old
+ * error message would otherwise hold the chat past the real reset.
+ */
+export function resolveCodexLimitGate(snapshot: CodexRateLimitSnapshot | undefined, now = Date.now()): CodexLimitGateDecision {
 	const windows = [snapshot?.primary, snapshot?.secondary].filter(
 		(window): window is CodexRateLimitWindow => Boolean(window) && Number.isFinite(window?.usedPercent)
 	);
@@ -136,7 +150,7 @@ export function resolveCodexLimitGate(snapshot: CodexRateLimitSnapshot | undefin
 	}
 	// With the 5-hour and the weekly window both used up, only the later reset lets the chat go on.
 	const full = windows
-		.filter(window => window.usedPercent >= 100)
+		.filter(window => codexWindowExhausted(window, now))
 		.reduce<CodexRateLimitWindow | undefined>((latest, window) =>
 			latest === undefined || (window.resetsAt ?? Number.NEGATIVE_INFINITY) > (latest.resetsAt ?? Number.NEGATIVE_INFINITY) ? window : latest, undefined);
 	if (!full) {
@@ -848,7 +862,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			// The window numbers are authoritative. `rateLimitReachedType` and the
 			// previous state lag behind the reset, and a sticky OR kept the provider
 			// "limited" forever after the first hit.
-			return windows.some(window => window.usedPercent >= 100);
+			return windows.some(window => codexWindowExhausted(window));
 		}
 		return Boolean(snapshot?.rateLimitReachedType);
 	}
@@ -1814,7 +1828,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 					? await bridge.resume(
 						new Map(continuationMatches.map(match => [
 							match.callId,
-							convertCodexToolResult(match.result, config.get("codexMaxToolResultChars", 12_000)),
+							convertCodexToolResult(match.result, config.get("codexMaxToolResultChars", 12_000), match.name),
 						])),
 						progress,
 						token
@@ -2965,6 +2979,12 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		const gate = resolveCodexLimitGate(this.lastRateLimitSnapshot);
 		const resetAt = limited ? this.limitGate.get("codex")?.resetAt ?? (gate.kind === "limited" ? gate.match.resetAt : undefined) : undefined;
 		const active = this.account.id === resolveActiveCodexAccountSetting(this.getConfig());
+		// The window that blocks, not the 5-hour one: a used-up week showed "(1%)" from the fresh 5-hour window.
+		const usedPercents = [this.lastRateLimitSnapshot?.primary?.usedPercent, this.lastRateLimitSnapshot?.secondary?.usedPercent]
+			.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+		const blockingPercent = usedPercents.length > 0 ? Math.max(0, Math.min(100, Math.round(Math.max(...usedPercents)))) : undefined;
+		const blockingWindow = gate.kind === "limited" ? gate.match.window : undefined;
+		const limitText = blockingWindow ? `ChatGPT ${blockingWindow} limit reached` : "ChatGPT subscription limit reached";
 		setSubagentModelProfiles("codex", [...this.models.values()].map(model => ({
 			// The id is this account's picker model, so the chat runs the subagent on this account.
 			id: encodeCodexAccountModelId(this.account.id, model.id),
@@ -2973,7 +2993,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			defaultEffort: "high",
 			availability: limited ? "unavailable" : "available",
 			availabilityReason: limited
-				? `${codexProviderLabel(this.account)}: ChatGPT subscription limit reached (${this.codexUsageLimitPercent ?? "unknown"}%)`
+				? `${codexProviderLabel(this.account)}: ${limitText} (${blockingPercent ?? "unknown"}%)`
 				: "Model is present in the current ChatGPT subscription catalog",
 			...(resetAt && !Number.isNaN(resetAt.getTime()) ? { unavailableUntil: resetAt.toISOString() } : {}),
 			availabilityCheckedAt: Date.now(),

@@ -84,7 +84,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 				properties: {
 					command: { type: "string", description: "Exact command for the default terminal shell." },
 					cwd: { type: "string", description: "Directory for the command. Omit to keep the current directory of the reused shell." },
-					mode: { type: "string", enum: ["sync", "async"], default: "sync" },
+					mode: { type: "string", enum: ["sync", "async"], default: "sync", description: "\"sync\" waits for the command and returns its output; \"async\" returns after about a second, for servers and watchers." },
 					timeoutMs: { type: "number", minimum: 0, maximum: 3_600_000, description: "Sync wait limit; a timeout leaves the command running." },
 					terminalId: { type: "string", description: "Use this idle chat terminal. Omit to reuse the last idle one." },
 					newTerminal: { type: "boolean", default: false, description: "Open a separate terminal even if one is idle." },
@@ -122,7 +122,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 			inputSchema: {
 				type: "object",
 				properties: {
-					terminalId: { type: "string" },
+					terminalId: { type: "string", description: "Id of the terminal to read, as shown in run_in_terminal's result." },
 					waitMs: { type: "number", minimum: 0, maximum: 60_000, description: "Wait this many milliseconds for a running command to finish; 0 returns immediately." },
 					maxChars: { type: "number", minimum: 1, maximum: 128_000, description: "Most recent output characters to return (default 30000)." },
 				},
@@ -139,14 +139,14 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 		{
 			name: "send_to_terminal",
 			group: CHAT_TOOL_GROUPS.terminal,
-			description: "Send input to a command that is running in a chat terminal. addNewLine defaults to true; use interrupt: true to send Ctrl+C. Never ask the user for passwords or tokens through this tool; they can type in the terminal themselves. kill_terminal closes the shell instead.",
+			description: "Send input to a command that is running in a chat terminal. text is required unless interrupt is true. addNewLine defaults to true; use interrupt: true to send Ctrl+C. Never ask the user for passwords or tokens through this tool; they can type in the terminal themselves. kill_terminal closes the shell instead.",
 			inputSchema: {
 				type: "object",
 				properties: {
-					terminalId: { type: "string" },
-					text: { type: "string" },
+					terminalId: { type: "string", description: "Id of the chat terminal to send to, as shown in run_in_terminal's result." },
+					text: { type: "string", description: "Text to send. Required unless interrupt is true; empty text is rejected." },
 					interrupt: { type: "boolean", description: "Send Ctrl+C to stop the running command; text and addNewLine are then ignored." },
-					addNewLine: { type: "boolean", default: true },
+					addNewLine: { type: "boolean", default: true, description: "Press Enter after the text (default true); false types it without running it." },
 				},
 				required: ["terminalId"],
 				additionalProperties: false,
@@ -173,7 +173,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 			description: "Close a chat terminal and stop its shell. Settles any command still waiting on it as closed.",
 			inputSchema: {
 				type: "object",
-				properties: { terminalId: { type: "string" } },
+				properties: { terminalId: { type: "string", description: "Id of the chat terminal to close; its command is settled as closed." } },
 				required: ["terminalId"],
 				additionalProperties: false,
 			},

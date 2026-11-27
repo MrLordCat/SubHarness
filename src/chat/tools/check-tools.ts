@@ -226,7 +226,7 @@ export function createCheckTool(options: {
 		let chosen = checks;
 		if (value.checks !== undefined) {
 			if (!Array.isArray(value.checks) || !value.checks.every((name) => typeof name === "string")) {
-				throw new Error("checks must be an array of names.");
+				throw new Error(`checks must be an array of check names. Available: ${checks.map((item) => item.name).join(", ")}.`);
 			}
 			chosen = value.checks.map((name) => {
 				const check = checks.find((item) => item.name === name);
@@ -242,12 +242,12 @@ export function createCheckTool(options: {
 		name: "run_checks",
 		group: CHAT_TOOL_GROUPS.terminal,
 		description:
-			"Run project checks without a terminal and return pass/fail counts and failures. Prefer this over running build, lint, or test commands in a terminal.",
+			"Run project checks without a terminal and return each check's status, pass/fail counts, failures and the path of the full log. Check names come from .subharness/checks.json, otherwise from the package.json scripts compile, lint and test. Prefer this over running build, lint or test commands in a terminal.",
 		inputSchema: {
 			type: "object",
 			properties: {
-				checks: { type: "array", items: { type: "string" } },
-				timeoutMs: { type: "number", minimum: MIN_TIMEOUT, maximum: MAX_TIMEOUT },
+				checks: { type: "array", items: { type: "string" }, description: "Check names to run; omit to run every configured check." },
+				timeoutMs: { type: "number", minimum: MIN_TIMEOUT, maximum: MAX_TIMEOUT, description: "Limit per check in milliseconds (default 600000); remaining checks are skipped after a timeout." },
 			},
 			additionalProperties: false,
 		},

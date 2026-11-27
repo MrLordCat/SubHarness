@@ -9,6 +9,12 @@ export interface ChatToolOutput {
 /** Largest image a tool result may carry; view_image and external tools share it. */
 export const MAX_IMAGE_BYTES = 3_750_000;
 
+/**
+ * The message of the low-level guard that rejects non-object arguments. The tool source adds the tool's name and
+ * expected fields to it, since only it knows both.
+ */
+export const TOOL_INPUT_NOT_OBJECT = "Tool input must be an object.";
+
 /** Shown to the user before a call that the approval policy holds back. */
 export interface ChatToolConfirmation {
 	title: string;

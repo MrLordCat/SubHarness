@@ -116,6 +116,7 @@ import {
     ToolCallValidationError,
     type ToolCallReliabilityMetrics,
 } from "./tools/tool-call-reliability";
+import { toolResultCharLimit } from "./tools/tool-result-limits";
 import {
     getChatCompletionsEndpoint,
     getModelsEndpoint,
@@ -2511,11 +2512,16 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         });
         let toolExecutionErrors = 0;
         const errorDetails: Array<{ name?: string; command?: string; head: string }> = [];
+        const truncatedTools = new Set<string>();
+        const errorTools = new Set<string>();
         const nextMessages = messages.map((message, index) => {
             const content = message.content;
             if (typeof content !== "string") {
                 return message;
             }
+            const callName = typeof message.tool_call_id === "string"
+                ? toolCallById.get(message.tool_call_id)?.name
+                : undefined;
 
             // Count only tool results produced after this turn's query: older
             // results were already counted in their own turn, and counting
@@ -2536,6 +2542,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     const callInfo = typeof message.tool_call_id === "string"
                         ? toolCallById.get(message.tool_call_id)
                         : undefined;
+                    if (callInfo?.name) {
+                        errorTools.add(callInfo.name);
+                    }
                     if (errorDetails.length < 5) {
                         errorDetails.push({
                             name: callInfo?.name,
@@ -2561,15 +2570,18 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             // Only tool output may be summarized away. A large system prompt is
             // instructions, not a tool result: rewriting it changes behaviour and
             // invalidates the whole cached prefix behind it.
-            if (maxChars <= 0 || !isToolResult || nextContent.length <= maxChars) {
+            // A subagent report cannot be fetched again: it gets a higher limit.
+            const resultLimit = isToolResult ? toolResultCharLimit(callName, maxChars) : maxChars;
+            if (resultLimit <= 0 || !isToolResult || nextContent.length <= resultLimit) {
                 if (nextContent !== content) {
                     return { ...message, content: nextContent };
                 }
                 return message;
             }
 
-            const truncated = this.truncateToolResultContent(nextContent, maxChars);
+            const truncated = this.truncateToolResultContent(nextContent, resultLimit);
             truncatedMessages += 1;
+            truncatedTools.add(callName ?? "unknown");
             omittedChars += truncated.truncatedChars;
             return { ...message, content: truncated.content };
         });
@@ -2585,6 +2597,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             this.log("chat.tool_results.execution_errors", {
                 requestId,
                 toolExecutionErrors,
+                tools: [...errorTools],
+                firstErrors: errorDetails.map(detail => ({ name: detail.name, head: detail.head.slice(0, 100) })),
             });
         }
         this.lastToolExecutionErrorCount = toolExecutionErrors;
@@ -2596,82 +2610,250 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 maxChars,
                 truncatedMessages,
                 omittedChars,
+                tools: [...truncatedTools],
             });
         }
 
         return nextMessages;
     }
 
+    /** Legacy globalState key: read once, migrated to the reasoning-map file, then cleared. */
     private static readonly REASONING_MAP_STATE_KEY = "llamacpp.deepseek_reasoning_map";
     private static readonly PREFIX_STATE_KEY = "llamacpp.prefix_snapshots";
     private static readonly PREFIX_STATE_VERSION_KEY = "llamacpp.prefix_snapshots.version";
     private static readonly CONTINUATION_STATE_KEY = "llamacpp.continuation_snapshots.v1";
     private static readonly SESSION_STATE_PERSIST_THROTTLE_MS = 2_000;
+    /** Mirrors BaseChatModelProvider.MAX_REASONING_SCOPE_CHARS (private there): a serialized scope stays within it. */
+    private static readonly REASONING_MAP_MAX_SCOPE_CHARS = 2_000_000;
     private lastSessionStatePersistAt = 0;
+    private lastReasoningMapPersistAt = 0;
+    private reasoningMapPersistTimer: ReturnType<typeof setTimeout> | undefined;
+    private pendingReasoningMapPayload: string | undefined;
+    /** Payload already written to the file; an unchanged map is not written again. */
+    private reasoningMapPersisted = "";
+    /** The legacy globalState key is cleared only after its data reached the file. */
+    private reasoningMapLegacyKeyPendingClear = false;
+    /** Serializes writes so two throttled flushes never race on the same tmp file. */
+    private reasoningMapWrite: Promise<void> = Promise.resolve();
     /** Model discovery polls an unreachable server again and again with the same error. */
     private readonly failureLog = new RepeatedFailureLog();
 
-    private loadPersistedReasoningMap(): void {
-        if (this.reasoningMapLoaded || !this.globalState) {
-            return;
+    /**
+     * DeepSeek reasoning lives in its own file next to session-state.json. The
+     * map used to be a globalState key that grew to several megabytes, so VS
+     * Code serialized and warned about it on every turn; a file is written
+     * outside state.vscdb, only when the map changed, and off the turn's path.
+     */
+    private reasoningMapFilePath(): string | undefined {
+        if (!this.storagePath) {
+            return undefined;
         }
-        this.reasoningMapLoaded = true;
         try {
-            const stored = this.globalState.get<Record<string, unknown>>(
-                LlamaCppChatModelProvider.REASONING_MAP_STATE_KEY
-            );
-            if (!stored || typeof stored !== "object") {
-                return;
-            }
-            let restored = 0;
-            for (const [key, value] of Object.entries(stored)) {
-                if (typeof value === "string") {
-                    // Legacy flat shape written before conversation scoping: { callId: reasoning }.
-                    if (key && value) {
-                        this.restoreReasoningEntry(key, value);
-                        restored += 1;
-                    }
-                    continue;
-                }
-                if (!value || typeof value !== "object") {
-                    continue;
-                }
-                for (const [callId, reasoning] of Object.entries(value as Record<string, unknown>)) {
-                    if (typeof reasoning === "string" && callId && reasoning) {
-                        this.restoreReasoningEntry(callId, reasoning, key);
-                        restored += 1;
-                    }
-                }
-            }
-            if (restored > 0) {
-                this.log("chat.reasoning.map_restored", { restoredEntries: restored });
-            }
-        } catch (error) {
-            this.logError("chat.reasoning.map_restore_failed", error);
-            this.reasoningMapLoaded = false; // retry next turn
+            return path.join(this.storagePath, "deepseek-reasoning-map.json");
+        } catch {
+            return undefined;
         }
     }
 
-    private persistReasoningMap(): void {
-        if (!this.globalState) {
+    private loadPersistedReasoningMap(): void {
+        if (this.reasoningMapLoaded) {
             return;
         }
-        try {
-            const serializable: Record<string, Record<string, string>> = {};
-            for (const [scope, entries] of this.exportReasoningScopes()) {
-                const bucket: Record<string, string> = {};
-                for (const [callId, reasoning] of entries) {
-                    bucket[callId] = reasoning;
+        this.reasoningMapLoaded = true;
+        let restored = 0;
+        let fileExists = false;
+        const filePath = this.reasoningMapFilePath();
+        if (filePath) {
+            let raw: string | undefined;
+            try {
+                raw = fs.readFileSync(filePath, "utf8");
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                    this.logError("chat.reasoning.map_restore_failed", error);
+                    this.reasoningMapLoaded = false; // retry next turn
+                    return;
                 }
-                serializable[scope] = bucket;
             }
-            void this.globalState.update(
-                LlamaCppChatModelProvider.REASONING_MAP_STATE_KEY,
-                serializable
-            );
+            if (typeof raw === "string") {
+                fileExists = true;
+                try {
+                    restored += this.restoreReasoningPayload(JSON.parse(raw));
+                    this.reasoningMapPersisted = raw;
+                } catch (error) {
+                    this.logError("chat.reasoning.map_restore_failed", error);
+                }
+            }
+        }
+
+        // One-time migration from the old globalState key: restore, write the
+        // file, then clear the key (a failed write keeps the key for the next
+        // turn). After the migration the key is never written again.
+        if (!fileExists && this.globalState) {
+            try {
+                const stored = this.globalState.get<Record<string, unknown>>(
+                    LlamaCppChatModelProvider.REASONING_MAP_STATE_KEY
+                );
+                if (stored && typeof stored === "object") {
+                    const migrated = this.restoreReasoningPayload(stored);
+                    restored += migrated;
+                    if (migrated > 0 && filePath) {
+                        this.reasoningMapLegacyKeyPendingClear = true;
+                        this.log("chat.reasoning.map_migrated_from_vscdb", { restoredEntries: migrated });
+                        this.persistReasoningMap(true);
+                    } else if (migrated === 0) {
+                        void this.globalState.update(
+                            LlamaCppChatModelProvider.REASONING_MAP_STATE_KEY,
+                            undefined
+                        );
+                    }
+                    // Without a global storage path there is no file to move the
+                    // data to: keep it in memory and leave the key for later.
+                }
+            } catch (error) {
+                this.logError("chat.reasoning.map_restore_failed", error);
+                this.reasoningMapLoaded = false; // retry next turn
+                return;
+            }
+        }
+
+        if (restored > 0) {
+            this.log("chat.reasoning.map_restored", { restoredEntries: restored, source: fileExists ? "file" : "vscdb" });
+        }
+    }
+
+    /** Reads both persisted shapes: scoped `{ scope: { callId: reasoning } }` and the legacy flat `{ callId: reasoning }`. */
+    private restoreReasoningPayload(stored: unknown): number {
+        if (!stored || typeof stored !== "object") {
+            return 0;
+        }
+        let restored = 0;
+        for (const [key, value] of Object.entries(stored as Record<string, unknown>)) {
+            if (typeof value === "string") {
+                // Legacy flat shape written before conversation scoping: { callId: reasoning }.
+                if (key && value) {
+                    this.restoreReasoningEntry(key, value);
+                    restored += 1;
+                }
+                continue;
+            }
+            if (!value || typeof value !== "object") {
+                continue;
+            }
+            for (const [callId, reasoning] of Object.entries(value as Record<string, unknown>)) {
+                if (typeof reasoning === "string" && callId && reasoning) {
+                    this.restoreReasoningEntry(callId, reasoning, key);
+                    restored += 1;
+                }
+            }
+        }
+        return restored;
+    }
+
+    private persistReasoningMap(force = false): void {
+        try {
+            const filePath = this.reasoningMapFilePath();
+            if (!filePath) {
+                return; // No global storage (tests): keep the map in memory only.
+            }
+            const serializable = this.serializeReasoningMap();
+            if (Object.keys(serializable).length === 0 && this.reasoningMapPersisted === "") {
+                return; // Nothing to store yet.
+            }
+            const payload = JSON.stringify(serializable);
+            if (!this.reasoningMapLegacyKeyPendingClear && payload === this.reasoningMapPersisted) {
+                return; // The map did not change; do not touch the file.
+            }
+            this.pendingReasoningMapPayload = payload;
+            if (this.reasoningMapPersistTimer) {
+                if (!force) {
+                    return;
+                }
+                clearTimeout(this.reasoningMapPersistTimer);
+                this.reasoningMapPersistTimer = undefined;
+            }
+            const waitMs = force
+                ? 0
+                : Math.max(0, LlamaCppChatModelProvider.SESSION_STATE_PERSIST_THROTTLE_MS - (Date.now() - this.lastReasoningMapPersistAt));
+            if (waitMs > 0) {
+                this.reasoningMapPersistTimer = setTimeout(() => {
+                    this.reasoningMapPersistTimer = undefined;
+                    this.flushReasoningMap();
+                }, waitMs);
+                this.reasoningMapPersistTimer.unref?.();
+                return;
+            }
+            this.flushReasoningMap();
         } catch (error) {
             this.logError("chat.reasoning.map_persist_failed", error);
         }
+    }
+
+    private flushReasoningMap(): void {
+        const payload = this.pendingReasoningMapPayload;
+        if (payload === undefined) {
+            return;
+        }
+        this.pendingReasoningMapPayload = undefined;
+        this.lastReasoningMapPersistAt = Date.now();
+        this.reasoningMapWrite = this.reasoningMapWrite
+            .then(() => this.writeReasoningMapFile(payload))
+            .catch(error => this.logError("chat.reasoning.map_persist_failed", error));
+    }
+
+    private async writeReasoningMapFile(payload: string): Promise<void> {
+        const filePath = this.reasoningMapFilePath();
+        if (!filePath) {
+            return;
+        }
+        const tmpPath = filePath + ".tmp";
+        try {
+            await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+            await fs.promises.writeFile(tmpPath, payload, "utf8");
+            await this.renameWithRetry(tmpPath, filePath);
+            this.reasoningMapPersisted = payload;
+            if (this.reasoningMapLegacyKeyPendingClear && this.globalState) {
+                this.reasoningMapLegacyKeyPendingClear = false;
+                void this.globalState.update(
+                    LlamaCppChatModelProvider.REASONING_MAP_STATE_KEY,
+                    undefined
+                );
+            }
+        } catch (error) {
+            this.logError("chat.reasoning.map_persist_failed", error);
+            try {
+                await fs.promises.rm(tmpPath, { force: true });
+            } catch {
+                // The next write replaces it anyway.
+            }
+        }
+    }
+
+    /** Applies the in-memory size bounds while serializing, so a legacy oversized map cannot grow the file. */
+    private serializeReasoningMap(): Record<string, Record<string, string>> {
+        const serializable: Record<string, Record<string, string>> = {};
+        for (const [scope, entries] of this.exportReasoningScopes()) {
+            const bucket: Record<string, string> = {};
+            const kept: Array<[string, string]> = [];
+            let chars = 0;
+            // The map keeps the newest entries last; serialize newest first and
+            // drop the oldest once the per-scope character budget is reached.
+            for (let index = entries.length - 1; index >= 0; index--) {
+                const [callId, reasoning] = entries[index];
+                if (!callId || !reasoning) {
+                    continue;
+                }
+                if (kept.length > 0 && chars + reasoning.length > LlamaCppChatModelProvider.REASONING_MAP_MAX_SCOPE_CHARS) {
+                    break;
+                }
+                kept.push([callId, reasoning]);
+                chars += reasoning.length;
+            }
+            for (let index = kept.length - 1; index >= 0; index--) {
+                bucket[kept[index][0]] = kept[index][1];
+            }
+            serializable[scope] = bucket;
+        }
+        return serializable;
     }
 
     private loadPersistedPrefixSnapshots(): void {
@@ -6369,6 +6551,10 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 this.localProbeBackoff.succeeded();
             }
             this._onDidCompleteChatTurn.fire(metrics);
+            if (metrics.providerKind === "deepseek") {
+                // The balance moved with this billable turn; the refresh has its own TTL guard.
+                void this.refreshDeepSeekBalance();
+            }
             if (conversationScope) {
                 this.lastResponseEndedAtByScope.set(conversationScope, Date.now());
             }
@@ -6393,6 +6579,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     modelId: model.id,
                 });
                 reportBalanceNotice(progress, balance);
+                // The account is out of balance right now: update the cached value at once.
+                void this.refreshDeepSeekBalance(true);
                 return;
             } else {
                 this.logError("chat.turn.failed", err, { requestId });

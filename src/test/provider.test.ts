@@ -40,6 +40,16 @@ class MockMemento implements vscode.Memento {
     update(key: string, value: unknown): Thenable<void> { this.store.set(key, value); return Promise.resolve(); }
 }
 
+/** Flushes the throttled reasoning-map write and waits for the file, so a restarted provider sees it. */
+function flushReasoningMap(provider: LlamaCppChatModelProvider): Promise<void> {
+    const api = provider as unknown as {
+        persistReasoningMap: (force?: boolean) => void;
+        reasoningMapWrite: Promise<void>;
+    };
+    api.persistReasoningMap(true);
+    return api.reasoningMapWrite;
+}
+
 suite("Llama.cpp Chat Provider Extension", () => {
         test("refreshes the DeepSeek balance against api.deepseek.com on a fresh install", async () => {
             const isolated = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent");
@@ -1596,7 +1606,8 @@ suite("Llama.cpp Chat Provider Extension", () => {
 
             // --- Turn 1: model responds with reasoning and a tool call ---
             const memento = new MockMemento();
-            const preRestart = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento);
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-reasoning-"));
+            const preRestart = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento, storageDir);
             const pre = preRestart as unknown as {
                 getThinkingConstructor: () => (new (text: string, id?: string, metadata?: unknown) => unknown) | undefined;
                 configureToolCallReliability: (
@@ -1637,6 +1648,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
             });
             const turn1Parts: vscode.LanguageModelResponsePart[] = [];
             await pre.processStreamingResponse(stream1, { report: p => turn1Parts.push(p) }, new vscode.CancellationTokenSource().token);
+            await flushReasoningMap(preRestart);
 
             const toolCall1 = turn1Parts.find(
                 (p): p is vscode.LanguageModelToolCallPart => p instanceof vscode.LanguageModelToolCallPart
@@ -1666,7 +1678,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
             // A fresh provider has an empty _reasoningByToolCallId map and empty
             // _currentTurnReasoningContent.  VS Code history may also omit
             // LanguageModelThinkingPart, so convertMessages won't add reasoning_content.
-            const postRestart = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento);
+            const postRestart = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento, storageDir);
             const post = postRestart as unknown as {
                 getCurrentTurnReasoningContent: () => string;
                 getReasoningForToolCall: (callId: string) => string | undefined;
@@ -1706,10 +1718,11 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.strictEqual(
                 afterRestart[0].reasoning_content,
                 "turn-1-reasoning",
-                "BUG: reasoning should survive restart (via persistence to globalState). " +
+                "BUG: reasoning should survive restart (via the reasoning-map file). " +
                 "Without it, the first request after restart has a different prefix, " +
                 "and DeepSeek cache misses for every historical tool-call message."
             );
+            fs.rmSync(storageDir, { recursive: true, force: true });
         });
 
         test("prefix drifts across turns after restart because only the newest call gets reasoning", async () => {
@@ -1744,7 +1757,8 @@ suite("Llama.cpp Chat Provider Extension", () => {
 
             // --- Turn 1: first call ---
             const memento2 = new MockMemento();
-            const prov = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento2);
+            const storageDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-reasoning-"));
+            const prov = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento2, storageDir2);
             const p = prov as unknown as {
                 getThinkingConstructor: () => (new (text: string, id?: string, metadata?: unknown) => unknown) | undefined;
                 configureToolCallReliability: (
@@ -1775,6 +1789,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 { report: () => undefined },
                 new vscode.CancellationTokenSource().token
             );
+            await flushReasoningMap(prov);
 
             // Turn 2: reason_B, call_B
             await p.processStreamingResponse(
@@ -1782,6 +1797,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 { report: () => undefined },
                 new vscode.CancellationTokenSource().token
             );
+            await flushReasoningMap(prov);
 
             // After 2 turns, both callIds should be in the map
             assert.strictEqual(p.getReasoningForToolCall("call-A"), "reason-A");
@@ -1811,7 +1827,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 "call-B should get its own reasoning via exact callId match");
 
             // --- Simulate restart: new provider, empty map ---
-            const prov2 = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento2);
+            const prov2 = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento2, storageDir2);
             const p2 = prov2 as unknown as {
                 getCurrentTurnReasoningContent: () => string;
                 getReasoningForToolCall: (callId: string) => string | undefined;
@@ -1837,7 +1853,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
             // One new turn populates the map with call-C, but call-A and
             // call-B are still missing.  This shows why the prefix keeps
             // changing across turns.
-            const prov3 = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento2);
+            const prov3 = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento2, storageDir2);
             const p3 = prov3 as unknown as {
                 getThinkingConstructor: () => (new (text: string, id?: string, metadata?: unknown) => unknown) | undefined;
                 configureToolCallReliability: (tools: readonly OpenAIFunctionToolDef[], o: { repairEnabled: boolean; validateSchema: boolean }) => void;
@@ -1856,6 +1872,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 { report: () => undefined },
                 new vscode.CancellationTokenSource().token
             );
+            await flushReasoningMap(prov3);
 
             // With persistence, loadPersistedReasoningMap inside processStreamingResponse
             // restores call-A and call-B before streaming adds call-C.
@@ -1888,6 +1905,123 @@ suite("Llama.cpp Chat Provider Extension", () => {
             );
             // call-C gets reasoning from exact match (map has it).
             assert.strictEqual(afterTurn3[6].reasoning_content, "reason-C");
+            fs.rmSync(storageDir2, { recursive: true, force: true });
+        });
+
+        test("migrates the DeepSeek reasoning map from globalState to its own file once", async () => {
+            const memento = new MockMemento();
+            await memento.update("llamacpp.deepseek_reasoning_map", {
+                "call-flat": "reason-flat",
+                "chat-a": { "call-a": "reason-a" },
+            });
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-reasoning-"));
+            const first = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento, storageDir);
+            const api = first as unknown as {
+                loadPersistedReasoningMap: () => void;
+                getReasoningForToolCall: (callId: string) => string | undefined;
+            };
+            api.loadPersistedReasoningMap();
+            assert.strictEqual(api.getReasoningForToolCall("call-flat"), "reason-flat");
+            assert.strictEqual(api.getReasoningForToolCall("call-a"), "reason-a");
+            await flushReasoningMap(first);
+
+            const filePath = path.join(storageDir, "deepseek-reasoning-map.json");
+            const written = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, Record<string, string>>;
+            assert.strictEqual(written[""]["call-flat"], "reason-flat", "the legacy flat shape lands in the default scope");
+            assert.strictEqual(written["chat-a"]["call-a"], "reason-a");
+            assert.strictEqual(memento.get("llamacpp.deepseek_reasoning_map"), undefined,
+                "the legacy globalState key is cleared after the file write");
+
+            const restarted = new LlamaCppChatModelProvider(
+                new MockSecretStorage(), "test-user-agent", undefined, undefined, new MockMemento(), storageDir
+            );
+            const restartedApi = restarted as unknown as {
+                loadPersistedReasoningMap: () => void;
+                getReasoningForToolCall: (callId: string) => string | undefined;
+            };
+            restartedApi.loadPersistedReasoningMap();
+            assert.strictEqual(restartedApi.getReasoningForToolCall("call-flat"), "reason-flat");
+            assert.strictEqual(restartedApi.getReasoningForToolCall("call-a"), "reason-a");
+            fs.rmSync(storageDir, { recursive: true, force: true });
+        });
+
+        test("writes the DeepSeek reasoning map file only when the map changed", async () => {
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-reasoning-"));
+            const instance = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, new MockMemento(), storageDir);
+            const api = instance as unknown as {
+                loadPersistedReasoningMap: () => void;
+                restoreReasoningEntry: (callId: string, reasoning: string, scope?: string) => void;
+            };
+            api.loadPersistedReasoningMap();
+            api.restoreReasoningEntry("call-1", "reason-1");
+            await flushReasoningMap(instance);
+
+            const filePath = path.join(storageDir, "deepseek-reasoning-map.json");
+            assert.match(fs.readFileSync(filePath, "utf8"), /reason-1/);
+
+            // An unchanged map is not rewritten: after deleting the file, a
+            // flush with no new entry must leave it absent.
+            fs.rmSync(filePath, { force: true });
+            await flushReasoningMap(instance);
+            assert.strictEqual(fs.existsSync(filePath), false, "an unchanged map is not written again");
+
+            api.restoreReasoningEntry("call-2", "reason-2");
+            await flushReasoningMap(instance);
+            const second = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, Record<string, string>>;
+            assert.strictEqual(second[""]["call-2"], "reason-2");
+            fs.rmSync(storageDir, { recursive: true, force: true });
+        });
+
+        test("reads a legacy flat reasoning-map file", () => {
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-reasoning-"));
+            fs.writeFileSync(
+                path.join(storageDir, "deepseek-reasoning-map.json"),
+                JSON.stringify({ "call-legacy": "reason-legacy" }),
+                "utf8"
+            );
+            const instance = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, new MockMemento(), storageDir);
+            const api = instance as unknown as {
+                loadPersistedReasoningMap: () => void;
+                getReasoningForToolCall: (callId: string) => string | undefined;
+            };
+            api.loadPersistedReasoningMap();
+            assert.strictEqual(api.getReasoningForToolCall("call-legacy"), "reason-legacy");
+            fs.rmSync(storageDir, { recursive: true, force: true });
+        });
+
+        test("serializes a reasoning scope within the in-memory size bound", async () => {
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-reasoning-"));
+            const instance = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, new MockMemento(), storageDir);
+            const api = instance as unknown as {
+                loadPersistedReasoningMap: () => void;
+                restoreReasoningEntry: (callId: string, reasoning: string, scope?: string) => void;
+            };
+            api.loadPersistedReasoningMap();
+            // Three 900k entries exceed the 2M-per-scope budget: the oldest is
+            // dropped on serialization, the newest two stay.
+            api.restoreReasoningEntry("call-old", "o".repeat(900_000), "chat");
+            api.restoreReasoningEntry("call-new", "n".repeat(900_000), "chat");
+            api.restoreReasoningEntry("call-newest", "m".repeat(900_000), "chat");
+            await flushReasoningMap(instance);
+            const written = JSON.parse(fs.readFileSync(path.join(storageDir, "deepseek-reasoning-map.json"), "utf8")) as Record<string, Record<string, string>>;
+            assert.deepStrictEqual(Object.keys(written["chat"]), ["call-new", "call-newest"]);
+            fs.rmSync(storageDir, { recursive: true, force: true });
+        });
+
+        test("keeps the reasoning map in memory when no storage path exists", () => {
+            const memento = new MockMemento();
+            const instance = new LlamaCppChatModelProvider(new MockSecretStorage(), "test-user-agent", undefined, undefined, memento);
+            const api = instance as unknown as {
+                loadPersistedReasoningMap: () => void;
+                restoreReasoningEntry: (callId: string, reasoning: string, scope?: string) => void;
+                persistReasoningMap: (force?: boolean) => void;
+                getReasoningForToolCall: (callId: string) => string | undefined;
+            };
+            api.loadPersistedReasoningMap();
+            api.restoreReasoningEntry("call-mem", "reason-mem");
+            api.persistReasoningMap(true);
+            assert.strictEqual(api.getReasoningForToolCall("call-mem"), "reason-mem");
+            assert.ok(!memento.keys().includes("llamacpp.deepseek_reasoning_map"), "the map is never written back to globalState");
         });
 
         test("keeps the API Direct tool prefix stable within one Copilot conversation", () => {

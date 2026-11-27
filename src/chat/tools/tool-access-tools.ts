@@ -139,7 +139,7 @@ export function createToolAccessTools(): ChatTool[] {
 				type: "object",
 				properties: {
 					query: { type: "string", description: "Words to filter by name, description or group; all must match." },
-					onlyDisabled: { type: "boolean" },
+					onlyDisabled: { type: "boolean", description: "List only the tools that are off (default false)." },
 				},
 			},
 			invoke: async (input, _token, context) => {
@@ -162,7 +162,7 @@ export function createToolAccessTools(): ChatTool[] {
 			inputSchema: {
 				type: "object",
 				properties: {
-					names: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_REQUESTED_TOOLS },
+					names: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_REQUESTED_TOOLS, description: `Exact tool names from list_tools, 1 to ${MAX_REQUESTED_TOOLS}.` },
 					reason: { type: "string", description: "One or two sentences on what you need them for." },
 				},
 				required: ["names", "reason"],

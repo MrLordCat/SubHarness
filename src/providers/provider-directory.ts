@@ -87,7 +87,13 @@ export interface ProviderDirectoryOptions {
 	log?: (event: string, data?: unknown) => void;
 }
 
-export const DEFAULT_PROVIDER_PROBE_INTERVAL_MS = 5 * 60_000;
+/**
+ * Catalog probes of saved API profiles (and the local server, through its own
+ * ProbeBackoff). A profile change triggers its own recheck, so the idle interval
+ * only has to catch a remote endpoint coming back: 15 minutes instead of 5
+ * keeps an idle window at a few requests per hour.
+ */
+export const DEFAULT_PROVIDER_PROBE_INTERVAL_MS = 15 * 60_000;
 export const DEFAULT_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
 /** Cursor's catalog request uses the same endpoint with a 15 s timeout. */
 const CURSOR_PROBE_TIMEOUT_MS = 15_000;

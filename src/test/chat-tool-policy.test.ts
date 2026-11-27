@@ -4,6 +4,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { createChatToolSource, DENIED_TOOL_RESULT } from "../chat/tool-executor";
 import { ChatToolCatalog, isCopilotOnlyTool, TOOL_OVERRIDES_KEY, type ToolRegistry } from "../chat/tools/catalog";
+import { createCoreTools } from "../chat/tools/core-tools";
 import { compileDangerousCommandRules, DEFAULT_DANGEROUS_COMMANDS, DEFAULT_DANGEROUS_COMMAND_NAMES, findDangerousCommand, findDangerousCommands } from "../chat/tools/danger";
 import { createChatTerminalTools } from "../chat/tools/terminal-tools";
 import { MAX_IMAGE_BYTES, type ChatTool, type ChatToolOutput } from "../chat/tools/types";
@@ -409,7 +410,12 @@ suite("chat tool policy", () => {
 			invoke: async () => { runs.push("broken"); return "ran"; },
 		});
 		const source = createChatToolSource({ enabledTools: () => [guarded, broken], groups: () => [], setEnabled: async () => undefined });
-		assert.deepStrictEqual(await source.invoke("missing", {}, token()), { text: "Unknown or disabled tool: missing", isError: true });
+		assert.deepStrictEqual(await source.invoke("missing", {}, token()), { text: 'Tool "missing" is not enabled. Use one of the tools you were given.', isError: true });
+		assert.deepStrictEqual(await source.invoke("missing", {}, token(), {
+			approve: async () => true,
+			listTools: () => [],
+			requestTools: async () => ({ enabled: [], declined: [], alreadyEnabled: [], unknown: [], dismissed: true }),
+		}), { text: 'Tool "missing" is not enabled. Call list_tools to see available tools, then request_tools with the exact name.', isError: true });
 		assert.deepStrictEqual(await source.invoke("guarded", {}, token()), { text: DENIED_TOOL_RESULT, isError: true });
 		const reasons: string[] = [];
 		const denied = await source.invoke("broken", {}, token(), { approve: async confirmation => { reasons.push(confirmation.reason); return false; } });
@@ -418,5 +424,17 @@ suite("chat tool policy", () => {
 		assert.deepStrictEqual(runs, []);
 		assert.deepStrictEqual(await source.invoke("guarded", {}, token(), { approve: async () => true }), { text: "ran", isError: false });
 		assert.deepStrictEqual(runs, ["guarded"]);
+	});
+
+	test("a non-object call names the tool and the fields it takes", async () => {
+		const source = createChatToolSource({
+			enabledTools: () => createCoreTools({ roots: { roots: () => [] }, diagnostics: false }),
+			groups: () => [],
+			setEnabled: async () => undefined,
+		});
+		await assert.rejects(
+			source.invoke("read_file", "src/a.ts" as never, token()),
+			/Tool input for read_file must be a JSON object with these fields: filePath \(required\), startLine, endLine\./
+		);
 	});
 });

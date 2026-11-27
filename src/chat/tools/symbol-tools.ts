@@ -297,11 +297,11 @@ export function createSymbolTools(options: { roots?: WorkspaceRoots } = {}): Cha
 				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				throw new Error(`Rename failed: ${message}`, { cause: error });
+				throw new Error(`Rename failed: ${message}. Change the occurrences one by one with replace_string_in_file instead.`, { cause: error });
 			}
 			const entries = edit?.entries() ?? [];
 			if (!edit || entries.length === 0) {
-				throw new Error("The language server offers no rename for this symbol here.");
+				throw new Error("The language server offers no rename for this symbol here, so the file type may not support rename. Change the occurrences one by one with replace_string_in_file instead.");
 			}
 			checkCancellation(token);
 			// The named file itself was approved through needsConfirmation when it lies outside.
