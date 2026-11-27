@@ -48,6 +48,7 @@ import {
 } from "./message-adapter";
 import { resolveClaudeKeepAliveSettings } from "./keepalive-settings";
 import { describeClaudeAuth, readClaudeAuthStatus, signInWithClaudeCli, signOutClaudeCli } from "./auth";
+import { CLAUDE_RUNTIME_MISSING_MESSAGE } from "./runtime-installer";
 
 const DEFAULT_CLAUDE_CONTEXT_LENGTH = 258_400;
 const DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS = 32_000;
@@ -809,7 +810,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			return "Off";
 		}
 		if (this.status === "signedOut") {
-			return resolveClaudeCodeBinary() ? "Not signed in" : "Claude Code not found";
+			return this.resolveExecutable() ? "Not signed in" : "Runtime not installed";
 		}
 		if (this.status === "unavailable") {
 			return "Claude unavailable";
@@ -1124,7 +1125,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		if (!this.isEnabled()) {
 			return this.toStatus("disabled");
 		}
-		if (!resolveClaudeCodeBinary()) {
+		if (!this.resolveExecutable()) {
 			return this.toStatus("signedOut");
 		}
 		if (!this.hasLogin()) {
@@ -1137,11 +1138,11 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		return status;
 	}
 
-	/** Signs in with the bundled Claude Code CLI in a terminal; the Claude Code extension is not needed. */
+	/** Signs in with the downloaded Claude Code runtime in a terminal; the Anthropic extension is not needed. */
 	async signIn(): Promise<void> {
 		const executable = this.resolveExecutable();
 		if (!executable) {
-			throw new Error("The Claude Code runtime was not found. Reinstall the extension or set llamacpp.claudeCliPath.");
+			throw new Error(CLAUDE_RUNTIME_MISSING_MESSAGE);
 		}
 		const status = await signInWithClaudeCli(executable, undefined, this.authEnv(), `${this.label} sign-in`);
 		if (!status?.loggedIn) {
@@ -1192,7 +1193,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		});
 		const executable = this.resolveExecutable();
 		const auth = executable ? await readClaudeAuthStatus(executable, undefined, this.authEnv()).catch(() => undefined) : undefined;
-		const details = [this.statusSummary, `Account: ${executable ? describeClaudeAuth(auth) : "Claude Code runtime not found"}`];
+		const details = [this.statusSummary, `Account: ${executable ? describeClaudeAuth(auth) : "Claude runtime not installed (SubHarness: Install Claude Runtime)"}`];
 		for (const limit of this.subscriptionUsageLimits) {
 			details.push(`${limit.label}: ${limit.description}`);
 		}
@@ -1284,7 +1285,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			this.toStatus("disabled");
 			return [];
 		}
-		if (!resolveClaudeCodeBinary()) {
+		if (!this.resolveExecutable()) {
 			this.toStatus("signedOut");
 			return [];
 		}
@@ -1330,7 +1331,7 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 		}
 		const executable = this.resolveExecutable();
 		if (!executable) {
-			throw new Error("Claude Code CLI not found. Install and sign in to the official Anthropic Claude Code extension.");
+			throw new Error(CLAUDE_RUNTIME_MISSING_MESSAGE);
 		}
 
 		this.pruneSessions();

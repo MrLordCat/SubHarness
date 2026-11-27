@@ -489,6 +489,14 @@ holds the Keep/Undo state and the private snapshots, and `chat-attachments`
 holds pasted files. Images sent with a message are kept in its chat log.
 Drafts are kept in the workspace state.
 
+Cleanup runs in the background after startup and never touches a chat that
+exists: a deleted chat's log goes at once, stale temporary files and subagent
+files without a chat log after 7 days; a log that the index cannot read is
+kept for `scripts/repair-chat-sessions.cjs`. The private snapshot repositories
+are packed once they hold more than 2,000 loose objects (every object is kept),
+and a repository of a folder that no longer exists is removed after 30 days.
+Extension logs start a new file every 16 MB and keep the folder under 60 MB.
+
 ## Checking the chat's look
 
 `node scripts/build-webview.mjs --harness` builds a browser harness of the

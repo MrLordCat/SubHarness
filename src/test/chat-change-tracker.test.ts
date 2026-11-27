@@ -366,4 +366,56 @@ suite("chat change tracker", () => {
 		assert.deepStrictEqual(set.files.map(entry => entry.path), ["a.txt"]);
 		assert.strictEqual(set.notice, undefined);
 	});
+
+	test("maintenance packs a shadow repository and removes one whose folder is gone", async function () {
+		this.timeout(60_000);
+		const current = tracker();
+		await turn(current, 1, async () => fs.writeFile(file("a.txt"), "one\r\nchange\r\n"));
+		const shadowRoot = path.join(storage, "shadow");
+		const repos = async (): Promise<string[]> => (await fs.readdir(shadowRoot, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name);
+		const markerRoot = async (name: string): Promise<string | undefined> => {
+			try {
+				return (JSON.parse(await fs.readFile(path.join(shadowRoot, name, "aab-root.json"), "utf8")) as { root?: string }).root;
+			} catch {
+				return undefined;
+			}
+		};
+		const repoFor = async (target: string): Promise<string | undefined> => {
+			for (let attempt = 0; attempt < 50; attempt++) {
+				for (const name of await repos()) {
+					if (await markerRoot(name) === target) {
+						return name;
+					}
+				}
+				await new Promise(resolve => setTimeout(resolve, 20));
+			}
+			return undefined;
+		};
+		assert.ok(await repoFor(project), "the project shadow repository records its root");
+
+		const plain = path.join(temp, "plain");
+		await fs.mkdir(plain, { recursive: true });
+		await fs.writeFile(path.join(plain, "f.txt"), "one\n");
+		let folders = [{ name: "plain", fsPath: plain }];
+		const removable = new ChatChangeTracker({ storageDir: storage, folders: () => folders, findGit: async () => git });
+		await turn(removable, 1, async () => fs.writeFile(path.join(plain, "f.txt"), "two\n"));
+		const plainRepo = await repoFor(plain);
+		assert.ok(plainRepo, "the plain folder has its own shadow repository");
+
+		const packed = await current.maintain({ maxLooseObjects: 1 });
+		assert.ok(packed.packedRepos >= 1);
+		assert.ok(packed.looseObjects > 1);
+		const projectRepo = await repoFor(project);
+		assert.ok(projectRepo);
+		const packDir = path.join(shadowRoot, projectRepo, "objects", "pack");
+		assert.ok((await fs.readdir(packDir)).some(name => name.endsWith(".pack")));
+
+		folders = [];
+		await fs.rm(plain, { recursive: true, force: true });
+		const old = new Date(Date.now() - 40 * 24 * 60 * 60_000);
+		await fs.utimes(path.join(shadowRoot, plainRepo), old, old);
+		const removed = await removable.maintain({ repoMaxAgeMs: 0 });
+		assert.strictEqual(removed.removedRepos, 1);
+		await assert.rejects(fs.stat(path.join(shadowRoot, plainRepo)), "the obsolete repository is gone");
+	});
 });

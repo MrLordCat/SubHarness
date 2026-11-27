@@ -403,7 +403,28 @@ interface CachePrefixSnapshot {
 	/** Provider-only memory/guard messages that are sent but excluded from durable alignment. */
 	ephemeralHash?: string;
 	ephemeralChars?: number;
+    /** When this snapshot was stored; optional for files written before per-scope storage. */
+    updatedAt?: number;
     migratedFromPrefix?: boolean;
+}
+
+/**
+ * Context usage as the log stores it: the ordered prompt segments (hundreds of entries in a long chat, about 16 KB a
+ * request) are summed per kind. The full list stays in the in-memory event that the Session Quality panel reads.
+ */
+export function contextUsageForLog<T extends { promptSegments?: LlamaPromptSegment[] }>(usage: T): Omit<T, "promptSegments"> & { promptSegmentTotals?: Record<string, { tokens: number; messages: number; runs: number }> } {
+    const { promptSegments, ...rest } = usage;
+    if (!promptSegments || promptSegments.length === 0) {
+        return rest;
+    }
+    const promptSegmentTotals: Record<string, { tokens: number; messages: number; runs: number }> = {};
+    for (const segment of promptSegments) {
+        const total = promptSegmentTotals[segment.kind] ??= { tokens: 0, messages: 0, runs: 0 };
+        total.tokens += segment.tokens;
+        total.messages += segment.messageCount ?? 0;
+        total.runs += 1;
+    }
+    return { ...rest, promptSegmentTotals };
 }
 
 /** Remove provider-only alignment metadata before serializing a message to the API. */
@@ -431,6 +452,29 @@ interface ConversationMessageSnapshot {
     tokenCount: number;
     updatedAt: number;
     migratedFromPrefix?: boolean;
+}
+
+/** One scope's persisted cache state: `<globalStorage>/session-state/<sha256(scope)>.json`. */
+interface SessionScopeStateFile {
+    version: 1;
+    scope: string;
+    updatedAt: number;
+    prefixSnapshot?: CachePrefixSnapshot;
+    conversation?: ConversationMessageSnapshot;
+    toolCatalog?: StableToolCatalogSnapshot;
+}
+
+interface SessionStateFileInfo {
+    filePath: string;
+    mtimeMs: number;
+    size: number;
+}
+
+/** Overrides used by tests; production always uses the static retention limits. */
+interface SessionStateRetentionLimits {
+    maxAgeMs?: number;
+    maxFiles?: number;
+    maxBytes?: number;
 }
 
 interface CacheBackendSnapshot {
@@ -635,15 +679,6 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     private deepSeekBalance: { summary: string; fetchedAt: number } | undefined;
     private deepSeekBalanceInflight: Promise<string | undefined> | undefined;
 
-    /**
-     * Scopes whose snapshots changed in THIS extension host. The session-state
-     * file is shared between windows: writing every in-memory snapshot would
-     * clobber another window's newer snapshot with our stale copy, so only
-     * dirty scopes are merged into the file on persist.
-     */
-    private readonly dirtyPrefixScopes = new Set<string>();
-    private readonly dirtyConversationScopes = new Set<string>();
-    private readonly dirtyToolCatalogScopes = new Set<string>();
     private readonly pendingManualCompactions = new Map<string, number>();
 
     /**
@@ -680,8 +715,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             const { type, ...data } = event;
             this.log(`chat.queue.${type}`, data);
         });
-        this.loadPersistedPrefixSnapshots();
-        this.loadPersistedContinuationState();
+        this.scheduleSessionStateMaintenance();
     }
 
     refreshLanguageModelChatInformation(): void {
@@ -710,8 +744,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     /**
      * Arms one provider-owned manual compaction for a conversation.
      * The following internal control turn consumes the flag. Requiring both a
-     * known persisted snapshot and a short expiry prevents an ordinary user
-     * prompt from accidentally entering recovery mode.
+     * known snapshot for a conversation used in this host and a short expiry
+     * prevents an ordinary user prompt from accidentally entering recovery mode.
      */
     armManualCompaction(conversationId: unknown): boolean {
         const normalized = normalizeManualCompactionConversationId(conversationId);
@@ -727,6 +761,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         return true;
     }
 
+    /** Most recent conversation used in this host (in-memory snapshots only). */
     getMostRecentConversationId(): string | undefined {
         let latest: { conversationId: string; updatedAt: number } | undefined;
         for (const [scope, snapshot] of this.conversationMessageSnapshots) {
@@ -1190,6 +1225,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         ) {
             return config;
         }
+        this.ensureSessionScopeLoaded(scope);
 
         // Sort tools by name for stable fingerprinting — VS Code can change
         // enumeration order between restarts.
@@ -1202,7 +1238,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             })
             : config.tools;
         const currentFingerprint = this.shortHash(stableJsonStringify(sortedTools));
-        const previous = this.stableToolCatalogs.get(scope);
+        const previous = this.stableToolCatalogs.get(scope)
+            ?? this.pendingToolCatalogSnapshots.get(scope);
         const recentActivation = messages.slice(-8).some(message =>
             message.role === "assistant"
             && message.tool_calls?.some(call => call.function.name.startsWith("activate_"))
@@ -1272,7 +1309,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         if (countUnchanged && !builtInChanged && removedTools.length === 0 && schemaChanged.length === 0 && !recentActivation && !configChanged) {
             this.stableToolCatalogs.delete(scope);
             this.stableToolCatalogs.set(scope, previous);
-            this.dirtyToolCatalogScopes.add(scope);
+            this.markToolCatalogPending(scope, previous);
             if (previous.fingerprint !== currentFingerprint) {
                 this.log("chat.tools.catalog_stabilized", {
                     requestId,
@@ -1325,7 +1362,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     };
                     this.stableToolCatalogs.delete(scope);
                     this.stableToolCatalogs.set(scope, next);
-                    this.dirtyToolCatalogScopes.add(scope);
+                    this.markToolCatalogPending(scope, next);
                     this.log("chat.tools.catalog_stabilized", {
                         requestId,
                         modelId,
@@ -1357,7 +1394,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             maxToolsAtSnapshot: configMaxTools,
         };
         this.stableToolCatalogs.set(scope, next);
-        this.dirtyToolCatalogScopes.add(scope);
+        this.markToolCatalogPending(scope, next);
         if (previous) {
             const previousNames = new Set(previous.tools.map(tool => tool.function.name));
             const currentNames = new Set(sortedTools.map(tool => tool.function.name));
@@ -1415,6 +1452,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         if (!scope) {
             return { messages, stabilized: false, prefix: { scope: "unavailable" } };
         }
+        this.ensureSessionScopeLoaded(scope);
 
         // Ephemeral provider injections (nudges, loop guards, repair prompts)
         // are not part of the host history, so they must not pollute the
@@ -1448,11 +1486,13 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             messageChars,
             ephemeralHash,
             ephemeralChars,
+            updatedAt: Date.now(),
         };
-        const previous = this.cachePrefixSnapshots.get(scope);
+        const previous = this.cachePrefixSnapshots.get(scope)
+            ?? this.pendingPrefixSnapshots.get(scope);
         const storeSnapshot = (snapshot: CachePrefixSnapshot): void => {
             this.cachePrefixSnapshots.set(scope, snapshot);
-            this.dirtyPrefixScopes.add(scope);
+            this.markPrefixSnapshotPending(scope, snapshot);
             this.persistPrefixSnapshots();
         };
 
@@ -1631,6 +1671,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             messageChars: stabilizedChars,
             ephemeralHash,
             ephemeralChars,
+            updatedAt: Date.now(),
         });
 
         let stabilizedIdenticalPrefix = 0;
@@ -2617,15 +2658,34 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         return nextMessages;
     }
 
-    /** Legacy globalState key: read once, migrated to the reasoning-map file, then cleared. */
+    /** Legacy globalState keys: read once, migrated to scope files, then cleared. */
     private static readonly REASONING_MAP_STATE_KEY = "llamacpp.deepseek_reasoning_map";
     private static readonly PREFIX_STATE_KEY = "llamacpp.prefix_snapshots";
     private static readonly PREFIX_STATE_VERSION_KEY = "llamacpp.prefix_snapshots.version";
     private static readonly CONTINUATION_STATE_KEY = "llamacpp.continuation_snapshots.v1";
     private static readonly SESSION_STATE_PERSIST_THROTTLE_MS = 2_000;
+    /** Each scope is its own file under `<globalStorage>/session-state/`. */
+    private static readonly SESSION_STATE_FILE_VERSION = 1;
+    /** A scope file untouched for this long is pruned unless this host used it. */
+    private static readonly SESSION_STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
+    private static readonly SESSION_STATE_MAX_FILES = 24;
+    private static readonly SESSION_STATE_MAX_BYTES = 48 * 1024 * 1024;
+    /** Background migration + retention scan, kept out of the startup period. */
+    private static readonly SESSION_STATE_BACKGROUND_DELAY_MS = 60_000;
     /** Mirrors BaseChatModelProvider.MAX_REASONING_SCOPE_CHARS (private there): a serialized scope stays within it. */
     private static readonly REASONING_MAP_MAX_SCOPE_CHARS = 2_000_000;
     private lastSessionStatePersistAt = 0;
+    /** One-time lazy open: the version check and legacy migrations run on first use, not at activation. */
+    private sessionStateOpened = false;
+    private sessionStateRetentionScheduled = false;
+    /** Scopes this host has read or written; retention never deletes their files. */
+    private readonly loadedSessionScopes = new Set<string>();
+    /** Snapshots changed in this host and not yet written; an explicit undefined records a deletion. */
+    private readonly pendingPrefixSnapshots = new Map<string, CachePrefixSnapshot | undefined>();
+    private readonly pendingConversationSnapshots = new Map<string, ConversationMessageSnapshot | undefined>();
+    private readonly pendingToolCatalogSnapshots = new Map<string, StableToolCatalogSnapshot | undefined>();
+    /** Serializes scope writes so two flushes never race on the same file. */
+    private sessionStateWrite: Promise<void> = Promise.resolve();
     private lastReasoningMapPersistAt = 0;
     private reasoningMapPersistTimer: ReturnType<typeof setTimeout> | undefined;
     private pendingReasoningMapPayload: string | undefined;
@@ -2856,35 +2916,51 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         return serializable;
     }
 
-    private loadPersistedPrefixSnapshots(): void {
-        const stored = this.readPersistedSessionState();
-        if (!stored) {
+    /**
+     * Loads a scope's file the first time this host touches it. Prefix
+     * stabilization, tool-catalog stabilization and continuation reuse all ask
+     * for the previous state, so the read happens right before the first use
+     * of the scope rather than at activation.
+     */
+    private ensureSessionScopeLoaded(scope: string | undefined): void {
+        if (!scope || !this.globalState || !this.storagePath) {
             return;
         }
-        try {
-            let loaded = 0;
-            for (const [scope, snapshot] of Object.entries(stored.prefixSnapshots ?? {})) {
-                if (snapshot && typeof snapshot.staticFieldsHash === "string") {
-                    this.cachePrefixSnapshots.set(scope, snapshot);
-                    loaded += 1;
-                }
-            }
-            if (loaded > 0) {
-                this.log("chat.cache.prefix_snapshots_loaded", { loadedEntries: loaded });
-            }
-        } catch (error) {
-            this.logError("chat.cache.prefix_snapshots_load_failed", error);
+        if (this.loadedSessionScopes.has(scope)) {
+            return;
+        }
+        this.openSessionStateStore();
+        this.loadedSessionScopes.add(scope);
+        const filePath = this.sessionScopeFilePath(scope);
+        if (!filePath) {
+            return;
+        }
+        const state = this.readSessionScopeFile(filePath);
+        if (state && state.scope === scope) {
+            this.applySessionScopeState(state);
         }
     }
 
     /**
-     * Session state (prefix snapshots + continuation snapshots) lives in a file
-     * under globalStorageUri, not in globalState/state.vscdb: individual prefix
-     * snapshots of large chats reach multiple megabytes, and VS Code warns above
-     * ~10 MB of extension state (and serializes the whole blob on every turn).
-     * Kept out of vscdb entirely, so nothing is dropped for size anymore.
+     * Session state (prefix snapshots, continuation snapshots and tool catalogs)
+     * lives in one file per scope under globalStorageUri, not in
+     * globalState/state.vscdb: individual snapshots of large chats reach
+     * multiple megabytes, VS Code warns above ~10 MB of extension state, and a
+     * single shared file made every turn read and rewrite all of it.
      */
-    private sessionStateFilePath(): string | undefined {
+    private sessionStateDirectory(): string | undefined {
+        if (!this.storagePath) {
+            return undefined;
+        }
+        try {
+            return path.join(this.storagePath, "session-state");
+        } catch {
+            return undefined;
+        }
+    }
+
+    /** The monolithic file written before per-scope storage; read once for migration. */
+    private legacySessionStateFilePath(): string | undefined {
         if (!this.storagePath) {
             return undefined;
         }
@@ -2895,192 +2971,775 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         }
     }
 
-    private readPersistedSessionState(): {
-        prefixSnapshots?: Record<string, CachePrefixSnapshot>;
-        conversations?: Record<string, ConversationMessageSnapshot>;
-        toolCatalogs?: Record<string, StableToolCatalogSnapshot>;
-    } | undefined {
+    private sessionScopeFilePath(scope: string): string | undefined {
+        const directory = this.sessionStateDirectory();
+        if (!directory) {
+            return undefined;
+        }
+        // Scopes contain \0 and model ids; only a hash is safe in a file name.
+        const name = createHash("sha256").update(scope, "utf8").digest("hex").slice(0, 32);
+        return path.join(directory, `${name}.json`);
+    }
+
+    /**
+     * One-time lazy open. The version marker, the legacy monolithic file and
+     * the legacy globalState keys are handled on the first scope access (or
+     * the first background preload), never in the constructor.
+     */
+    private openSessionStateStore(): void {
+        if (this.sessionStateOpened) {
+            return;
+        }
+        this.sessionStateOpened = true;
+        if (!this.globalState || !this.storagePath) {
+            return;
+        }
+        try {
+            if (!this.ensureSessionStateVersion()) {
+                return; // The old store was discarded; start empty in this host.
+            }
+            this.migrateLegacySessionStateFile();
+            this.migrateLegacySessionStateKeys();
+        } catch (error) {
+            this.logError("chat.cache.prefix_snapshots_load_failed", error);
+        }
+    }
+
+    /** Returns false when the stored minor version differs and the store was discarded, as before. */
+    private ensureSessionStateVersion(): boolean {
         if (!this.globalState) {
+            return false;
+        }
+        const extVersion = vscode.extensions.getExtension("mrlordcat.llama-vscode-chat")
+            ?.packageJSON?.version as string | undefined;
+        const savedVersion = this.globalState.get<string>(
+            LlamaCppChatModelProvider.PREFIX_STATE_VERSION_KEY
+        );
+        const savedMinor = savedVersion?.split(".").slice(0, 2).join(".") ?? "";
+        const extMinor = extVersion?.split(".").slice(0, 2).join(".") ?? "";
+        if (savedMinor === extMinor) {
+            return true;
+        }
+        const reason = !savedVersion ? "first_install" : "minor_version_changed";
+        this.log("chat.cache.prefix_snapshots_version_changed", {
+            reason,
+            savedVersion: savedVersion ?? "none",
+            currentVersion: extVersion ?? "unknown",
+        });
+        this.removeSessionStateStore();
+        if (extVersion) {
+            void this.globalState.update(
+                LlamaCppChatModelProvider.PREFIX_STATE_VERSION_KEY,
+                extVersion
+            );
+        }
+        return false;
+    }
+
+    private removeSessionStateStore(): void {
+        const directory = this.sessionStateDirectory();
+        if (directory) {
+            try {
+                fs.rmSync(directory, { recursive: true, force: true });
+            } catch (error) {
+                this.logError("chat.cache.prefix_snapshots_load_failed", error);
+            }
+        }
+        const legacyFilePath = this.legacySessionStateFilePath();
+        if (legacyFilePath) {
+            try {
+                fs.rmSync(legacyFilePath, { force: true });
+            } catch (error) {
+                this.logError("chat.cache.prefix_snapshots_load_failed", error);
+            }
+        }
+    }
+
+    /** Splits the pre-2.1.2 monolithic file into scope files, then deletes it. */
+    private migrateLegacySessionStateFile(): void {
+        const legacyFilePath = this.legacySessionStateFilePath();
+        if (!legacyFilePath) {
+            return;
+        }
+        let raw: string;
+        try {
+            raw = fs.readFileSync(legacyFilePath, "utf8");
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                this.logError("chat.cache.session_state_file_read_failed", error);
+            }
+            return;
+        }
+        let parsed: {
+            prefixSnapshots?: Record<string, CachePrefixSnapshot>;
+            conversations?: Record<string, ConversationMessageSnapshot>;
+            toolCatalogs?: Record<string, StableToolCatalogSnapshot>;
+        } | undefined;
+        try {
+            parsed = raw ? JSON.parse(raw) as typeof parsed : undefined;
+        } catch (error) {
+            this.logError("chat.cache.session_state_file_read_failed", error);
+            return;
+        }
+        if (!parsed || typeof parsed !== "object") {
+            fs.rmSync(legacyFilePath, { force: true });
+            return;
+        }
+        const stats = this.splitSessionStateIntoScopeFiles(
+            "session-state.json",
+            parsed.prefixSnapshots,
+            parsed.conversations,
+            parsed.toolCatalogs
+        );
+        if (!stats) {
+            return; // Keep the old file for the next attempt.
+        }
+        try {
+            fs.rmSync(legacyFilePath, { force: true });
+        } catch (error) {
+            this.logError("chat.cache.session_state_migrate_failed", error);
+        }
+    }
+
+    /** Moves the old globalState-backed snapshots into scope files and clears the large keys. */
+    private migrateLegacySessionStateKeys(): void {
+        if (!this.globalState) {
+            return;
+        }
+        const legacyPrefix = this.globalState.get<Record<string, CachePrefixSnapshot>>(
+            LlamaCppChatModelProvider.PREFIX_STATE_KEY
+        );
+        const legacyContinuation = this.globalState.get<{
+            conversations?: Record<string, ConversationMessageSnapshot>;
+            toolCatalogs?: Record<string, StableToolCatalogSnapshot>;
+        }>(LlamaCppChatModelProvider.CONTINUATION_STATE_KEY);
+        if (!legacyPrefix && !legacyContinuation) {
+            return;
+        }
+        if (this.sessionStateFileCount() > 0) {
+            return; // A scope store already exists and is newer than the old keys.
+        }
+        const stats = this.splitSessionStateIntoScopeFiles(
+            "vscdb",
+            legacyPrefix ?? {},
+            legacyContinuation?.conversations ?? {},
+            legacyContinuation?.toolCatalogs ?? {}
+        );
+        if (!stats) {
+            return;
+        }
+        void this.globalState.update(LlamaCppChatModelProvider.PREFIX_STATE_KEY, undefined);
+        void this.globalState.update(LlamaCppChatModelProvider.CONTINUATION_STATE_KEY, undefined);
+        this.log("chat.cache.session_state_migrated_from_vscdb", {
+            prefixEntries: Object.keys(legacyPrefix ?? {}).length,
+            continuationEntries: Object.keys(legacyContinuation ?? {}).length,
+        });
+    }
+
+    private sessionStateFileCount(): number {
+        const directory = this.sessionStateDirectory();
+        if (!directory) {
+            return 0;
+        }
+        try {
+            return fs.readdirSync(directory).filter(name => name.endsWith(".json")).length;
+        } catch {
+            return 0;
+        }
+    }
+
+    /**
+     * Writes a migrated snapshot set as one file per scope. Prefix snapshots
+     * have no timestamp of their own unless written by this version, so a
+     * prefix-only scope is dropped: there is no evidence it is still current.
+     */
+    private splitSessionStateIntoScopeFiles(
+        source: "session-state.json" | "vscdb",
+        prefixSnapshots: Record<string, CachePrefixSnapshot> | undefined,
+        conversations: Record<string, ConversationMessageSnapshot> | undefined,
+        toolCatalogs: Record<string, StableToolCatalogSnapshot> | undefined
+    ): { written: number; bytes: number } | undefined {
+        const directory = this.sessionStateDirectory();
+        if (!directory) {
+            return undefined;
+        }
+        const now = Date.now();
+        const migratedConversations: Record<string, ConversationMessageSnapshot> = {};
+        for (const [scope, snapshot] of Object.entries(conversations ?? {})) {
+            if (scope && this.isValidConversationSnapshot(snapshot)) {
+                migratedConversations[scope] = snapshot;
+            }
+        }
+        const scopes = new Set<string>([
+            ...Object.keys(prefixSnapshots ?? {}),
+            ...Object.keys(migratedConversations),
+            ...Object.keys(toolCatalogs ?? {}),
+        ]);
+        const entries: Array<{ state: SessionScopeStateFile; payload: string; updatedAt: number }> = [];
+        let droppedByAge = 0;
+        let droppedWithoutTimestamp = 0;
+        for (const scope of scopes) {
+            const rawPrefix = prefixSnapshots?.[scope];
+            const prefix = rawPrefix && typeof rawPrefix.staticFieldsHash === "string" ? rawPrefix : undefined;
+            const conversation = migratedConversations[scope];
+            const rawCatalog = toolCatalogs?.[scope];
+            const catalog = rawCatalog
+                && Array.isArray(rawCatalog.tools)
+                && rawCatalog.tools.every(tool => typeof tool?.function?.name === "string")
+                && typeof rawCatalog.fingerprint === "string"
+                ? rawCatalog
+                : undefined;
+            const times: number[] = [];
+            const prefixTime = typeof prefix?.updatedAt === "number" && Number.isFinite(prefix.updatedAt)
+                ? prefix.updatedAt
+                : undefined;
+            if (prefixTime !== undefined) {
+                times.push(prefixTime);
+            }
+            if (conversation) {
+                times.push(Number.isFinite(conversation.updatedAt) ? conversation.updatedAt : now);
+            }
+            if (catalog) {
+                times.push(Number.isFinite(catalog.updatedAt) ? catalog.updatedAt : now);
+            }
+            if (times.length === 0) {
+                droppedWithoutTimestamp += 1;
+                continue; // Prefix-only scope without a timestamp to retain it by.
+            }
+            const updatedAt = Math.max(...times);
+            if (updatedAt < now - LlamaCppChatModelProvider.SESSION_STATE_MAX_AGE_MS) {
+                droppedByAge += 1;
+                continue;
+            }
+            const state: SessionScopeStateFile = {
+                version: LlamaCppChatModelProvider.SESSION_STATE_FILE_VERSION,
+                scope,
+                updatedAt,
+                ...(prefix ? { prefixSnapshot: prefix } : {}),
+                ...(conversation ? { conversation } : {}),
+                ...(catalog ? { toolCatalog: catalog } : {}),
+            };
+            entries.push({ state, payload: JSON.stringify(state), updatedAt });
+        }
+        entries.sort((left, right) => right.updatedAt - left.updatedAt);
+        // A window still running the old version can recreate session-state.json
+        // after this version wrote newer scope files. Never overwrite a scope
+        // file that already exists; the later retention pass accounts for it.
+        let skippedExisting = 0;
+        const candidates: typeof entries = [];
+        for (const entry of entries) {
+            const filePath = this.sessionScopeFilePath(entry.state.scope);
+            if (filePath && fs.existsSync(filePath)) {
+                skippedExisting += 1;
+                continue;
+            }
+            candidates.push(entry);
+        }
+        const kept = candidates.slice(0, LlamaCppChatModelProvider.SESSION_STATE_MAX_FILES);
+        const droppedByCount = candidates.length - kept.length;
+        let totalBytes = kept.reduce((total, entry) => total + Buffer.byteLength(entry.payload, "utf8"), 0);
+        let droppedBySize = 0;
+        while (totalBytes > LlamaCppChatModelProvider.SESSION_STATE_MAX_BYTES && kept.length > 1) {
+            const removed = kept.pop();
+            if (!removed) {
+                break;
+            }
+            totalBytes -= Buffer.byteLength(removed.payload, "utf8");
+            droppedBySize += 1;
+        }
+        let written = 0;
+        let writtenBytes = 0;
+        try {
+            fs.mkdirSync(directory, { recursive: true });
+            for (const entry of kept) {
+                const filePath = this.sessionScopeFilePath(entry.state.scope);
+                if (!filePath) {
+                    continue;
+                }
+                if (fs.existsSync(filePath)) {
+                    // Appeared between selection and write (another window migrated).
+                    skippedExisting += 1;
+                    continue;
+                }
+                const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+                fs.writeFileSync(tmpPath, entry.payload, "utf8");
+                fs.renameSync(tmpPath, filePath);
+                written += 1;
+                writtenBytes += Buffer.byteLength(entry.payload, "utf8");
+            }
+        } catch (error) {
+            this.logError("chat.cache.session_state_migrate_failed", error);
+            return undefined;
+        }
+        this.log("chat.cache.session_state_migrated", {
+            source,
+            scopesTotal: scopes.size,
+            scopesWritten: written,
+            skippedExisting,
+            droppedByAge,
+            droppedWithoutTimestamp,
+            droppedByCount,
+            droppedBySize,
+            bytesWritten: writtenBytes,
+        });
+        return { written, bytes: writtenBytes };
+    }
+
+    private isValidConversationSnapshot(
+        snapshot: ConversationMessageSnapshot | undefined
+    ): snapshot is ConversationMessageSnapshot {
+        return Boolean(
+            snapshot
+            && Array.isArray(snapshot.messages)
+            && snapshot.messages.length > 0
+            && snapshot.messages.every(message => this.isOpenAIChatMessage(message))
+        );
+    }
+
+    private readSessionScopeFile(filePath: string): SessionScopeStateFile | undefined {
+        let raw: string;
+        try {
+            raw = fs.readFileSync(filePath, "utf8");
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                this.logError("chat.cache.session_state_file_read_failed", error);
+            }
             return undefined;
         }
         try {
-            const extVersion = vscode.extensions.getExtension("mrlordcat.llama-vscode-chat")
-                ?.packageJSON?.version;
-            const savedVersion = this.globalState.get<string>(
-                LlamaCppChatModelProvider.PREFIX_STATE_VERSION_KEY
-            );
-            const savedMinor = savedVersion?.split(".").slice(0, 2).join(".") ?? "";
-            const extMinor = extVersion?.split(".").slice(0, 2).join(".") ?? "";
-            if (savedMinor !== extMinor) {
-                const reason = !savedVersion ? "first_install" : "minor_version_changed";
-                this.log("chat.cache.prefix_snapshots_version_changed", {
-                    reason,
-                    savedVersion: savedVersion ?? "none",
-                    currentVersion: extVersion ?? "unknown",
-                });
-                if (extVersion) {
-                    void this.globalState.update(
-                        LlamaCppChatModelProvider.PREFIX_STATE_VERSION_KEY,
-                        extVersion
-                    );
-                }
+            const parsed = raw ? JSON.parse(raw) as SessionScopeStateFile : undefined;
+            if (
+                !parsed
+                || typeof parsed !== "object"
+                || parsed.version !== LlamaCppChatModelProvider.SESSION_STATE_FILE_VERSION
+                || typeof parsed.scope !== "string"
+            ) {
                 return undefined;
             }
+            return parsed;
+        } catch (error) {
+            this.logError("chat.cache.session_state_file_read_failed", error);
+            return undefined;
+        }
+    }
 
-            const filePath = this.sessionStateFilePath();
-            let fileState: {
-                prefixSnapshots?: Record<string, CachePrefixSnapshot>;
-                conversations?: Record<string, ConversationMessageSnapshot>;
-                toolCatalogs?: Record<string, StableToolCatalogSnapshot>;
-            } | undefined;
-            if (filePath) {
+    /** Inserts the loaded scope last, so it is the newest entry in the bounded maps and cannot evict itself. */
+    private applySessionScopeState(state: SessionScopeStateFile): {
+        prefixes: number;
+        conversations: number;
+        toolCatalogs: number;
+    } {
+        let prefixes = 0;
+        let conversations = 0;
+        let toolCatalogs = 0;
+        // A pending change made in this host is fresher than the file and must
+        // not be replaced by a late lazy load of the same scope.
+        if (
+            state.prefixSnapshot
+            && typeof state.prefixSnapshot.staticFieldsHash === "string"
+            && !this.pendingPrefixSnapshots.has(state.scope)
+        ) {
+            this.cachePrefixSnapshots.set(state.scope, state.prefixSnapshot);
+            prefixes += 1;
+        }
+        const conversation = state.conversation;
+        if (this.isValidConversationSnapshot(conversation) && !this.pendingConversationSnapshots.has(state.scope)) {
+            this.conversationMessageSnapshots.set(state.scope, {
+                messages: conversation.messages,
+                tokenCount: Number.isFinite(conversation.tokenCount) ? Math.max(0, conversation.tokenCount) : 0,
+                updatedAt: Number.isFinite(conversation.updatedAt) ? conversation.updatedAt : Date.now(),
+                ...(conversation.migratedFromPrefix ? { migratedFromPrefix: true } : {}),
+            });
+            conversations += 1;
+        }
+        const catalog = state.toolCatalog;
+        if (
+            catalog
+            && Array.isArray(catalog.tools)
+            && catalog.tools.every(tool => typeof tool?.function?.name === "string")
+            && typeof catalog.fingerprint === "string"
+            && !this.pendingToolCatalogSnapshots.has(state.scope)
+        ) {
+            this.stableToolCatalogs.set(state.scope, {
+                ...catalog,
+                updatedAt: Number.isFinite(catalog.updatedAt) ? catalog.updatedAt : Date.now(),
+            });
+            toolCatalogs += 1;
+        }
+        return { prefixes, conversations, toolCatalogs };
+    }
+
+    /**
+     * Opens the store (running the one-time migration) and applies retention
+     * 60 s after activation, outside the startup period. A first chat turn runs
+     * the same work earlier through persistSessionState.
+     */
+    private scheduleSessionStateMaintenance(): void {
+        if (!this.globalState || !this.storagePath) {
+            return;
+        }
+        const timer = setTimeout(() => {
+            this.sessionStateRetentionScheduled = true;
+            void this.pruneSessionState()
+                .catch(error => this.logError("chat.cache.session_state_prune_failed", error));
+        }, LlamaCppChatModelProvider.SESSION_STATE_BACKGROUND_DELAY_MS);
+        timer.unref?.();
+    }
+
+    private async sessionStateFilesByMtime(): Promise<SessionStateFileInfo[]> {
+        const directory = this.sessionStateDirectory();
+        if (!directory) {
+            return [];
+        }
+        let names: string[];
+        try {
+            names = await fs.promises.readdir(directory);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                this.logError("chat.cache.session_state_prune_failed", error);
+            }
+            return [];
+        }
+        const files: SessionStateFileInfo[] = [];
+        await Promise.all(names.filter(name => name.endsWith(".json")).map(async name => {
+            const filePath = path.join(directory, name);
+            try {
+                const stat = await fs.promises.stat(filePath);
+                if (stat.isFile()) {
+                    files.push({ filePath, mtimeMs: stat.mtimeMs, size: stat.size });
+                }
+            } catch {
+                // Another window removed it between read and stat.
+            }
+        }));
+        return files.sort((left, right) => right.mtimeMs - left.mtimeMs);
+    }
+
+    /**
+     * Retention: newer than 7 days, at most 24 files, and at most 48 MB. Runs
+     * off the activation path (first flush or 60 s after activation) and never
+     * touches a scope used in this host.
+     */
+    async pruneSessionState(limits: SessionStateRetentionLimits = {}): Promise<void> {
+        if (!this.globalState || !this.storagePath) {
+            return;
+        }
+        this.openSessionStateStore();
+        try {
+            const maxAgeMs = limits.maxAgeMs ?? LlamaCppChatModelProvider.SESSION_STATE_MAX_AGE_MS;
+            const maxFiles = Math.max(1, limits.maxFiles ?? LlamaCppChatModelProvider.SESSION_STATE_MAX_FILES);
+            const maxBytes = Math.max(0, limits.maxBytes ?? LlamaCppChatModelProvider.SESSION_STATE_MAX_BYTES);
+            const files = await this.sessionStateFilesByMtime();
+            if (files.length === 0) {
+                return;
+            }
+            const protectedNames = new Set<string>();
+            // Scopes with a pending write count as in use even before the
+            // write queue reaches them; retention must not delete their file.
+            const scopesInUse = new Set<string>(this.loadedSessionScopes);
+            for (const scope of this.pendingPrefixSnapshots.keys()) {
+                scopesInUse.add(scope);
+            }
+            for (const scope of this.pendingConversationSnapshots.keys()) {
+                scopesInUse.add(scope);
+            }
+            for (const scope of this.pendingToolCatalogSnapshots.keys()) {
+                scopesInUse.add(scope);
+            }
+            for (const scope of scopesInUse) {
+                const filePath = this.sessionScopeFilePath(scope);
+                if (filePath) {
+                    protectedNames.add(path.basename(filePath));
+                }
+            }
+            const isProtected = (file: SessionStateFileInfo): boolean =>
+                protectedNames.has(path.basename(file.filePath));
+            const kept: SessionStateFileInfo[] = [];
+            const now = Date.now();
+            let deletedByAge = 0;
+            let deletedByCount = 0;
+            let deletedBySize = 0;
+            let bytesRemoved = 0;
+            const remove = async (file: SessionStateFileInfo): Promise<boolean> => {
                 try {
-                    const raw = fs.readFileSync(filePath, "utf8");
-                    if (raw) {
-                        fileState = JSON.parse(raw) as typeof fileState;
+                    await fs.promises.rm(file.filePath, { force: true });
+                    bytesRemoved += file.size;
+                    return true;
+                } catch (error) {
+                    this.logError("chat.cache.session_state_prune_failed", error);
+                    return false;
+                }
+            };
+            for (const file of files) {
+                if (!isProtected(file) && now - file.mtimeMs > maxAgeMs) {
+                    if (await remove(file)) {
+                        deletedByAge += 1;
+                    }
+                    continue;
+                }
+                kept.push(file);
+            }
+            const oldestKept = (): SessionStateFileInfo | undefined => {
+                for (let index = kept.length - 1; index >= 0; index--) {
+                    if (!isProtected(kept[index])) {
+                        return kept[index];
+                    }
+                }
+                return undefined;
+            };
+            while (kept.length > maxFiles) {
+                const candidate = oldestKept();
+                if (!candidate || !(await remove(candidate))) {
+                    break;
+                }
+                kept.splice(kept.indexOf(candidate), 1);
+                deletedByCount += 1;
+            }
+            let totalBytes = kept.reduce((total, file) => total + file.size, 0);
+            while (totalBytes > maxBytes) {
+                const candidate = oldestKept();
+                if (!candidate || !(await remove(candidate))) {
+                    break;
+                }
+                kept.splice(kept.indexOf(candidate), 1);
+                totalBytes -= candidate.size;
+                deletedBySize += 1;
+            }
+            if (deletedByAge + deletedByCount + deletedBySize > 0) {
+                this.log("chat.cache.session_state_pruned", {
+                    deletedByAge,
+                    deletedByCount,
+                    deletedBySize,
+                    bytesRemoved,
+                    filesRemaining: kept.length,
+                    bytesRemaining: totalBytes,
+                });
+            }
+        } catch (error) {
+            this.logError("chat.cache.session_state_prune_failed", error);
+        }
+    }
+
+    private markPrefixSnapshotPending(scope: string, snapshot: CachePrefixSnapshot | undefined): void {
+        if (!this.globalState || !this.storagePath) {
+            return; // No store (tests): keep everything in memory only.
+        }
+        this.pendingPrefixSnapshots.set(scope, snapshot);
+    }
+
+    private markConversationSnapshotPending(
+        scope: string,
+        snapshot: ConversationMessageSnapshot | undefined
+    ): void {
+        if (!this.globalState || !this.storagePath) {
+            return;
+        }
+        this.pendingConversationSnapshots.set(scope, snapshot);
+    }
+
+    private markToolCatalogPending(scope: string, snapshot: StableToolCatalogSnapshot): void {
+        if (!this.globalState || !this.storagePath) {
+            return;
+        }
+        this.pendingToolCatalogSnapshots.set(scope, snapshot);
+    }
+
+    /**
+     * The hot path (prefix stabilization) calls this once per attempt;
+     * serializing megabytes of snapshots on every attempt blocks the extension
+     * host. Throttle intermediate writes and flush for real at the end of each
+     * turn (persistContinuationState). Only scopes changed in this host are
+     * written, each into its own file.
+     */
+    private persistSessionState(force = false): Promise<void> {
+        if (!this.globalState || !this.storagePath) {
+            return Promise.resolve();
+        }
+        this.openSessionStateStore();
+        const now = Date.now();
+        if (!force && now - this.lastSessionStatePersistAt < LlamaCppChatModelProvider.SESSION_STATE_PERSIST_THROTTLE_MS) {
+            return Promise.resolve();
+        }
+        this.lastSessionStatePersistAt = now;
+        this.scheduleSessionStateRetention();
+        return this.enqueueSessionStateFlush();
+    }
+
+    /** Test hook: writes every pending scope and resolves after the write queue drains. */
+    flushSessionState(): Promise<void> {
+        return this.persistSessionState(true);
+    }
+
+    private enqueueSessionStateFlush(): Promise<void> {
+        const run = this.sessionStateWrite
+            .then(() => this.flushSessionStateNow())
+            .catch(error => this.logError("chat.cache.session_state_persist_failed", error));
+        this.sessionStateWrite = run;
+        return run;
+    }
+
+    private async flushSessionStateNow(): Promise<void> {
+        if (!this.globalState || !this.storagePath) {
+            return;
+        }
+        this.openSessionStateStore();
+        // Capture the pending values: a snapshot set while this flush runs must
+        // stay pending for the next one instead of being cleared by this write.
+        const pendingPrefix = new Map(this.pendingPrefixSnapshots);
+        const pendingConversations = new Map(this.pendingConversationSnapshots);
+        const pendingCatalogs = new Map(this.pendingToolCatalogSnapshots);
+        const scopes = new Set<string>([
+            ...pendingPrefix.keys(),
+            ...pendingConversations.keys(),
+            ...pendingCatalogs.keys(),
+        ]);
+        for (const scope of scopes) {
+            // A written scope is in use in this host; retention must not race
+            // the write by deleting its file.
+            this.loadedSessionScopes.add(scope);
+            const pending = {
+                prefix: { dirty: pendingPrefix.has(scope), value: pendingPrefix.get(scope) },
+                conversation: {
+                    dirty: pendingConversations.has(scope),
+                    value: pendingConversations.get(scope),
+                },
+                toolCatalog: { dirty: pendingCatalogs.has(scope), value: pendingCatalogs.get(scope) },
+            };
+            try {
+                await this.writeSessionScopeFile(scope, pending);
+            } catch (error) {
+                this.logError("chat.cache.session_state_persist_failed", error);
+                continue; // Leave the flags pending; the next flush retries.
+            }
+            this.clearPendingSessionScope(scope, pending);
+        }
+    }
+
+    /**
+     * Writes one scope file. A kind that is not pending keeps the value from
+     * that scope's existing file: the in-memory bounded maps may already have
+     * evicted it (the conversation map holds only 4 entries), and an eviction
+     * must not erase it from disk.
+     */
+    private async writeSessionScopeFile(
+        scope: string,
+        pending: {
+            prefix: { dirty: boolean; value: CachePrefixSnapshot | undefined };
+            conversation: { dirty: boolean; value: ConversationMessageSnapshot | undefined };
+            toolCatalog: { dirty: boolean; value: StableToolCatalogSnapshot | undefined };
+        }
+    ): Promise<void> {
+        const filePath = this.sessionScopeFilePath(scope);
+        if (!filePath) {
+            return;
+        }
+        let existing: SessionScopeStateFile | undefined;
+        // Nothing has to be kept from the file when every kind is pending.
+        if (!pending.prefix.dirty || !pending.conversation.dirty || !pending.toolCatalog.dirty) {
+            let existingRaw: string | undefined;
+            try {
+                existingRaw = await fs.promises.readFile(filePath, "utf8");
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                    this.logError("chat.cache.session_state_file_read_failed", error);
+                }
+            }
+            if (existingRaw) {
+                try {
+                    const parsed = JSON.parse(existingRaw) as SessionScopeStateFile;
+                    if (parsed && typeof parsed === "object" && parsed.scope === scope) {
+                        existing = parsed;
                     }
                 } catch (error) {
                     this.logError("chat.cache.session_state_file_read_failed", error);
                 }
             }
-
-            if (fileState && (
-                Object.keys(fileState.prefixSnapshots ?? {}).length > 0
-                || Object.keys(fileState.conversations ?? {}).length > 0
-            )) {
-                return fileState;
-            }
-
-            // Migration from the old globalState-backed store: read it once and
-            // clear the large keys so state.vscdb shrinks back.
-            const legacyPrefix = this.globalState.get<Record<string, CachePrefixSnapshot>>(
-                LlamaCppChatModelProvider.PREFIX_STATE_KEY
-            );
-            const legacyContinuation = this.globalState.get<{
-                conversations?: Record<string, ConversationMessageSnapshot>;
-                toolCatalogs?: Record<string, StableToolCatalogSnapshot>;
-            }>(LlamaCppChatModelProvider.CONTINUATION_STATE_KEY);
-            if (legacyPrefix || legacyContinuation) {
-                void this.globalState.update(LlamaCppChatModelProvider.PREFIX_STATE_KEY, undefined);
-                void this.globalState.update(LlamaCppChatModelProvider.CONTINUATION_STATE_KEY, undefined);
-                this.log("chat.cache.session_state_migrated_from_vscdb", {
-                    prefixEntries: Object.keys(legacyPrefix ?? {}).length,
-                    continuationEntries: Object.keys(legacyContinuation ?? {}).length,
-                });
-                return {
-                    prefixSnapshots: legacyPrefix ?? {},
-                    conversations: legacyContinuation?.conversations ?? {},
-                    toolCatalogs: legacyContinuation?.toolCatalogs ?? {},
-                };
-            }
-            return undefined;
+        }
+        const now = Date.now();
+        let prefix = pending.prefix.dirty ? pending.prefix.value : existing?.prefixSnapshot;
+        if (pending.prefix.dirty && prefix && !Number.isFinite(prefix.updatedAt)) {
+            prefix = { ...prefix, updatedAt: now };
+        }
+        const conversation = pending.conversation.dirty
+            ? pending.conversation.value
+            : existing?.conversation;
+        const toolCatalog = pending.toolCatalog.dirty
+            ? pending.toolCatalog.value
+            : existing?.toolCatalog;
+        if (!prefix && !conversation && !toolCatalog) {
+            // Every kind was explicitly deleted; force makes this a no-op
+            // when the file does not exist.
+            await fs.promises.rm(filePath, { force: true });
+            return;
+        }
+        const state: SessionScopeStateFile = {
+            version: LlamaCppChatModelProvider.SESSION_STATE_FILE_VERSION,
+            scope,
+            updatedAt: Math.max(
+                existing?.updatedAt ?? 0,
+                prefix?.updatedAt ?? 0,
+                conversation?.updatedAt ?? 0,
+                toolCatalog?.updatedAt ?? 0,
+                now
+            ),
+            ...(prefix ? { prefixSnapshot: prefix } : {}),
+            ...(conversation ? { conversation } : {}),
+            ...(toolCatalog ? { toolCatalog } : {}),
+        };
+        const payload = JSON.stringify(state);
+        const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+        try {
+            await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+            await fs.promises.writeFile(tmpPath, payload, "utf8");
+            await this.renameWithRetry(tmpPath, filePath);
         } catch (error) {
-            this.logError("chat.cache.prefix_snapshots_load_failed", error);
-            return undefined;
+            try {
+                await fs.promises.rm(tmpPath, { force: true });
+            } catch {
+                // The next write replaces it anyway.
+            }
+            throw error;
         }
     }
 
-    private async persistSessionState(force = false): Promise<void> {
-        if (!this.globalState) {
+    /** Clears a pending kind only when it still holds the value that was written. */
+    private clearPendingSessionScope(
+        scope: string,
+        written: {
+            prefix: { dirty: boolean; value: CachePrefixSnapshot | undefined };
+            conversation: { dirty: boolean; value: ConversationMessageSnapshot | undefined };
+            toolCatalog: { dirty: boolean; value: StableToolCatalogSnapshot | undefined };
+        }
+    ): void {
+        if (
+            written.prefix.dirty
+            && this.pendingPrefixSnapshots.has(scope)
+            && this.pendingPrefixSnapshots.get(scope) === written.prefix.value
+        ) {
+            this.pendingPrefixSnapshots.delete(scope);
+        }
+        if (
+            written.conversation.dirty
+            && this.pendingConversationSnapshots.has(scope)
+            && this.pendingConversationSnapshots.get(scope) === written.conversation.value
+        ) {
+            this.pendingConversationSnapshots.delete(scope);
+        }
+        if (
+            written.toolCatalog.dirty
+            && this.pendingToolCatalogSnapshots.has(scope)
+            && this.pendingToolCatalogSnapshots.get(scope) === written.toolCatalog.value
+        ) {
+            this.pendingToolCatalogSnapshots.delete(scope);
+        }
+    }
+
+    private scheduleSessionStateRetention(): void {
+        if (this.sessionStateRetentionScheduled) {
             return;
         }
-        // The hot path (prefix stabilization) calls this once per attempt;
-        // serializing megabytes of snapshots on every attempt blocks the
-        // extension host. Throttle intermediate writes and flush for real
-        // at the end of each turn (persistContinuationState).
-        const now = Date.now();
-        if (!force && now - this.lastSessionStatePersistAt < LlamaCppChatModelProvider.SESSION_STATE_PERSIST_THROTTLE_MS) {
-            return;
-        }
-        this.lastSessionStatePersistAt = now;
-        let tmpPath: string | undefined;
-        try {
-            const filePath = this.sessionStateFilePath();
-            if (!filePath) {
-                return;
-            }
-            // Merge with the current file instead of replacing it wholesale:
-            // the file is shared between windows, and every window holds only
-            // its own in-memory copy of the other scopes (loaded at startup,
-            // possibly stale). Writing everything would roll back snapshots
-            // another window just persisted. Only scopes changed in THIS host
-            // are applied; scopes deleted here are removed from the file.
-            let fileState: {
-                prefixSnapshots?: Record<string, CachePrefixSnapshot>;
-                conversations?: Record<string, ConversationMessageSnapshot>;
-                toolCatalogs?: Record<string, StableToolCatalogSnapshot>;
-            } = {};
-            try {
-                const raw = fs.readFileSync(filePath, "utf8");
-                if (raw) {
-                    fileState = JSON.parse(raw) as typeof fileState;
-                }
-            } catch {
-                // Fresh or unreadable file — start from an empty state.
-            }
-
-            const prefixSnapshots: Record<string, CachePrefixSnapshot> = { ...(fileState.prefixSnapshots ?? {}) };
-            for (const [scope, snapshot] of this.cachePrefixSnapshots) {
-                if (this.dirtyPrefixScopes.has(scope)) {
-                    prefixSnapshots[scope] = snapshot;
-                }
-            }
-            for (const scope of this.dirtyPrefixScopes) {
-                if (this.cachePrefixSnapshots.get(scope) === undefined) {
-                    delete prefixSnapshots[scope];
-                }
-            }
-
-            const conversations: Record<string, ConversationMessageSnapshot> = { ...(fileState.conversations ?? {}) };
-            for (const [scope, snapshot] of this.conversationMessageSnapshots) {
-                if (this.dirtyConversationScopes.has(scope)) {
-                    conversations[scope] = snapshot;
-                }
-            }
-            for (const scope of this.dirtyConversationScopes) {
-                if (this.conversationMessageSnapshots.get(scope) === undefined) {
-                    delete conversations[scope];
-                }
-            }
-
-            const toolCatalogs: Record<string, StableToolCatalogSnapshot> = { ...(fileState.toolCatalogs ?? {}) };
-            for (const [scope, snapshot] of this.stableToolCatalogs) {
-                if (this.dirtyToolCatalogScopes.has(scope)) {
-                    toolCatalogs[scope] = snapshot;
-                }
-            }
-            for (const scope of this.dirtyToolCatalogScopes) {
-                if (this.stableToolCatalogs.get(scope) === undefined) {
-                    delete toolCatalogs[scope];
-                }
-            }
-
-            const payload = JSON.stringify({ prefixSnapshots, conversations, toolCatalogs });
-            tmpPath = filePath + ".tmp";
-            fs.mkdirSync(path.dirname(filePath), { recursive: true });
-            fs.writeFileSync(tmpPath, payload, "utf8");
-            await this.renameWithRetry(tmpPath, filePath);
-            tmpPath = undefined;
-            // The version marker stays small in globalState; large payloads no
-            // longer live there.
-            const extVersion = vscode.extensions.getExtension("mrlordcat.llama-vscode-chat")
-                ?.packageJSON?.version;
-            if (extVersion) {
-                void this.globalState.update(
-                    LlamaCppChatModelProvider.PREFIX_STATE_VERSION_KEY,
-                    extVersion
-                );
-            }
-        } catch (error) {
-            this.logError("chat.cache.session_state_persist_failed", error);
-            if (tmpPath) {
-                try {
-                    fs.rmSync(tmpPath, { force: true });
-                } catch {
-                    // The next write replaces it anyway.
-                }
-            }
-        }
+        this.sessionStateRetentionScheduled = true;
+        void this.pruneSessionState();
     }
 
     /** Windows briefly locks a file another window or a virus scanner is reading; retry the replace before giving up. */
@@ -3126,7 +3785,16 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         if (!scope) {
             return undefined;
         }
-        const snapshot = this.conversationMessageSnapshots.get(scope);
+        this.ensureSessionScopeLoaded(scope);
+        let snapshot = this.conversationMessageSnapshots.get(scope);
+        if (!snapshot) {
+            // The 4-entry map may have evicted a snapshot this turn; the
+            // pending value is still the freshest one for the scope.
+            snapshot = this.pendingConversationSnapshots.get(scope);
+            if (snapshot) {
+                this.conversationMessageSnapshots.set(scope, snapshot);
+            }
+        }
         if (snapshot) {
             this.conversationMessageSnapshots.delete(scope);
             this.conversationMessageSnapshots.set(scope, snapshot);
@@ -3142,96 +3810,21 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         if (!scope || messages.length === 0) {
             return;
         }
-        this.conversationMessageSnapshots.set(scope, {
+        const snapshot: ConversationMessageSnapshot = {
             messages: [...messages],
             tokenCount: Math.max(0, Math.floor(tokenCount)),
             updatedAt: Date.now(),
-        });
-        this.dirtyConversationScopes.add(scope);
+        };
+        this.conversationMessageSnapshots.set(scope, snapshot);
+        this.markConversationSnapshotPending(scope, snapshot);
     }
 
     private deleteConversationMessageSnapshot(scope: string | undefined): void {
         if (scope) {
             this.conversationMessageSnapshots.delete(scope);
-            // Keep the deletion visible to the shared file: a stale entry here
-            // would be loaded by the next window and misalign its prefix.
-            this.dirtyConversationScopes.add(scope);
-        }
-    }
-
-    private loadPersistedContinuationState(): void {
-        const stored = this.readPersistedSessionState();
-        if (!stored) {
-            return;
-        }
-        try {
-            let loadedConversations = 0;
-            let loadedToolCatalogs = 0;
-            for (const [scope, snapshot] of Object.entries(stored.conversations ?? {})) {
-                if (
-                    scope
-                    && snapshot
-                    && Array.isArray(snapshot.messages)
-                    && snapshot.messages.length > 0
-                    && snapshot.messages.every(message => this.isOpenAIChatMessage(message))
-                ) {
-                    this.conversationMessageSnapshots.set(scope, {
-                        messages: snapshot.messages,
-                        tokenCount: Number.isFinite(snapshot.tokenCount) ? Math.max(0, snapshot.tokenCount) : 0,
-                        updatedAt: Number.isFinite(snapshot.updatedAt) ? snapshot.updatedAt : Date.now(),
-                    });
-                    loadedConversations += 1;
-                }
-            }
-            for (const [scope, snapshot] of Object.entries(stored.toolCatalogs ?? {})) {
-                if (
-                    scope
-                    && snapshot
-                    && Array.isArray(snapshot.tools)
-                    && snapshot.tools.every(tool => typeof tool?.function?.name === "string")
-                    && typeof snapshot.fingerprint === "string"
-                ) {
-                    this.stableToolCatalogs.set(scope, {
-                        ...snapshot,
-                        updatedAt: Number.isFinite(snapshot.updatedAt) ? snapshot.updatedAt : Date.now(),
-                    });
-                    loadedToolCatalogs += 1;
-                }
-            }
-
-            // First upgrade from the in-memory implementation: the persisted
-            // prefix snapshot already contains the exact messages sent on the
-            // previous successful request, so use it as the continuation base.
-            if (loadedConversations === 0) {
-                for (const [scope, prefix] of this.cachePrefixSnapshots) {
-                    try {
-                        const messages = prefix.messageParts.map(part => JSON.parse(part) as unknown);
-                        if (messages.length > 0 && messages.every(message => this.isOpenAIChatMessage(message))) {
-                            const typedMessages = messages as OpenAIChatMessage[];
-                            this.conversationMessageSnapshots.set(scope, {
-                                messages: typedMessages,
-                                tokenCount: this.estimateOpenAiMessageTokens(typedMessages),
-                                updatedAt: Date.now(),
-                                migratedFromPrefix: true,
-                            });
-                            loadedConversations += 1;
-                        }
-                    } catch {
-                        // Ignore one malformed legacy prefix and continue loading others.
-                    }
-                }
-                if (loadedConversations > 0) {
-                    this.log("chat.messages.snapshot_migrated", { loadedEntries: loadedConversations });
-                }
-            }
-            if (loadedConversations > 0 || loadedToolCatalogs > 0) {
-                this.log("chat.continuation.state_loaded", {
-                    conversationEntries: loadedConversations,
-                    toolCatalogEntries: loadedToolCatalogs,
-                });
-            }
-        } catch (error) {
-            this.logError("chat.continuation.state_load_failed", error);
+            // Keep the deletion visible to this scope's file: a stale entry
+            // there would be loaded by the next window and misalign its prefix.
+            this.markConversationSnapshotPending(scope, undefined);
         }
     }
 
@@ -5616,7 +6209,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 estimatedUsagePercent,
                 tokenCountSource: prepared.tokenCountSource,
             };
-            this.log("chat.context.usage", latestContextUsage);
+            this.log("chat.context.usage", contextUsageForLog(latestContextUsage));
             this._onDidUpdateContextUsage.fire(latestContextUsage);
 
             if (manualCompactionRequested) {
@@ -5786,7 +6379,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                             estimatedUsagePercent: overflowEstimatedUsagePercent,
                             tokenCountSource: overflowCount.source,
                         };
-                        this.log("chat.context.usage", latestContextUsage);
+                        this.log("chat.context.usage", contextUsageForLog(latestContextUsage));
                         this._onDidUpdateContextUsage.fire(latestContextUsage);
                     }
 
@@ -6542,7 +7135,17 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 toolCallReliability: reliabilityMetrics,
                 toolCallRepairRetryCount,
                 toolResultMode: activeToolResultMode,
-                contextUsage: latestContextUsage,
+                // chat.context.usage of the same request already logged the context; only its totals are repeated here.
+                contextUsage: latestContextUsage
+                    ? {
+                        estimatedUsedTokens: latestContextUsage.estimatedUsedTokens,
+                        estimatedUsagePercent: latestContextUsage.estimatedUsagePercent,
+                        messageTokensAfterCompact: latestContextUsage.messageTokensAfterCompact,
+                        autoCompacted: latestContextUsage.autoCompacted,
+                        hardCompacted: latestContextUsage.hardCompacted,
+                        tokenCountSource: latestContextUsage.tokenCountSource,
+                    }
+                    : undefined,
                 metrics,
             });
 

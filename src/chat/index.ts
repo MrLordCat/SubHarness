@@ -191,6 +191,28 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		findGit: findGitExecutable,
 		log: deps.log,
 	});
+	const changeMaintenance = setTimeout(() => {
+		void changes.maintain().catch(() => undefined);
+	}, 12_000);
+	changeMaintenance.unref?.();
+	context.subscriptions.push({ dispose: () => clearTimeout(changeMaintenance) });
+	const sessionStore = new ChatSessionStore(root);
+	const sessionRetention = setTimeout(() => {
+		const started = Date.now();
+		void sessionStore.pruneOrphans()
+			.then(result => deps.log?.("storage.retention.done", {
+				store: "chat-sessions",
+				removedFiles: result.removedFiles,
+				removedBytes: result.removedBytes,
+				durationMs: Date.now() - started,
+			}))
+			.catch(error => deps.log?.("storage.retention.failed", {
+				store: "chat-sessions",
+				message: error instanceof Error ? error.message : String(error),
+			}));
+	}, 7_000);
+	sessionRetention.unref?.();
+	context.subscriptions.push({ dispose: () => clearTimeout(sessionRetention) });
 	const terminals = new CocoTerminalManager(vscode.window, undefined, deps.log, "Chat");
 	const reportInvalidRule = (pattern: string, error: string) => deps.log?.("chat.dangerous_rule_invalid", { pattern, error });
 	const catalog = new ChatToolCatalog({
@@ -246,7 +268,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 		},
 		backend: deps.composite,
 		onDidChangeModels: deps.composite.onDidChangeLanguageModelChatInformation ?? NEVER_FIRES,
-		store: new ChatSessionStore(root),
+		store: sessionStore,
 		tools: createChatToolSource(catalog),
 		state: context.workspaceState,
 		globalState: context.globalState,

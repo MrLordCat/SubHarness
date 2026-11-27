@@ -17,6 +17,24 @@ export interface ChatChangeTrackerOptions {
 	log?: (event: string, data: Record<string, unknown>) => void;
 }
 
+export interface ChatChangeTrackerMaintenanceOptions {
+	/** Pack a repository once it has more loose objects than this. */
+	maxLooseObjects?: number;
+	/** A shadow repository of a folder that no longer exists is removed after this idle time. */
+	repoMaxAgeMs?: number;
+}
+
+export interface ChatChangeTrackerMaintenanceResult {
+	store: "chat-changes";
+	removedFiles: number;
+	removedBytes: number;
+	durationMs: number;
+	packedRepos: number;
+	removedRepos: number;
+	looseObjects: number;
+	errors: number;
+}
+
 /** Snapshot of each tracked folder before the turn's first writing tool ran. */
 export type TurnSnapshot = ReadonlyMap<string, ShadowGitSnapshot>;
 
@@ -81,6 +99,44 @@ export interface ChatChangeTrackerLike {
 const FILE_VERSION = 1;
 const SESSION_ID = /^[A-Za-z0-9-]{1,64}$/;
 const MAX_TURN_RECORDS = 200;
+const ROOT_MARKER = "aab-root.json";
+
+async function readRootMarker(file: string): Promise<string | undefined> {
+	try {
+		const value = JSON.parse(await fs.readFile(file, "utf8")) as { root?: unknown };
+		return typeof value.root === "string" && path.isAbsolute(value.root) ? value.root : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function isDirectory(directoryPath: string): Promise<boolean> {
+	try {
+		return (await fs.stat(directoryPath)).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+async function directoryUsage(directory: string): Promise<{ files: number; bytes: number }> {
+	let files = 0, bytes = 0;
+	const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+	for (const entry of entries) {
+		const full = path.join(directory, entry.name);
+		if (entry.isDirectory()) {
+			const nested = await directoryUsage(full);
+			files += nested.files;
+			bytes += nested.bytes;
+		} else if (entry.isFile()) {
+			const info = await fs.stat(full).catch(() => undefined);
+			if (info) {
+				files++;
+				bytes += info.size;
+			}
+		}
+	}
+	return { files, bytes };
+}
 
 function rootKey(root: string): string {
 	const normalized = process.platform === "win32" ? root.toLowerCase() : root;
@@ -610,9 +666,102 @@ export class ChatChangeTracker implements ChatChangeTrackerLike {
 		if (!gitPath) {
 			return undefined;
 		}
-		const repo = new ShadowGitRepo({ gitPath, gitDir: path.join(this._options.storageDir, "shadow", rootKey(root)), workTree: root });
+		const gitDir = path.join(this._options.storageDir, "shadow", rootKey(root));
+		const repo = new ShadowGitRepo({ gitPath, gitDir, workTree: root });
 		this._repos.set(root, repo);
+		// The marker lets a later window tell an obsolete workspace root from one that
+		// is merely not open here when it decides whether a shadow repository is stale.
+		void fs.mkdir(gitDir, { recursive: true })
+			.then(() => fs.writeFile(path.join(gitDir, ROOT_MARKER), JSON.stringify({ root }), "utf8"))
+			.catch(() => undefined);
 		return repo;
+	}
+
+	/**
+	 * Packs loose objects in the shadow repositories and removes repositories whose
+	 * workspace folder is gone and that have been idle past the retention window.
+	 * Snapshot objects are never pruned: trees and blobs referenced only by chat
+	 * state have no git ref, and packing keeps every object.
+	 */
+	async maintain(options: ChatChangeTrackerMaintenanceOptions = {}): Promise<ChatChangeTrackerMaintenanceResult> {
+		const started = Date.now();
+		const maxLooseObjects = Math.max(1, Math.floor(options.maxLooseObjects ?? 2_000));
+		const repoMaxAgeMs = Math.max(0, options.repoMaxAgeMs ?? 30 * 86400_000);
+		const result: ChatChangeTrackerMaintenanceResult = {
+			store: "chat-changes", removedFiles: 0, removedBytes: 0, durationMs: 0,
+			packedRepos: 0, removedRepos: 0, looseObjects: 0, errors: 0,
+		};
+		try {
+			this._gitPath ??= this._options.findGit().catch(() => undefined);
+			const gitPath = await this._gitPath;
+			if (!gitPath) {
+				return this._finishMaintenance(result, started);
+			}
+			const shadowRoot = path.join(this._options.storageDir, "shadow");
+			const currentRoots = new Map(this._options.folders().map(folder => [rootKey(folder.fsPath), folder.fsPath]));
+			const entries = await fs.readdir(shadowRoot, { withFileTypes: true }).catch(() => []);
+			for (const entry of entries) {
+				if (!entry.isDirectory() || !/^[0-9a-f]{16}$/.test(entry.name)) {
+					continue;
+				}
+				try {
+					const gitDir = path.join(shadowRoot, entry.name);
+					const currentRoot = currentRoots.get(entry.name);
+					const markerRoot = currentRoot ?? await readRootMarker(path.join(gitDir, ROOT_MARKER));
+					if (markerRoot === undefined) {
+						// A repository made before markers existed: without its root path it
+						// cannot be proven obsolete, so it is left alone.
+						continue;
+					}
+					if (await isDirectory(markerRoot)) {
+						const repo = currentRoot !== undefined
+							? await this._repo(markerRoot)
+							: new ShadowGitRepo({ gitPath, gitDir, workTree: markerRoot });
+						if (!repo) {
+							continue;
+						}
+						const before = await directoryUsage(gitDir);
+						const maintenance = await repo.maintain(maxLooseObjects);
+						const after = await directoryUsage(gitDir);
+						result.looseObjects += maintenance.looseObjects;
+						if (maintenance.packed) {
+							result.packedRepos++;
+							result.removedFiles += Math.max(0, before.files - after.files);
+							result.removedBytes += Math.max(0, before.bytes - after.bytes);
+						}
+						continue;
+					}
+					const info = await fs.stat(gitDir).catch(() => undefined);
+					if (!info || Date.now() - info.mtimeMs <= repoMaxAgeMs) {
+						continue;
+					}
+					const usage = await directoryUsage(gitDir);
+					await fs.rm(gitDir, { recursive: true, force: true });
+					this._repos.delete(markerRoot);
+					this._disabled.delete(markerRoot);
+					result.removedRepos++;
+					result.removedFiles += usage.files;
+					result.removedBytes += usage.bytes;
+				} catch {
+					// One unreadable repository must not stop the others; the summary counts it.
+					result.errors++;
+				}
+			}
+		} catch (error) {
+			this._options.log?.("storage.retention.failed", {
+				store: "chat-changes",
+				message: error instanceof Error ? error.message : String(error),
+			});
+			result.durationMs = Date.now() - started;
+			return result;
+		}
+		return this._finishMaintenance(result, started);
+	}
+
+	private _finishMaintenance(result: ChatChangeTrackerMaintenanceResult, started: number): ChatChangeTrackerMaintenanceResult {
+		result.durationMs = Date.now() - started;
+		this._options.log?.("storage.retention.done", { ...result });
+		return result;
 	}
 
 	private _disable(root: string, error: unknown): void {

@@ -201,6 +201,30 @@ async function removeFileIfPresent(filePath: string): Promise<void> {
 	}
 }
 
+/** One maintenance at a time across every VS Code window sharing this shadow repository. */
+async function acquirePackLock(filePath: string): Promise<{ release(): Promise<void> } | undefined> {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			await writeFile(filePath, `${process.pid} ${Date.now()}\n`, { encoding: "utf8", flag: "wx" });
+			return {
+				release: async () => {
+					await unlink(filePath).catch(() => undefined);
+				},
+			};
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+				return undefined;
+			}
+			const info = await stat(filePath).catch(() => undefined);
+			if (!info || Date.now() - info.mtimeMs <= 10 * 60_000) {
+				return undefined;
+			}
+			await unlink(filePath).catch(() => undefined);
+		}
+	}
+	return undefined;
+}
+
 function readGitExtensionPath(exportsValue: unknown): string | undefined {
 	if (typeof exportsValue !== "object" || exportsValue === null) {
 		return undefined;
@@ -374,6 +398,117 @@ export class ShadowGitRepo {
 			}
 			return text.slice(start === 0 ? 0 : start + 1).replace(/\r(?=\n)/g, "");
 		});
+	}
+
+	/**
+	 * Packs loose objects when the repository has accumulated many of them. Packing keeps
+	 * every object, including the trees and blobs that snapshots keep only in chat state,
+	 * so it is safe without refs. Runs through the same queue as snapshots and diffs.
+	 */
+	async maintain(maxLooseObjects = 2_000): Promise<{ looseObjects: number; packed: boolean }> {
+		await this.init();
+		return this.enqueue(async () => {
+			const looseObjects = await this.countLooseObjects();
+			if (looseObjects <= Math.max(1, Math.floor(maxLooseObjects))) {
+				return { looseObjects, packed: false };
+			}
+			return { looseObjects, packed: await this.packAllObjects() };
+		});
+	}
+
+	/**
+	 * `git repack` only packs objects reachable from refs; a shadow repository has no refs,
+	 * so it would leave every snapshot loose. Feeding every object id to pack-objects packs
+	 * unreachable trees and blobs too; prune-packed then removes only loose copies that are
+	 * now in the new pack. Older packs are removed only after the new pack and its index
+	 * exist, and a cross-window lock prevents two conductors from deleting each other's pack.
+	 */
+	private async packAllObjects(): Promise<boolean> {
+		const packDir = path.join(this.options.gitDir, "objects", "pack");
+		await mkdir(packDir, { recursive: true });
+		const lock = await acquirePackLock(path.join(this.options.gitDir, "aab-pack.lock"));
+		if (!lock) {
+			return false;
+		}
+		try {
+			// Only indexed packs are candidates for deletion: a pack left by an interrupted
+			// writer has no index and may be the only copy of objects, so it stays.
+			const before = new Set((await readdir(packDir)).filter(name => name.endsWith(".idx")).map(name => name.slice(0, -".idx".length)));
+			const objects = await this.listLocalObjectIds();
+			if (objects.length === 0) {
+				return false;
+			}
+			const packed = (await this.execGit(
+				["pack-objects", "--quiet", path.join(packDir, "pack")],
+				{ input: objects, label: "pack-objects" },
+			)).toString("utf8").trim();
+			if (!packed) {
+				return false;
+			}
+			const newPack = `pack-${packed}`;
+			if (!(await isFile(path.join(packDir, `${newPack}.idx`)))) {
+				return false;
+			}
+			await this.execGit(["prune-packed"], { label: "prune-packed" });
+			for (const old of before) {
+				if (old === newPack) {
+					continue;
+				}
+				await removeFileIfPresent(path.join(packDir, `${old}.pack`));
+				await removeFileIfPresent(path.join(packDir, `${old}.idx`));
+			}
+			return true;
+		} finally {
+			await lock.release();
+		}
+	}
+
+	/**
+	 * Object ids stored in this shadow repository only. `cat-file --batch-all-objects`
+	 * would also list the project's alternate object store, which must not be copied
+	 * into the shadow pack.
+	 */
+	private async listLocalObjectIds(): Promise<Buffer> {
+		const objectsDir = path.join(this.options.gitDir, "objects");
+		const ids = new Set<string>();
+		const folders = await readdir(objectsDir, { withFileTypes: true }).catch(() => []);
+		for (const folder of folders) {
+			if (!folder.isDirectory() || !/^[0-9a-f]{2}$/.test(folder.name)) {
+				continue;
+			}
+			const files = await readdir(path.join(objectsDir, folder.name)).catch(() => []);
+			for (const file of files) {
+				if (/^[0-9a-f]{38}$/.test(file) || /^[0-9a-f]{62}$/.test(file)) {
+					ids.add(`${folder.name}${file}`);
+				}
+			}
+		}
+		const packDir = path.join(objectsDir, "pack");
+		const indexes = (await readdir(packDir).catch(() => [])).filter(name => name.endsWith(".idx"));
+		for (const index of indexes) {
+			const listing = await this.execGit(["verify-pack", "-v", path.join(packDir, index)], { label: "verify-pack" });
+			for (const line of listing.toString("utf8").split("\n")) {
+				const match = /^([0-9a-f]{40,64}) /.exec(line);
+				if (match) {
+					ids.add(match[1]);
+				}
+			}
+		}
+		return Buffer.from(ids.size > 0 ? `${[...ids].join("\n")}\n` : "", "utf8");
+	}
+
+	private async countLooseObjects(): Promise<number> {
+		const objectsDir = path.join(this.options.gitDir, "objects");
+		const entries = await readdir(objectsDir, { withFileTypes: true }).catch(() => []);
+		let count = 0;
+		for (const entry of entries) {
+			if (!entry.isDirectory() || !/^[0-9a-f]{2}$/.test(entry.name)) {
+				continue;
+			}
+			const files = await readdir(path.join(objectsDir, entry.name)).catch(() => []);
+			count += files.length;
+		}
+		return count;
 	}
 
 	private enqueue<T>(operation: () => Promise<T>): Promise<T> {

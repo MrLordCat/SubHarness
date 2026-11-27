@@ -19,6 +19,13 @@ import type {
 import type { LlamaLogSink } from "../logger";
 import { asRecord, isCacheControlPart, stripTerminalControlNoise } from "../utils";
 import { toolResultCharLimit } from "../tools/tool-result-limits";
+import {
+	chooseClaudeRuntimeBinary,
+	claudeRuntimeCandidates,
+	installedClaudeRuntimePath,
+	installedClaudeSdkVersion,
+	latestInstalledClaudeRuntime,
+} from "./runtime-installer";
 
 export const CLAUDE_ACTIVE_TURN_TIMEOUT_MS = 300_000;
 const TOOL_CARD_SETTLE_MS = 30;
@@ -427,9 +434,10 @@ class AsyncMessageQueue implements AsyncIterable<SDKUserMessage> {
 /**
  * Whether the current user has Claude account login evidence on disk.
  *
- * The bundled claude.exe always exists (it ships with our extension), so
- * binary presence alone must NOT mean "connected": on a machine where the
- * user never signed in, the SDK would fail at request time. Evidence:
+ * The Claude runtime is installed separately from the login (the Anthropic extension, a platform
+ * package in development, or the runtime SubHarness downloads on demand), so binary presence alone
+ * must NOT mean "connected": on a machine where the user never signed in, the SDK would fail at
+ * request time. Evidence:
  *  - ~/.claude/.credentials.json (Claude Code CLI credentials), or
  *  - ~/.claude.json with an oauthAccount.accountUuid entry.
  */
@@ -463,36 +471,99 @@ export function hasClaudeAccountEvidence(homeDir = os.homedir()): boolean {
         return false;
 }
 
-export function resolveClaudeCodeBinary(
+/** Where the Claude runtime installer keeps downloaded versions; set once at activation. */
+let downloadedRuntimeRoot: string | undefined;
+let binaryCache: { key: string; value: string | undefined } | undefined;
+let loggedFallback = false;
+
+export function setClaudeRuntimeStorage(root: string | undefined): void {
+	downloadedRuntimeRoot = root;
+	binaryCache = undefined;
+}
+
+export function claudeRuntimeStorage(): string | undefined {
+	return downloadedRuntimeRoot;
+}
+
+/** Call after an install or when the configured paths change. */
+export function invalidateClaudeCodeBinaryCache(): void {
+	binaryCache = undefined;
+}
+
+function configuredClaudeCodePath(): string {
+	return vscode.workspace.getConfiguration("llamacpp").get<string>("claudeCliPath", "").trim();
+}
+
+function anthropicExtensionBinary(
+	extension: Pick<vscode.Extension<unknown>, "extensionPath"> | undefined
+): string | undefined {
+	if (!extension) {
+		return undefined;
+	}
+	const native = path.join(extension.extensionPath, "resources", "native-binary", process.platform === "win32" ? "claude.exe" : "claude");
+	return existsSync(native) ? native : undefined;
+}
+
+/** The platform package beside the installed Agent SDK; works in development, tests and older VSIX builds. */
+function sdkPlatformBinary(): string | undefined {
+	try {
+		const sdkEntry = createRequire(__filename).resolve("@anthropic-ai/claude-agent-sdk");
+		const scopeDir = path.dirname(path.dirname(sdkEntry));
+		for (const target of claudeRuntimeCandidates()) {
+			const bundled = path.join(scopeDir, target.folderName, target.executable);
+			if (existsSync(bundled)) {
+				return bundled;
+			}
+		}
+	} catch {
+		// The Agent SDK or its platform package is not installed.
+	}
+	return undefined;
+}
+
+/**
+ * A binary that is not a downloaded runtime: the setting, the official Anthropic extension, then
+ * the SDK platform package. The activation check treats any of these as "no download needed".
+ */
+export function resolvePreferredClaudeCodeBinary(
 	extension: Pick<vscode.Extension<unknown>, "extensionPath"> | undefined = vscode.extensions.getExtension("anthropic.claude-code")
 ): string | undefined {
-	const configuredPath = vscode.workspace.getConfiguration("llamacpp")
-		.get<string>("claudeCliPath", "")
-		.trim();
+	const configuredPath = configuredClaudeCodePath();
 	if (configuredPath && existsSync(configuredPath)) {
 		return configuredPath;
 	}
+	return anthropicExtensionBinary(extension) ?? sdkPlatformBinary();
+}
 
-	const executable = process.platform === "win32" ? "claude.exe" : "claude";
-	if (extension) {
-		const native = path.join(extension.extensionPath, "resources", "native-binary", executable);
-		if (existsSync(native)) {
-			return native;
+/**
+ * Resolution order: llama.cpp.claudeCliPath, the official Anthropic extension's native binary, the
+ * SDK platform package in node_modules (development, tests, older VSIX builds), the downloaded
+ * runtime of the exact Agent SDK version, then the newest other downloaded version as a fallback
+ * while the matching one installs. Synchronous and cached; installs invalidate the cache.
+ */
+export function resolveClaudeCodeBinary(
+	extension: Pick<vscode.Extension<unknown>, "extensionPath"> | undefined = vscode.extensions.getExtension("anthropic.claude-code")
+): string | undefined {
+	const configuredPath = configuredClaudeCodePath();
+	const sdkVersion = installedClaudeSdkVersion();
+	const key = [downloadedRuntimeRoot ?? "", sdkVersion ?? "", configuredPath, extension?.extensionPath ?? ""].join("\0");
+	// A cached path is reused only while the file is still there; a miss is never cached, so a runtime
+	// installed by another window is found without an explicit invalidation.
+	if (binaryCache?.key === key && binaryCache.value !== undefined && existsSync(binaryCache.value)) {
+		return binaryCache.value;
+	}
+	const preferred = resolvePreferredClaudeCodeBinary(extension);
+	const exact = installedClaudeRuntimePath(downloadedRuntimeRoot, sdkVersion);
+	const fallback = latestInstalledClaudeRuntime(downloadedRuntimeRoot);
+	const value = chooseClaudeRuntimeBinary(preferred, exact, fallback);
+	if (!preferred && !exact && fallback) {
+		if (!loggedFallback) {
+			loggedFallback = true;
+			console.warn(`[Local LLM] Using the downloaded Claude runtime ${fallback.version} until the runtime for Agent SDK ${sdkVersion ?? "unknown"} is installed.`);
 		}
 	}
-
-	try {
-		const sdkEntry = createRequire(__filename).resolve("@anthropic-ai/claude-agent-sdk");
-		const packageName = `claude-agent-sdk-${process.platform}-${process.arch}`;
-		const bundled = path.join(path.dirname(path.dirname(sdkEntry)), packageName, executable);
-		if (existsSync(bundled)) {
-			return bundled;
-		}
-	} catch {
-		// Neither installed runtime is available.
-	}
-
-	return undefined;
+	binaryCache = { key, value };
+	return value;
 }
 
 export class ClaudeAgentSession implements vscode.Disposable {

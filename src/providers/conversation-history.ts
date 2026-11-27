@@ -51,6 +51,56 @@ const isSystemMessage = (message: vscode.LanguageModelChatRequestMessage) => mes
 const JOURNAL_MAX_BYTES = 512 * 1024 * 1024;
 const JOURNAL_GARBAGE_MIN_BYTES = 8 * 1024 * 1024;
 const ASSET_PRUNE_MIN_AGE_MS = 24 * 60 * 60_000;
+
+/** Saved transcripts of chats not touched for 30 days are removed; the folder is capped at 100 MB. */
+export const CONVERSATION_HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
+export const CONVERSATION_HISTORY_MAX_BYTES = 100 * 1024 * 1024;
+/** The size cap leaves recently used chats alone, so another window's live chat is not cut. */
+export const CONVERSATION_HISTORY_CAP_MIN_AGE_MS = 7 * 24 * 60 * 60_000;
+
+export interface ConversationHistoryRetentionOptions {
+	now?: number;
+	maxAgeMs?: number;
+	maxBytes?: number;
+	minCapAgeMs?: number;
+}
+
+export interface ConversationHistoryRetentionResult {
+	removedFiles: number;
+	removedBytes: number;
+	removedConversations: number;
+	assetsRemoved: number;
+	assetsBytes: number;
+}
+
+async function folderUsage(directory: string): Promise<{ files: number; bytes: number }> {
+	let files = 0, bytes = 0;
+	const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+	for (const entry of entries) {
+		const full = path.join(directory, entry.name);
+		if (entry.isDirectory()) {
+			const nested = await folderUsage(full);
+			files += nested.files;
+			bytes += nested.bytes;
+		} else if (entry.isFile()) {
+			const info = await fs.stat(full).catch(() => undefined);
+			if (info) {
+				files++;
+				bytes += info.size;
+			}
+		}
+	}
+	return { files, bytes };
+}
+
+async function removeFile(file: string): Promise<boolean> {
+	try {
+		await fs.unlink(file);
+		return true;
+	} catch {
+		return false;
+	}
+}
 /** Screenshots accumulate over a long chat; only the newest ones stay in the transcript. */
 export const DEFAULT_HISTORY_IMAGE_LIMIT = 100;
 export const MAX_HISTORY_IMAGE_LIMIT = 2_000;
@@ -307,6 +357,119 @@ export class ConversationHistory {
 		}
 		return { removed, bytes };
 	}
+
+	private isEntryActive(key: string): boolean {
+		if (this.loading.has(key)) {
+			return true;
+		}
+		const entry = this.entries.get(key);
+		return entry !== undefined && (entry.active > 0 || entry.pending !== undefined);
+	}
+
+	/**
+	 * Drops saved transcripts of chats idle past the age limit and then trims the folder
+	 * to its size cap, oldest first. A transcript whose lease is open, or whose entry is
+	 * still loading, is never removed; the cap also leaves recently touched files alone so
+	 * a chat open in another window keeps its history. Unreferenced images are pruned here.
+	 */
+	async pruneHistory(options: ConversationHistoryRetentionOptions = {}): Promise<ConversationHistoryRetentionResult> {
+		const now = options.now ?? Date.now();
+		const maxAgeMs = Math.max(0, options.maxAgeMs ?? CONVERSATION_HISTORY_MAX_AGE_MS);
+		const maxBytes = Math.max(0, options.maxBytes ?? CONVERSATION_HISTORY_MAX_BYTES);
+		const minCapAgeMs = Math.max(0, options.minCapAgeMs ?? CONVERSATION_HISTORY_CAP_MIN_AGE_MS);
+
+		const result: ConversationHistoryRetentionResult = {
+			removedFiles: 0, removedBytes: 0, removedConversations: 0, assetsRemoved: 0, assetsBytes: 0,
+		};
+		const kept: Array<{ key: string; file: string; mtimeMs: number; size: number }> = [];
+		const removed = new Set<string>();
+		const entries = await fs.readdir(this.root, { withFileTypes: true }).catch(() => []);
+		for (const entry of entries) {
+			if (!entry.isFile()) {
+				continue;
+			}
+			const name = entry.name;
+			const file = path.join(this.root, name);
+			if (/^[0-9a-f]{64}\.json$/.test(name)) {
+				const key = name.slice(0, -".json".length);
+				const info = await fs.stat(file).catch(() => undefined);
+				if (!info) {
+					continue;
+				}
+				// A lease can start after the listing; check the live maps and the mtime
+				// again before deleting, so a conversation that just resumed is kept.
+				if (!this.isEntryActive(key) && now - info.mtimeMs > maxAgeMs) {
+					const current = await fs.stat(file).catch(() => undefined);
+					if (!current || now - current.mtimeMs <= maxAgeMs || this.isEntryActive(key)) {
+						kept.push({ key, file, mtimeMs: current?.mtimeMs ?? info.mtimeMs, size: current?.size ?? info.size });
+						continue;
+					}
+					if (await removeFile(file)) {
+						removed.add(key);
+						result.removedConversations++;
+						result.removedFiles++;
+						result.removedBytes += current.size;
+					}
+					continue;
+				}
+				if (!removed.has(key)) {
+					kept.push({ key, file, mtimeMs: info.mtimeMs, size: info.size });
+				}
+			} else if (name.endsWith(".tmp")) {
+				// A crash can leave a half-written transcript; it is never read back.
+				const info = await fs.stat(file).catch(() => undefined);
+				if (info && now - info.mtimeMs > ASSET_PRUNE_MIN_AGE_MS && await removeFile(file)) {
+					result.removedFiles++;
+					result.removedBytes += info.size;
+				}
+			}
+		}
+
+		// Assets orphaned by the age pass are removed before the size cap is measured,
+		// so the cap does not delete transcripts just to make room for dead images.
+		const firstAssets = await this.pruneAssets(now).catch(() => ({ removed: 0, bytes: 0 }));
+		result.assetsRemoved += firstAssets.removed;
+		result.assetsBytes += firstAssets.bytes;
+		result.removedFiles += firstAssets.removed;
+		result.removedBytes += firstAssets.bytes;
+
+		let total = (await folderUsage(this.root)).bytes;
+		let capRemoved = 0;
+		if (total > maxBytes) {
+			const candidates = kept.sort((a, b) => a.mtimeMs - b.mtimeMs);
+			for (const candidate of candidates) {
+				if (total <= maxBytes) {
+					break;
+				}
+				if (this.isEntryActive(candidate.key)) {
+					continue;
+				}
+				const current = await fs.stat(candidate.file).catch(() => undefined);
+				if (!current || now - current.mtimeMs < minCapAgeMs || this.isEntryActive(candidate.key)) {
+					continue;
+				}
+				if (await removeFile(candidate.file)) {
+					total -= current.size;
+					capRemoved++;
+					result.removedConversations++;
+					result.removedFiles++;
+					result.removedBytes += current.size;
+				}
+			}
+		}
+
+		if (capRemoved > 0) {
+			// Deleting transcripts leaves their images behind; this drops only files no
+			// remaining transcript references and that are older than the asset grace period.
+			const assets = await this.pruneAssets(now).catch(() => ({ removed: 0, bytes: 0 }));
+			result.assetsRemoved += assets.removed;
+			result.assetsBytes += assets.bytes;
+			result.removedFiles += assets.removed;
+			result.removedBytes += assets.bytes;
+		}
+		return result;
+	}
+
 	private async persist(owner: Entry, file: string, revision: number, messages: readonly vscode.LanguageModelChatRequestMessage[]): Promise<void> {
 		const assets = new Map<string, Uint8Array>();
 		const collect = (part: unknown): void => {
@@ -418,24 +581,30 @@ export class ConversationHistory {
 		catch (error) { owner.active--; throw new Error(`Cannot save the incoming Chat transcript (${error instanceof Error ? error.message : String(error)}). Check workspace storage before continuing or switching models.`, { cause: error }); }
 		let finished = false;
 		return { messages, transcriptPath: file, servedBy: owner.servedBy, complete: async (parts, servedBy) => {
-			if (finished) { return; } finished = true; owner.active--;
-			if (servedBy) { owner.servedBy = servedBy; }
-			if (owner.revision !== revision) { return; }
-			const content = parts.flatMap(encodePart);
-			if (content.length) {
-				const combined: Part[] = [];
-				for (const part of content) {
-					const last = combined.at(-1);
-					if (part.type === "text" && last?.type === "text") { last.text += part.text; } else { combined.push(part); }
+			if (finished) { return; } finished = true;
+			// Keep the lease active until the final transcript is on disk: retention
+			// treats an active entry as in use and must not remove the file being written.
+			try {
+				if (servedBy) { owner.servedBy = servedBy; }
+				if (owner.revision !== revision) { return; }
+				const content = parts.flatMap(encodePart);
+				if (content.length) {
+					const combined: Part[] = [];
+					for (const part of content) {
+						const last = combined.at(-1);
+						if (part.type === "text" && last?.type === "text") { last.text += part.text; } else { combined.push(part); }
+					}
+					owner.messages = [...messages, decode({ role: vscode.LanguageModelChatMessageRole.Assistant, content: combined })];
 				}
-				owner.messages = [...messages, decode({ role: vscode.LanguageModelChatMessageRole.Assistant, content: combined })];
-			}
-			owner.messages = capHistoryImages(owner.messages, this.imageLimit()).messages;
-			await this.persist(owner, file, revision, owner.messages);
-			// Disk retains older chats; bound the live index.
-			if (this.entries.size > 16) {
-				const oldest = [...this.entries].find(([id, value]) => id !== key && value.active === 0 && !value.pending)?.[0];
-				if (oldest) { this.entries.delete(oldest); }
+				owner.messages = capHistoryImages(owner.messages, this.imageLimit()).messages;
+				await this.persist(owner, file, revision, owner.messages);
+				// Disk retains older chats; bound the live index.
+				if (this.entries.size > 16) {
+					const oldest = [...this.entries].find(([id, value]) => id !== key && value.active === 0 && !value.pending)?.[0];
+					if (oldest) { this.entries.delete(oldest); }
+				}
+			} finally {
+				owner.active--;
 			}
 		} };
 	}

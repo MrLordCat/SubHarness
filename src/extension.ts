@@ -43,9 +43,27 @@ import {
 } from "./codex/accounts";
 import { ClaudeChatModelProvider, clearPersistedClaudeSessionState, type ClaudeLiveTurnUpdate } from "./claude/claude-provider";
 import {
+	claudeRuntimeStorage,
+	invalidateClaudeCodeBinaryCache,
+	resolveClaudeCodeBinary,
+	resolvePreferredClaudeCodeBinary,
+	setClaudeRuntimeStorage,
+} from "./claude/app-server-client";
+import {
+	CLAUDE_RUNTIME_DOWNLOAD_ESTIMATE,
+	claudeRuntimeTarget,
+	downloadedClaudeRuntimeVersionForPath,
+	installClaudeRuntime,
+	installedClaudeRuntimePath,
+	installedClaudeSdkVersion,
+	latestInstalledClaudeRuntime,
+	shouldAutoInstallClaudeRuntime,
+} from "./claude/runtime-installer";
+import {
 	CLAUDE_DEFAULT_ACCOUNT_ID,
 	decodeClaudeAccountModelId,
 	findClaudeAccount,
+	hasClaudeLogin,
 	resolveActiveClaudeAccountId,
 	claudeProviderLabel,
 	resolveClaudeAccounts,
@@ -58,6 +76,7 @@ import { registerCocoCommands } from "./coco/commands";
 import { classifyCodexTurnCache } from "./context/cache-diagnostics";
 import { CompositeChatModelProvider } from "./composite-provider";
 import { ConversationHistory, resolveHistoryImageLimit } from "./providers/conversation-history";
+import { scheduleCursorStoreRetention } from "./cursor/retention";
 import { AUTO_UPDATE_MODES, ExtensionUpdater, resolveAutoUpdateMode, type AutoUpdateMode } from "./update/extension-updater";
 import type { ProviderRuntimeMetrics } from "./provider-metrics";
 import { getSubagentModelProfiles } from "./subagent-guidance";
@@ -542,6 +561,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const logService = new LlamaLogService(context);
 	// A Codex CLI downloaded by "Install Codex CLI" lives here; set before any app-server starts.
 	setCodexCliStorage(path.join(context.globalStorageUri.fsPath, "codex-cli"));
+	// The Claude runtime downloaded on first use lives here; set before any Claude session starts.
+	setClaudeRuntimeStorage(path.join(context.globalStorageUri.fsPath, "claude-runtime"));
 
 	// Production-grade crash logging: VS Code keeps the extension host alive on
 	// uncaught exceptions, but without these handlers the failure is silent to
@@ -700,11 +721,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const subscriptionUsage = new SubscriptionUsageLedger(path.join(context.globalStorageUri.fsPath, "subscription-usage"));
 	void subscriptionUsage.initialize().catch(error => logService.logError("subscription_usage.initialize_failed", error));
 	context.subscriptions.push({ dispose: () => subscriptionUsage.dispose() });
-	const assetPrune = setTimeout(() => {
-		void conversationHistory.pruneAssets().then(result => { if (result.removed) { logService.log("chat.history.assets_pruned", result); } }).catch(() => undefined);
-	}, 120_000);
-	assetPrune.unref?.();
-	context.subscriptions.push({ dispose: () => clearTimeout(assetPrune) });
+	// Old transcripts and their images are cleaned after startup, never on a chat turn.
+	const historyRetention = setTimeout(() => {
+		const started = Date.now();
+		void conversationHistory.pruneHistory()
+			.then(result => logService.log("storage.retention.done", {
+				store: "chat-history",
+				removedFiles: result.removedFiles,
+				removedBytes: result.removedBytes,
+				durationMs: Date.now() - started,
+				removedConversations: result.removedConversations,
+			}))
+			.catch(error => logService.logError("storage.retention.failed", error, { store: "chat-history" }));
+	}, 8_000);
+	historyRetention.unref?.();
+	context.subscriptions.push({ dispose: () => clearTimeout(historyRetention) });
+	const cursorRetention = scheduleCursorStoreRetention({
+		root: path.join(context.storageUri?.fsPath ?? context.globalStorageUri.fsPath, "cursor-sdk"),
+		log: (event, data) => logService.log(event, data),
+	});
+	context.subscriptions.push(cursorRetention);
 	const compositeProvider = new CompositeChatModelProvider({ providers: [
 		{ id: "http", provider: llamaProvider, ownsModel: ownsHttpModel,
 			usesConversationHistory: model => llamaProvider.usesConversationHistory(model),
@@ -1040,15 +1076,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		void context.globalState.update(CLAUDE_PENDING_SIGN_IN_KEY, undefined);
 		logService.log("claude.account.pending_sign_in", { account: pendingClaudeAccount });
 		const timer = setTimeout(() => {
-			void claudeProviders.get(pendingClaudeAccount)?.signIn()
-				.then(() => quickActionsProvider.refresh())
-				.catch(error => {
-					logService.logError("claude.account.pending_sign_in_failed", error);
-					const message = error instanceof Error ? error.message : String(error);
-					void vscode.window.showErrorMessage(
-						`Claude account sign-in did not finish: ${message}. Open Quick Access → Claude → Claude Accounts to retry.`
-					);
-				});
+			void (async () => {
+				if (!await ensureClaudeRuntime()) {
+					return;
+				}
+				await claudeProviders.get(pendingClaudeAccount)?.signIn();
+				quickActionsProvider.refresh();
+			})().catch(error => {
+				logService.logError("claude.account.pending_sign_in_failed", error);
+				const message = error instanceof Error ? error.message : String(error);
+				void vscode.window.showErrorMessage(
+					`Claude account sign-in did not finish: ${message}. Open Quick Access → Claude → Claude Accounts to retry.`
+				);
+			});
 		}, 3_000);
 		timer.unref?.();
 	}
@@ -1888,6 +1928,9 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 				return;
 			}
 			try {
+				if (!await ensureClaudeRuntime()) {
+					return;
+				}
 				await claudeProviderFor(account.id).signIn();
 				quickActionsProvider.refresh();
 			} catch (error) {
@@ -2156,6 +2199,127 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 		})
 	);
 
+	let claudeRuntimeInstall: Promise<boolean> | undefined;
+	/** Downloads the runtime for the exact installed Agent SDK version; true when one is ready. */
+	const installClaudeRuntimeWithProgress = (): Promise<boolean> => {
+		if (claudeRuntimeInstall) {
+			return claudeRuntimeInstall;
+		}
+		const attempt = async (): Promise<boolean> => {
+			const root = claudeRuntimeStorage();
+			const version = installedClaudeSdkVersion();
+			const target = claudeRuntimeTarget();
+			if (!root || !version || !target) {
+				const error = new Error("The Claude runtime is not available for this platform.");
+				logService.logError("claude.runtime_install.failed", error);
+				vscode.window.showErrorMessage(`Unable to install the Claude runtime: ${error.message}`);
+				return false;
+			}
+			if (installedClaudeRuntimePath(root, version)) {
+				vscode.window.showInformationMessage(`Claude runtime ${version} is already installed.`);
+				return true;
+			}
+			const previous = resolveClaudeCodeBinary();
+			const keepVersions = [...new Set([
+				downloadedClaudeRuntimeVersionForPath(root, previous),
+				latestInstalledClaudeRuntime(root)?.version,
+			].filter((value): value is string => Boolean(value)))].filter(value => value !== version);
+			const controller = new AbortController();
+			try {
+				await vscode.window.withProgress({
+					location: vscode.ProgressLocation.Notification,
+					title: "Claude runtime",
+					cancellable: true,
+				}, async (progress, token) => {
+					token.onCancellationRequested(() => controller.abort());
+					progress.report({ message: `Downloading ${version}…` });
+					let shown = 0;
+					await installClaudeRuntime({
+						root,
+						version,
+						target,
+						keepVersions,
+						signal: controller.signal,
+						log: (event, data) => logService.log(event, data),
+						onProgress: (received, total) => {
+							if (total) {
+								const percent = Math.floor(received / total * 100);
+								if (percent > shown) {
+									progress.report({ increment: percent - shown, message: percent < 100 ? `Downloading ${version}… ${percent}%` : "Unpacking…" });
+									shown = percent;
+								}
+								return;
+							}
+							progress.report({ message: `Downloading ${version}… ${Math.round(received / 1_000_000)} MB` });
+						},
+					});
+				});
+				invalidateClaudeCodeBinaryCache();
+				refreshAllClaudeCatalogs();
+				for (const provider of claudeProviders.values()) {
+					void provider.refreshStatus();
+				}
+				quickActionsProvider.refresh();
+				vscode.window.showInformationMessage(previous && resolveClaudeCodeBinary() !== previous
+					? `Claude runtime ${version} installed. The next Claude request uses it.`
+					: `Claude runtime ${version} installed.`);
+				return true;
+			} catch (error) {
+				if (controller.signal.aborted) {
+					return false;
+				}
+				logService.logError("claude.runtime_install.failed", error);
+				const message = error instanceof Error ? error.message : String(error);
+				vscode.window.showErrorMessage(`Unable to install the Claude runtime: ${message}`);
+				return false;
+			}
+		};
+		claudeRuntimeInstall = attempt().finally(() => {
+			claudeRuntimeInstall = undefined;
+		});
+		return claudeRuntimeInstall;
+	};
+	/** Without a runtime nothing can sign in: offer the download first. */
+	const ensureClaudeRuntime = async (): Promise<boolean> => {
+		if (resolveClaudeCodeBinary()) {
+			return true;
+		}
+		const choice = await vscode.window.showWarningMessage(
+			`The Claude runtime was not found. Download it from npm? ${CLAUDE_RUNTIME_DOWNLOAD_ESTIMATE}, kept in the extension's storage.`,
+			{ modal: true },
+			"Download"
+		);
+		return choice === "Download" && await installClaudeRuntimeWithProgress();
+	};
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.claudeInstallRuntime", () => installClaudeRuntimeWithProgress())
+	);
+
+	// Existing Claude users get the runtime right after an update, without a prompt. It runs in
+	// the background, after activation, and only once per window; a failure is not retried here.
+	let claudeRuntimeAutoInstallAttempted = false;
+	const claudeRuntimeTimer = setTimeout(() => {
+		const root = claudeRuntimeStorage();
+		const sdkVersion = installedClaudeSdkVersion();
+		const enabled = vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>("enableClaudeSubscription", true) !== false;
+		if (!shouldAutoInstallClaudeRuntime({
+			enabled,
+			signedIn: claudeAccounts.some(account => hasClaudeLogin(account)),
+			sdkVersion,
+			target: claudeRuntimeTarget(),
+			root,
+			preferredBinary: resolvePreferredClaudeCodeBinary(),
+			exactRuntime: installedClaudeRuntimePath(root, sdkVersion),
+			attempted: claudeRuntimeAutoInstallAttempted,
+		})) {
+			return;
+		}
+		claudeRuntimeAutoInstallAttempted = true;
+		void installClaudeRuntimeWithProgress();
+	}, 5_000);
+	claudeRuntimeTimer.unref?.();
+	context.subscriptions.push({ dispose: () => clearTimeout(claudeRuntimeTimer) });
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.toggleClaudeSubscription", async () => {
 			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
@@ -2203,6 +2367,9 @@ const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarA
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.claudeSignIn", async () => {
 			try {
+				if (!await ensureClaudeRuntime()) {
+					return;
+				}
 				await activeClaude().signIn();
 				quickActionsProvider.refresh();
 			} catch (error) {

@@ -9,6 +9,7 @@ import { providerUsageSummary, type ProviderSnapshot } from "../providers/provid
 import type { CocoProviderStatus } from "../coco/coco-provider";
 import { cocoNativeCompactionTokens } from "../coco/model-adapter";
 import { resolveClaudeContextLength } from "../claude/claude-provider";
+import { resolveClaudeCodeBinary } from "../claude/app-server-client";
 import { resolveClaudeKeepAliveSettings } from "../claude/keepalive-settings";
 import { CONFIG_SECTION, DEFAULT_LOCAL_REASONING_BUDGET, DEFAULT_SERVER_URL, DEEPSEEK_SERVER_URL } from "../constants";
 import { isDeepSeekEndpoint } from "../transport/openai-http";
@@ -950,6 +951,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 
 		const claudeAccounts = this.getClaudeAccounts();
 		const activeClaudeAccount = claudeAccounts.find(account => account.active) ?? claudeAccounts[0];
+		const claudeRuntime = resolveClaudeCodeBinary();
 		const claudeAccountItems = claudeAccounts.map(account => {
 			const accountId = account.id;
 			const signedIn = account.state === "connected";
@@ -1026,6 +1028,13 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 						}),
 					],
 				}),
+				// Shown only while the runtime is missing: an installed one needs no attention.
+				...(claudeRuntime ? [] : [new QuickAccessItem("claude.runtime", "Claude Runtime", {
+					description: "Not installed",
+					tooltip: "Downloads the Claude Code runtime that matches the installed Agent SDK from npm (sha512 checked) into the extension's storage.",
+					icon: new vscode.ThemeIcon("cloud-download"),
+					command: command("llamacpp.claudeInstallRuntime", "Install Claude Runtime"),
+				})]),
 				new QuickAccessItem("claude.contextLimit", "Working Context", {
 					description: `${formatCompactTokenCount(claudeContextLength)} shared / 1M max`,
 					tooltip: `Shared working context ${formatCompactTokenCount(sharedContext)} for Codex, Claude, Coco and Cursor. Claude uses the real Opus 5 1M runtime and this value as its auto-compaction threshold, bounded to 258.4K-967K.`,

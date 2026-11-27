@@ -94,7 +94,7 @@
 # 1. Компиляция TypeScript
 npm run compile
 
-# 2. Сборка .vsix пакета (включает prepublish: clean + compile)
+# 2. Сборка .vsix пакета (включает prepublish: clean + compile + бандл)
 npm run package
 # → llama-vscode-chat-{version}.vsix
 
@@ -107,7 +107,12 @@ code --install-extension llama-vscode-chat-{version}.vsix
 
 ### Что делает `npm run package`
 - `vsce package` — собирает расширение в `.vsix`
-- Автоматически выполняет `npm run vscode:prepublish` (clean + compile)
+- Автоматически выполняет `npm run vscode:prepublish` (clean + compile + `scripts/build-extension.mjs`:
+  esbuild собирает `out/extension.js` и все его модули `out/` в один файл на месте; npm-пакеты и `vscode`
+  остаются внешними). Тесты и разработка работают с пофайловым выводом `tsc`; проверить бандл в тестовом
+  хосте: `npm run compile; node scripts/build-extension.mjs; npx vscode-test`.
+- Рантайм Claude (`claude.exe`) в VSIX не входит: он скачивается при первом использовании
+  (`src/claude/runtime-installer.ts`), как Codex CLI.
 - Упаковывает только файлы, перечисленные в `.vscodeignore`
 
 ### Проверка после установки

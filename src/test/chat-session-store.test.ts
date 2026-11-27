@@ -666,4 +666,55 @@ suite("Chat session store", () => {
 		await store.endMessage(session.id, "a1");
 		assert.strictEqual((await store.loadSession(session.id)).interruptedMessageId, undefined);
 	});
+
+	test("prunes orphaned sidecars and temp files but keeps every chat log", async () => {
+		const store = new ChatSessionStore(root);
+		const session = await store.create();
+		await store.appendMessage(session.id, textMessage("u1", "user", "Question"));
+		const now = Date.now();
+		const orphan = "11111111-1111-4111-8111-111111111111";
+		const recent = "22222222-2222-4222-8222-222222222222";
+		const orphanLog = path.join(root, `${orphan}.jsonl`);
+		const orphanSidecar = path.join(root, `${orphan}.subagents.json`);
+		const recentLog = path.join(root, `${recent}.jsonl`);
+		const staleTemp = path.join(root, "index.json.tmp");
+		const sessionLog = path.join(root, `${session.id}.jsonl`);
+		await fs.writeFile(orphanLog, "orphaned log", "utf8");
+		await fs.writeFile(orphanSidecar, "{}", "utf8");
+		await fs.writeFile(recentLog, "recent orphan", "utf8");
+		await fs.writeFile(staleTemp, "half written index", "utf8");
+		const old = new Date(now - 8 * 86400_000);
+		for (const file of [orphanLog, orphanSidecar, staleTemp, sessionLog]) {
+			await fs.utimes(file, old, old);
+		}
+
+		const lostLogSidecar = path.join(root, "44444444-4444-4444-8444-444444444444.subagents.json");
+		await fs.writeFile(lostLogSidecar, "{}", "utf8");
+		await fs.utimes(lostLogSidecar, old, old);
+
+		const result = await store.pruneOrphans(now);
+		assert.strictEqual(await exists(orphanLog), true, "an unindexed log may still be repaired, so it stays");
+		assert.strictEqual(await exists(orphanSidecar), true, "a sidecar stays while its log is there");
+		assert.strictEqual(await exists(lostLogSidecar), false, "a sidecar whose log is gone is removed");
+		assert.strictEqual(await exists(staleTemp), false);
+		assert.strictEqual(await exists(recentLog), true);
+		assert.strictEqual(await exists(sessionLog), true, "the log of an indexed chat is never removed");
+		assert.deepStrictEqual((await store.loadSession(session.id)).messages.map(message => message.id), ["u1"]);
+		assert.strictEqual(result.removedFiles, 2);
+		assert.ok(result.removedBytes > 0);
+	});
+
+	test("adopts existing logs before pruning when the index is missing", async () => {
+		const adopted = "33333333-3333-4333-8333-333333333333";
+		const file = path.join(root, `${adopted}.jsonl`);
+		await fs.writeFile(file, `${JSON.stringify({ t: "message", message: textMessage("u1", "user", "Kept") })}\n`, "utf8");
+		const old = new Date(Date.now() - 30 * 86400_000);
+		await fs.utimes(file, old, old);
+
+		const store = new ChatSessionStore(root);
+		const result = await store.pruneOrphans();
+		assert.strictEqual(await exists(file), true, "a missing index is rebuilt from the logs, not treated as an empty index");
+		assert.strictEqual(result.removedFiles, 0);
+		assert.deepStrictEqual((await store.loadSession(adopted)).messages.map(message => message.id), ["u1"]);
+	});
 });

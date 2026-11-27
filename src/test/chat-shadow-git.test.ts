@@ -293,4 +293,36 @@ suite("Shadow git repository", () => {
 		assert.match(tree.tree, /^[0-9a-f]{40}([0-9a-f]{24})?$/);
 		await assert.rejects(fs.stat(lockFile));
 	});
+
+	test("packs every loose object without deleting trees or blobs kept only in chat state", async function () {
+		if (!gitPath) {
+			this.skip();
+			return;
+		}
+		this.timeout(60_000);
+		const shadow = getRepo();
+		const before = await shadow.snapshot();
+		await fs.writeFile(path.join(project, "a.txt"), "one\r\ntwo\r\nthree\r\nfour\r\n");
+		const after = await shadow.snapshot();
+		const modified = (await shadow.diff(before, after)).find(change => change.path === "a.txt");
+		assert.ok(modified?.before, "the first version must have a blob id");
+		const original = await shadow.readBlob(modified.before);
+
+		const first = await shadow.maintain(1);
+		assert.strictEqual(first.packed, true);
+		assert.ok(first.looseObjects > 1);
+		assert.deepStrictEqual(await shadow.readBlob(modified.before), original);
+		await assert.rejects(fs.stat(path.join(shadowDir, "aab-pack.lock")), "the maintenance lock is released");
+		const packs = async (): Promise<string[]> => (await fs.readdir(path.join(shadowDir, "objects", "pack"))).filter(name => name.endsWith(".pack"));
+		assert.strictEqual((await packs()).length, 1, "all objects live in one pack");
+
+		// New snapshots add loose objects; the next pack replaces the old pack instead of
+		// accumulating one per run, and the earlier snapshot stays readable.
+		await fs.writeFile(path.join(project, "a.txt"), "one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n");
+		await shadow.snapshot();
+		const second = await shadow.maintain(1);
+		assert.strictEqual(second.packed, true);
+		assert.strictEqual((await packs()).length, 1);
+		assert.deepStrictEqual(await shadow.readBlob(modified.before), original);
+	});
 });

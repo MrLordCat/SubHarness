@@ -14,7 +14,11 @@ AGENTS.md
 .tools/**
 .github/**
 src/**
-out/test/**
+# The package ships the bundled out/extension.js (scripts/build-extension.mjs) and the webview bundle; the other
+# tsc output is inlined in the bundle.
+out/**
+!out/extension.js
+!out/webview/**
 docs/**
 subprojects/**
 scripts/**
@@ -39,6 +43,17 @@ node_modules/@anthropic-ai/claude-agent-sdk/browser-sdk.*
 node_modules/@anthropic-ai/claude-agent-sdk/bridge.*
 node_modules/@anthropic-ai/claude-agent-sdk/*.d.ts
 node_modules/@anthropic-ai/claude-agent-sdk/manifest*
+# The Claude runtime (claude.exe, ~100 MB packed) is downloaded on first use (src/claude/runtime-installer.ts).
+node_modules/@anthropic-ai/claude-agent-sdk-*/**
+# Only the ESM build of the Cursor SDK is loaded (the extension keeps a native import()).
+node_modules/@cursor/sdk/dist/cjs/**
+node_modules/@cursor/sdk/dist/bundled/**
+# The Cortex SDK is loaded through its ESM entry (@snowflake/cortex-agent-sdk/code).
+node_modules/@snowflake/cortex-agent-sdk/dist-cjs/**
+# Node loads the Statsig client from src/index.js; build/*.min.js are jsdelivr bundles.
+node_modules/@statsig/js-client/build/**
+# TypeScript declarations are compile-time only; **/*.ts does not match .d.cts.
+node_modules/**/*.d.cts
 node_modules/**/*.d.mts
 node_modules/**/*.md
 node_modules/**/README*

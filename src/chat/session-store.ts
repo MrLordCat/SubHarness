@@ -14,6 +14,7 @@ const INDEX_VERSION = 1;
 const INDEX_FILE = "index.json";
 const INDEX_TEMP_FILE = "index.json.tmp";
 const LOG_SUFFIX = ".jsonl";
+const SUBAGENTS_SUFFIX = ".subagents.json";
 const SESSION_ID = /^[A-Za-z0-9-]{1,64}$/;
 const TITLE_MAX_CHARS = 60;
 const INDEX_THROTTLE_MS = 1_000;
@@ -336,6 +337,55 @@ export class ChatSessionStore {
 			if (existed) {
 				await this._writeIndex();
 			}
+		});
+	}
+
+	/**
+	 * Removes subagent sidecars whose chat log is gone and stale temporary files, after a grace
+	 * period. Chat logs are never removed here: deleting a chat removes its log at once, so a log the
+	 * index does not list is one that could not be read, and scripts/repair-chat-sessions.cjs may
+	 * still recover it. A chat in the index is never touched, so its log stays whole.
+	 */
+	async pruneOrphans(now = Date.now(), orphanMaxAgeMs = 7 * 86400_000): Promise<{ removedFiles: number; removedBytes: number }> {
+		return this._enqueue(async () => {
+			await this._ensureIndex();
+			const entries = await fs.readdir(this._root, { withFileTypes: true }).catch(() => []);
+			const logNames = new Set(entries.filter(entry => entry.isFile() && entry.name.endsWith(LOG_SUFFIX)).map(entry => entry.name));
+			let removedFiles = 0, removedBytes = 0;
+			for (const entry of entries) {
+				if (!entry.isFile()) {
+					continue;
+				}
+				const name = entry.name;
+				let sessionId: string | undefined;
+				let maxAgeMs = orphanMaxAgeMs;
+				if (name.endsWith(SUBAGENTS_SUFFIX)) {
+					sessionId = name.slice(0, -SUBAGENTS_SUFFIX.length);
+					if (logNames.has(`${sessionId}${LOG_SUFFIX}`)) {
+						continue;
+					}
+				} else if (name.endsWith(".tmp")) {
+					maxAgeMs = 86400_000;
+				} else {
+					continue;
+				}
+				if (sessionId !== undefined && this._sessions.has(sessionId)) {
+					continue;
+				}
+				const file = path.join(this._root, name);
+				const info = await fs.stat(file).catch(() => undefined);
+				if (!info || now - info.mtimeMs <= maxAgeMs) {
+					continue;
+				}
+				try {
+					await fs.rm(file, { force: true });
+				} catch {
+					continue;
+				}
+				removedFiles++;
+				removedBytes += info.size;
+			}
+			return { removedFiles, removedBytes };
 		});
 	}
 

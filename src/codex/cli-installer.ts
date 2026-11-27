@@ -61,7 +61,14 @@ export function installedCodexCliVersion(root: string): string | undefined {
 	}
 }
 
-type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<Response>;
+export type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<Response>;
+
+export interface DownloadWithIntegrityOptions {
+	signal?: AbortSignal;
+	onProgress?: (receivedBytes: number, totalBytes: number | undefined) => void;
+	/** Used in error messages; default "Codex CLI". */
+	description?: string;
+}
 
 export interface CodexCliInstallOptions {
 	/** The folder the installer owns, e.g. <globalStorage>/codex-cli. */
@@ -170,7 +177,10 @@ export async function installCodexCli(options: CodexCliInstallOptions): Promise<
 	const partial = path.join(root, `${version}.partial-${uniqueSuffix()}`);
 	const destination = path.join(root, version);
 	try {
-		await download(fetchImpl, tarballUrl.toString(), archive, integrity, options);
+		await downloadWithIntegrity(fetchImpl, tarballUrl.toString(), archive, integrity, {
+			signal: options.signal,
+			onProgress: options.onProgress,
+		});
 		await extractVendor(archive, partial, target.triple);
 		const executableInPartial = path.join(partial, "bin", target.executable);
 		if (!existsSync(executableInPartial)) {
@@ -190,7 +200,7 @@ export async function installCodexCli(options: CodexCliInstallOptions): Promise<
 		const temporary = path.join(root, `${CURRENT_FILE}.${uniqueSuffix()}.tmp`);
 		await fs.writeFile(temporary, record, "utf8");
 		await fs.rename(temporary, path.join(root, CURRENT_FILE));
-		await removeLeftovers(root, version, options.log);
+		await removeInstallLeftovers(root, version, { log: options.log });
 		options.log?.("codex.cli_install.done", { version, reportedVersion });
 		return { version, executable, reportedVersion };
 	} finally {
@@ -199,10 +209,17 @@ export async function installCodexCli(options: CodexCliInstallOptions): Promise<
 	}
 }
 
-async function download(fetchImpl: FetchLike, url: string, file: string, integrity: string, options: CodexCliInstallOptions): Promise<void> {
+export async function downloadWithIntegrity(
+	fetchImpl: FetchLike,
+	url: string,
+	file: string,
+	integrity: string,
+	options: DownloadWithIntegrityOptions = {}
+): Promise<void> {
+	const description = options.description ?? "Codex CLI";
 	const response = await fetchImpl(url, { signal: options.signal });
 	if (!response.ok || !response.body) {
-		throw new Error(`The Codex CLI download failed: HTTP ${response.status}.`);
+		throw new Error(`The ${description} download failed: HTTP ${response.status}.`);
 	}
 	const length = Number(response.headers.get("content-length"));
 	const total = Number.isFinite(length) && length > 0 ? length : undefined;
@@ -221,20 +238,29 @@ async function download(fetchImpl: FetchLike, url: string, file: string, integri
 		await handle.close();
 	}
 	if (`sha512-${hash.digest("base64")}` !== integrity) {
-		throw new Error("The Codex CLI download failed its integrity check.");
+		throw new Error(`The ${description} download failed its integrity check.`);
 	}
 }
 
+export interface InstallLeftoversOptions {
+	log?: (event: string, data: Record<string, unknown>) => void;
+	/** Log event for a version that could not be deleted; default "codex.cli_install.cleanup_skipped". */
+	cleanupEvent?: string;
+	/** Extra versions to keep because a running process may still use them. */
+	keepVersions?: readonly string[];
+}
+
 /** Deletes older versions, interrupted downloads and partial folders; a running old binary may stay. */
-async function removeLeftovers(root: string, keep: string, log: CodexCliInstallOptions["log"]): Promise<void> {
+export async function removeInstallLeftovers(root: string, keep: string, options: InstallLeftoversOptions = {}): Promise<void> {
 	let names: string[];
 	try {
 		names = await fs.readdir(root);
 	} catch {
 		return;
 	}
+	const kept = new Set([keep, ...(options.keepVersions ?? [])]);
 	for (const name of names) {
-		if (name === keep || name === CURRENT_FILE) {
+		if (kept.has(name) || name === CURRENT_FILE) {
 			continue;
 		}
 		const stale = VERSION_PATTERN.test(name) || name.includes(".partial-") || name.startsWith("download-") || name.endsWith(".tmp");
@@ -244,7 +270,7 @@ async function removeLeftovers(root: string, keep: string, log: CodexCliInstallO
 		try {
 			await fs.rm(path.join(root, name), { recursive: true, force: true });
 		} catch (error) {
-			log?.("codex.cli_install.cleanup_skipped", { name, message: error instanceof Error ? error.message : String(error) });
+			options.log?.(options.cleanupEvent ?? "codex.cli_install.cleanup_skipped", { name, message: error instanceof Error ? error.message : String(error) });
 		}
 	}
 }
@@ -274,13 +300,13 @@ function octal(block: Buffer, start: number, length: number): number {
 	return text ? parseInt(text, 8) : 0;
 }
 
-export function parseTarHeader(block: Buffer): TarHeader {
+export function parseTarHeader(block: Buffer, description = "Codex CLI"): TarHeader {
 	let checksum = 0;
 	for (let index = 0; index < 512; index++) {
 		checksum += index >= 148 && index < 156 ? 0x20 : block[index];
 	}
 	if (checksum !== octal(block, 148, 8)) {
-		throw new Error("The Codex CLI package is damaged: a tar header checksum does not match.");
+		throw new Error(`The ${description} package is damaged: a tar header checksum does not match.`);
 	}
 	let name = cString(block, 0, 100);
 	if (block.toString("latin1", 257, 262) === "ustar") {
@@ -338,8 +364,22 @@ export function vendorEntryPath(name: string, triple: string, destination: strin
 	return resolved;
 }
 
-/** Streams the gzip tar and writes only vendor/<triple>, without the voice runtime. */
-export async function extractVendor(archive: string, destination: string, triple: string): Promise<void> {
+export interface TarExtractOptions {
+	/** Used in error messages; default "Codex CLI". */
+	description?: string;
+}
+
+/**
+ * Streams a gzip tar and writes only the entries mapEntry selects. A mapper returns the destination
+ * path of a wanted entry, returns undefined for entries to skip, and throws for unsafe names.
+ */
+export async function extractTarEntries(
+	archive: string,
+	destination: string,
+	mapEntry: (name: string) => string | undefined,
+	options: TarExtractOptions = {}
+): Promise<void> {
+	const description = options.description ?? "Codex CLI";
 	await fs.mkdir(destination, { recursive: true });
 	const header = Buffer.alloc(512);
 	let headerFill = 0;
@@ -413,7 +453,7 @@ export async function extractVendor(archive: string, destination: string, triple
 					continue;
 				}
 				zeroBlocks = 0;
-				const entry = parseTarHeader(header);
+				const entry = parseTarHeader(header, description);
 				const name = nextName ?? entry.name;
 				remaining = entry.size;
 				padding = (512 - (entry.size % 512)) % 512;
@@ -422,7 +462,7 @@ export async function extractVendor(archive: string, destination: string, triple
 					collectType = entry.type;
 				} else {
 					nextName = undefined;
-					const wanted = entry.type === "0" || entry.type === "5" ? vendorEntryPath(name, triple, destination) : undefined;
+					const wanted = entry.type === "0" || entry.type === "5" ? mapEntry(name) : undefined;
 					if (wanted && entry.type === "5") {
 						await fs.mkdir(wanted, { recursive: true });
 					} else if (wanted) {
@@ -438,11 +478,16 @@ export async function extractVendor(archive: string, destination: string, triple
 			}
 		}
 		if (remaining > 0 || headerFill > 0) {
-			throw new Error("The Codex CLI package ended in the middle of a file.");
+			throw new Error(`The ${description} package ended in the middle of a file.`);
 		}
 	} finally {
 		await file?.close().catch(() => undefined);
 		gunzip.destroy();
 		source.destroy();
 	}
+}
+
+/** Streams the gzip tar and writes only vendor/<triple>, without the voice runtime. */
+export async function extractVendor(archive: string, destination: string, triple: string): Promise<void> {
+	await extractTarEntries(archive, destination, name => vendorEntryPath(name, triple, destination));
 }

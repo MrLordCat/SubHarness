@@ -9,11 +9,34 @@ Claude authentication, subscription limits, model execution, and persisted SDK
 transcripts remain owned by the official Claude Code runtime. The extension
 does not read Claude credential files.
 
+## Runtime
+
+Since 2.1.2 the Claude runtime (`claude`, `claude.exe` on Windows, about
+100 MB to download and 330 MB on disk) is not part of the VSIX. It must match
+the Agent SDK version exactly, so the extension downloads the platform package
+`@anthropic-ai/claude-agent-sdk-<platform>` of that version from npm (sha512
+checked, the binary must answer `--version`) into
+`<globalStorage>/claude-runtime/<version>/`:
+
+- a few seconds after startup, in the background, when the Claude provider is
+  enabled, some Claude account is signed in and no runtime is found, so
+  existing users get it right after an update without a prompt;
+- before sign-in, after a confirmation;
+- from `SubHarness: Install Claude Runtime` (Quick Access shows **Claude
+  Runtime: Not installed** while it is missing).
+
+The runtime is looked up in this order: `llamacpp.claudeCliPath`, the Anthropic
+Claude Code extension's `resources/native-binary`, the platform package in
+`node_modules` (development and tests), the downloaded runtime of the SDK's
+version, and, while that one downloads after an update, the newest other
+downloaded version. Older versions are removed after a new install unless a
+running process still uses them. Without a runtime a Claude request fails at
+once and names the install command.
+
 ## Sign-in
 
 The Claude Code extension is not needed. `SubHarness: Sign In to Claude
-Subscription` runs the bundled runtime (`claude-agent-sdk-<platform>/claude`,
-or `llamacpp.claudeCliPath`) as `claude auth login --claudeai` in a terminal:
+Subscription` runs the runtime (see above) as `claude auth login --claudeai` in a terminal:
 it opens the browser and may ask for a code. When the command ends or the
 terminal closes, `claude auth status` gives the result. Only `loggedIn`,
 `authMethod`, `subscriptionType` and `apiProvider` are kept; the email and
@@ -72,7 +95,7 @@ returned to the SDK; Session Quality does not inspect or retain its body.
 
 ## Extended Context
 
-The provider ships the platform-specific Agent SDK runtime and starts Opus 5
+The provider runs the platform-specific Agent SDK runtime and starts Opus 5
 with the official `[1m]` model suffix. Claude follows
 `llamacpp.sharedContextLength`, the working context shared with Codex, Coco and
 Cursor, bounded to 258,400 through 967,000 tokens. It is not only VS Code

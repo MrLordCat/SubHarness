@@ -142,7 +142,8 @@ export function claudeAccountEnv(account: Pick<ClaudeAccountIdentity, "configDir
 }
 
 /**
- * Whether this account has a Claude login on disk. The bundled claude.exe always exists, so the
+ * Whether this account has a Claude login on disk. The Claude runtime is installed separately
+ * (the Anthropic extension, a platform package in development, or the downloaded runtime), so the
  * binary alone must not count as signed in. Evidence: `.credentials.json` in the config
  * directory, or `.claude.json` with an `oauthAccount.accountUuid` (beside ~/.claude for the
  * built-in account, inside CLAUDE_CONFIG_DIR for the others).

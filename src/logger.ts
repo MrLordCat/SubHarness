@@ -22,18 +22,34 @@ export interface LlamaLogSink {
 	shouldLogStreamChunks(): boolean;
 }
 
+/** A single window keeps one file per 16 MB; the folder as a whole stays under 60 MB. */
+export const MAX_LOG_FILE_BYTES = 16 * 1024 * 1024;
+export const MAX_LOG_TOTAL_BYTES = 60 * 1024 * 1024;
+
+/** Limits are injectable for tests; the extension uses the constants above. */
+export interface LlamaLogOptions {
+	maxFileBytes?: number;
+	maxTotalBytes?: number;
+}
+
 export class LlamaLogService implements vscode.Disposable, LlamaLogSink {
 	private readonly output = vscode.window.createOutputChannel("Llama.cpp Provider");
 	private readonly sessionId = randomUUID();
 	private readonly logDirPath: string;
+	private readonly maxFileBytes: number;
+	private readonly maxTotalBytes: number;
 
 	private currentLogPath: string | undefined;
+	private currentLogBytes = 0;
+	private logFileSequence = 0;
 	private initPromise: Promise<void> | undefined;
 	private writeQueue: Promise<void> = Promise.resolve();
 	private disposed = false;
 
-	constructor(context: vscode.ExtensionContext) {
+	constructor(context: vscode.ExtensionContext, options: LlamaLogOptions = {}) {
 		this.logDirPath = path.join(context.globalStorageUri.fsPath, "logs");
+		this.maxFileBytes = Math.max(1024, Math.floor(options.maxFileBytes ?? MAX_LOG_FILE_BYTES));
+		this.maxTotalBytes = Math.max(this.maxFileBytes, Math.floor(options.maxTotalBytes ?? MAX_LOG_TOTAL_BYTES));
 	}
 
 	async initialize(): Promise<void> {
@@ -69,13 +85,29 @@ export class LlamaLogService implements vscode.Disposable, LlamaLogSink {
 			payload.data = this.toSerializable(data);
 		}
 
+		const line = `${this.safeStringify(payload)}\n`;
+		const bytes = Buffer.byteLength(line, "utf8");
 		this.enqueueWrite(async () => {
 			await this.ensureReady();
 			if (!this.currentLogPath) {
 				return;
 			}
-			await fs.appendFile(this.currentLogPath, `${this.safeStringify(payload)}\n`, "utf8");
+			// Rotate before the line that would cross the limit. A single huge line is
+			// written whole and rotation happens before the next one.
+			if (this.currentLogBytes > 0 && this.currentLogBytes + bytes > this.maxFileBytes) {
+				await this.rotateLog();
+				if (!this.currentLogPath) {
+					return;
+				}
+			}
+			await fs.appendFile(this.currentLogPath, line, "utf8");
+			this.currentLogBytes += bytes;
 		});
+	}
+
+	/** Waits until queued log writes (including a rotation) reach disk. */
+	async flush(): Promise<void> {
+		await this.writeQueue;
 	}
 
 	logError(event: string, error: unknown, data?: unknown): void {
@@ -153,16 +185,32 @@ export class LlamaLogService implements vscode.Disposable, LlamaLogSink {
 		this.initPromise = (async () => {
 			await fs.mkdir(this.logDirPath, { recursive: true });
 			if (!this.currentLogPath) {
-				const stamp = new Date().toISOString().replace(/[.:]/g, "-");
-				this.currentLogPath = path.join(this.logDirPath, `llamacpp-${stamp}-${process.pid}.jsonl`);
+				this.currentLogPath = this.nextLogPath();
+				const stat = await fs.stat(this.currentLogPath).catch(() => undefined);
+				this.currentLogBytes = stat?.size ?? 0;
 			}
 			await this.pruneOldLogs(this.getMaxLogFiles());
+			await this.pruneTotalSize();
 		})().catch(error => {
 			this.initPromise = undefined;
 			throw error;
 		});
 
 		await this.initPromise;
+	}
+
+	/** The session id stays the same across rotated files, so log readers can join them. */
+	private nextLogPath(): string {
+		const stamp = new Date().toISOString().replace(/[.:]/g, "-");
+		const sequence = this.logFileSequence++;
+		return path.join(this.logDirPath, `llamacpp-${stamp}-${process.pid}${sequence === 0 ? "" : `-${sequence}`}.jsonl`);
+	}
+
+	private async rotateLog(): Promise<void> {
+		this.currentLogPath = this.nextLogPath();
+		this.currentLogBytes = 0;
+		await this.pruneOldLogs(this.getMaxLogFiles());
+		await this.pruneTotalSize();
 	}
 
 	private getMaxLogFiles(): number {
@@ -173,27 +221,58 @@ export class LlamaLogService implements vscode.Disposable, LlamaLogSink {
 		return Math.max(1, Math.min(200, Math.floor(raw)));
 	}
 
-	private async pruneOldLogs(maxFiles: number): Promise<void> {
+	private async listLogFiles(): Promise<Array<{ filePath: string; mtimeMs: number; size: number }>> {
 		const entries = await fs.readdir(this.logDirPath, { withFileTypes: true });
 		const files = entries.filter(entry => entry.isFile() && entry.name.endsWith(".jsonl"));
+		const withStats: Array<{ filePath: string; mtimeMs: number; size: number }> = [];
+		for (const entry of files) {
+			const filePath = path.join(this.logDirPath, entry.name);
+			const stat = await fs.stat(filePath).catch(() => undefined);
+			if (stat?.isFile()) {
+				withStats.push({ filePath, mtimeMs: stat.mtimeMs, size: stat.size });
+			}
+		}
+		return withStats;
+	}
+
+	private async pruneOldLogs(maxFiles: number): Promise<void> {
+		const files = await this.listLogFiles();
 		if (files.length <= maxFiles) {
 			return;
 		}
 
-		const withStats = await Promise.all(
-			files.map(async entry => {
-				const filePath = path.join(this.logDirPath, entry.name);
-				const stat = await fs.stat(filePath);
-				return { filePath, mtimeMs: stat.mtimeMs };
-			})
-		);
-
-		withStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
-		for (const stale of withStats.slice(maxFiles)) {
+		files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+		for (const stale of files.slice(maxFiles)) {
 			if (stale.filePath === this.currentLogPath) {
 				continue;
 			}
 			await fs.unlink(stale.filePath).catch(() => undefined);
+		}
+	}
+
+	/** Oldest logs go first; room for one full current file is reserved so the folder stays under the limit. */
+	private async pruneTotalSize(): Promise<void> {
+		const files = await this.listLogFiles();
+		const target = Math.max(0, this.maxTotalBytes - this.maxFileBytes);
+		let total = files.reduce((sum, file) => sum + file.size, 0);
+		if (total <= target) {
+			return;
+		}
+
+		files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+		for (const stale of files) {
+			if (total <= target) {
+				break;
+			}
+			if (stale.filePath === this.currentLogPath) {
+				continue;
+			}
+			try {
+				await fs.unlink(stale.filePath);
+				total -= stale.size;
+			} catch {
+				// Another window or the user already removed it.
+			}
 		}
 	}
 
@@ -203,22 +282,13 @@ export class LlamaLogService implements vscode.Disposable, LlamaLogSink {
 		}
 
 		await fs.mkdir(this.logDirPath, { recursive: true });
-		const entries = await fs.readdir(this.logDirPath, { withFileTypes: true });
-		const files = entries.filter(entry => entry.isFile() && entry.name.endsWith(".jsonl"));
+		const files = await this.listLogFiles();
 		if (files.length === 0) {
 			return undefined;
 		}
 
-		const withStats = await Promise.all(
-			files.map(async entry => {
-				const filePath = path.join(this.logDirPath, entry.name);
-				const stat = await fs.stat(filePath);
-				return { filePath, mtimeMs: stat.mtimeMs };
-			})
-		);
-
-		withStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
-		return withStats[0]?.filePath;
+		files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+		return files[0]?.filePath;
 	}
 
 	private serializeError(error: unknown): { name: string; message: string; stack?: string } {

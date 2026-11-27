@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.1.2 (development build) - 2026-11-27
+
+- Changed: the VSIX is 10.6 MB instead of 115 MB. The Claude runtime
+  (`claude.exe`) is no longer packaged: it must match the Agent SDK version, so
+  the extension downloads that platform package from npm (about 100 MB, sha512
+  checked, the binary must start) into its global storage. Signed-in Claude
+  users get it in the background a few seconds after updating; otherwise
+  sign-in offers it, and `SubHarness: Install Claude Runtime` installs it.
+  Quick Access shows **Claude Runtime: Not installed** while it is missing, and
+  a Claude request without it fails at once with the command to run. The
+  Anthropic Claude Code extension's binary and `llamacpp.claudeCliPath` still
+  come first.
+- Changed: the extension loads from one file. Packaging bundles
+  `out/extension.js` and its modules with esbuild; module loading takes about
+  104 ms instead of 225 ms. Tests and development keep the per-file `tsc`
+  output.
+- Changed: unused files left the package: the CommonJS and Bun builds of the
+  Cursor SDK, the CommonJS build of the Cortex SDK, Statsig browser bundles,
+  `.d.cts` declarations and the old webview output; `stream-json` moved to
+  `devDependencies` (only `scripts/repair-chat-sessions.cjs` uses it).
+- Changed: DeepSeek session state is kept in one file per conversation under
+  `session-state/` instead of one `session-state.json` (68 MB). Nothing is read
+  at startup (the file used to be parsed twice, about 0.6 s); a conversation's
+  file is read the first time it is used, and a turn writes only that file
+  instead of reading and rewriting the whole store. Files unused for 7 days go,
+  at most 24 files and 48 MB stay. The old file is split once, about a minute
+  after startup or on the first DeepSeek request, and then deleted.
+- Changed: storage cleanup in the background after startup. Logs start a new
+  file every 16 MB and keep the folder under 60 MB; `chat.context.usage` logs
+  prompt segment totals instead of the full list, and `chat.turn.complete` no
+  longer repeats it (together 75% of the log bytes). The chat's snapshot
+  repositories are packed once they hold 2,000 loose objects (6,766 files
+  here), keeping every object; a repository of a folder that is gone goes
+  after 30 days. Cursor agents and archives unused for 30 days, provider
+  transcripts unused for 30 days (the folder capped at 100 MB) and stray chat
+  temp files are removed. Chat logs are never removed by cleanup.
+
 ## 2.1.1 (development build) - 2026-11-26
 
 - Fixed: a subagent report reaches the agent whole. Claude cut every tool

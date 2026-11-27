@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/SubHarness.git"
 	},
-	"version": "2.1.1",
+	"version": "2.1.2",
 	"engines": {
 		"vscode": "^1.131.0",
 		"node": ">=20"
@@ -1062,6 +1062,10 @@
 				"title": "SubHarness: Install or Update Codex CLI"
 			},
 			{
+				"command": "llamacpp.claudeInstallRuntime",
+				"title": "SubHarness: Install Claude Runtime"
+			},
+			{
 				"command": "llamacpp.selectCodexAccount",
 				"title": "SubHarness: Switch Codex Account"
 			},
@@ -1343,7 +1347,7 @@
 	},
 	"main": "./out/extension.js",
 	"scripts": {
-		"vscode:prepublish": "npm run clean && npm run compile",
+		"vscode:prepublish": "npm run clean && npm run compile && node scripts/build-extension.mjs",
 		"clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
 		"update-vscode-api": "dts main && node ./scripts/move-vscode-api.mjs",
 		"compile": "tsc -p ./ && tsc -p src/chat/webview && node scripts/build-webview.mjs",
@@ -1375,6 +1379,7 @@
 		"marked": "^18.2.1",
 		"preact": "^11.2.0",
 		"prettier": "^3.9.6",
+		"stream-json": "3.7.0",
 		"typescript": "^5.9.3",
 		"typescript-eslint": "^8.67.0"
 	},
@@ -1387,7 +1392,6 @@
 		"@anthropic-ai/claude-agent-sdk": "0.3.240",
 		"@cursor/sdk": "1.0.37",
 		"@snowflake/cortex-agent-sdk": "0.0.2",
-		"stream-json": "3.7.0",
 		"zod": "^4.4.3"
 	}
 }

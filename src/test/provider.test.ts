@@ -2,8 +2,10 @@ import * as assert from "assert";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { createHash } from "crypto";
 import * as vscode from "vscode";
 import { LlamaCppChatModelProvider, stripCacheControlArtifacts } from "../llama-provider";
+import type { LlamaLogSink } from "../logger";
 import { injectSharedMemoryContext } from "../memory/prompt";
 import { MANUAL_COMPACTION_TRIGGER } from "../context/manual-compaction";
 import { compactMessages } from "../context/message-compaction";
@@ -48,6 +50,107 @@ function flushReasoningMap(provider: LlamaCppChatModelProvider): Promise<void> {
     };
     api.persistReasoningMap(true);
     return api.reasoningMapWrite;
+}
+
+interface SessionStateTestApi {
+    conversationMessageSnapshots: {
+        size: number;
+        keys: () => IterableIterator<string>;
+    };
+    getConversationMessageSnapshot: (scope: string) => {
+        messages: OpenAIChatMessage[];
+        tokenCount: number;
+        updatedAt: number;
+    } | undefined;
+    setConversationMessageSnapshot: (scope: string, messages: OpenAIChatMessage[], tokenCount: number) => void;
+    deleteConversationMessageSnapshot: (scope: string) => void;
+    stabilizeMessagePrefix: (
+        requestId: string,
+        modelId: string,
+        scope: string | undefined,
+        messages: OpenAIChatMessage[],
+        staticFieldsHash: string,
+        toolsHash: string,
+        toolsCount: number,
+        toolNames: string[]
+    ) => { messages: OpenAIChatMessage[]; stabilized: boolean };
+    flushSessionState: () => Promise<void>;
+    pruneSessionState: (limits?: { maxAgeMs?: number; maxFiles?: number; maxBytes?: number }) => Promise<void>;
+}
+
+function sessionStateApi(provider: LlamaCppChatModelProvider): SessionStateTestApi {
+    return provider as unknown as SessionStateTestApi;
+}
+
+/** Matches the version marker so pre-seeded scope files survive the first open in tests. */
+function matchSessionStateVersion(memento: MockMemento): void {
+    const current = vscode.extensions.getExtension("mrlordcat.llama-vscode-chat")
+        ?.packageJSON?.version as string | undefined;
+    if (current) {
+        void memento.update("llamacpp.prefix_snapshots.version", current);
+    }
+}
+
+function sessionStateDir(storageDir: string): string {
+    return path.join(storageDir, "session-state");
+}
+
+function sessionScopeFilePath(storageDir: string, scope: string): string {
+    const name = createHash("sha256").update(scope).digest("hex").slice(0, 32);
+    return path.join(sessionStateDir(storageDir), `${name}.json`);
+}
+
+function writeSessionScopeFile(
+    storageDir: string,
+    scope: string,
+    state: {
+        updatedAt?: number;
+        prefixSnapshot?: unknown;
+        conversation?: unknown;
+        toolCatalog?: unknown;
+    } = {}
+): string {
+    fs.mkdirSync(sessionStateDir(storageDir), { recursive: true });
+    const filePath = sessionScopeFilePath(storageDir, scope);
+    fs.writeFileSync(filePath, JSON.stringify({
+        version: 1,
+        scope,
+        updatedAt: Date.now(),
+        ...state,
+    }), "utf8");
+    return filePath;
+}
+
+function createPrefixSnapshot(requestId: string, content: string): Record<string, unknown> {
+    return {
+        requestId,
+        modelId: "deepseek-v4-pro",
+        staticFieldsHash: "static-hash",
+        toolsHash: "tools-hash",
+        toolsCount: 1,
+        messageParts: [JSON.stringify({ role: "user", content })],
+        messageChars: content.length + 20,
+    };
+}
+
+function createStoredProvider(memento: MockMemento, storageDir: string): LlamaCppChatModelProvider {
+    return new LlamaCppChatModelProvider(
+        new MockSecretStorage(), "test-user-agent", undefined, undefined, memento, storageDir
+    );
+}
+
+function createLogCapture(): { logger: LlamaLogSink; events: Array<{ event: string; data?: unknown }> } {
+    const events: Array<{ event: string; data?: unknown }> = [];
+    return {
+        events,
+        logger: {
+            log: (event, data) => { events.push({ event, data }); },
+            logError: (event, error, data) => {
+                events.push({ event, data: { error: String(error), details: data } });
+            },
+            shouldLogStreamChunks: () => false,
+        },
+    };
 }
 
 suite("Llama.cpp Chat Provider Extension", () => {
@@ -3039,6 +3142,436 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 left.function.name.localeCompare(right.function.name)
             );
             assert.deepStrictEqual(restoredCatalog.tools, canonicalFirstCatalog);
+        });
+
+        test("reads session state lazily per scope instead of at activation", () => {
+            const memento = new MockMemento();
+            matchSessionStateVersion(memento);
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-session-"));
+            const scopeA = "deepseek-v4-pro\0lazy-a";
+            const scopeB = "deepseek-v4-pro\0lazy-b";
+            writeSessionScopeFile(storageDir, scopeA, {
+                conversation: { messages: [{ role: "user", content: "a" }], tokenCount: 1, updatedAt: Date.now() },
+            });
+            writeSessionScopeFile(storageDir, scopeB, {
+                conversation: { messages: [{ role: "user", content: "b" }], tokenCount: 1, updatedAt: Date.now() },
+            });
+            try {
+                const provider = createStoredProvider(memento, storageDir);
+                const api = sessionStateApi(provider);
+                assert.strictEqual(api.conversationMessageSnapshots.size, 0, "the constructor must not read scope files");
+                const snapshot = api.getConversationMessageSnapshot(scopeA);
+                assert.deepStrictEqual(snapshot?.messages, [{ role: "user", content: "a" }]);
+                assert.deepStrictEqual(
+                    [...api.conversationMessageSnapshots.keys()],
+                    [scopeA],
+                    "only the requested scope is read"
+                );
+            } finally {
+                fs.rmSync(storageDir, { recursive: true, force: true });
+            }
+        });
+
+        test("keeps an evicted conversation on disk when only its prefix snapshot changes", async () => {
+            const memento = new MockMemento();
+            matchSessionStateVersion(memento);
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-session-"));
+            const scope = "deepseek-v4-pro\0evicted-conversation";
+            const conversation: OpenAIChatMessage[] = [{ role: "user", content: "before" }];
+            const filePath = writeSessionScopeFile(storageDir, scope, {
+                prefixSnapshot: createPrefixSnapshot("request-before", "before"),
+                conversation: { messages: conversation, tokenCount: 3, updatedAt: Date.now() - 60_000 },
+            });
+            try {
+                const provider = createStoredProvider(memento, storageDir);
+                const api = sessionStateApi(provider);
+                assert.ok(api.getConversationMessageSnapshot(scope));
+                for (const suffix of ["b", "c", "d", "e"]) {
+                    api.setConversationMessageSnapshot(
+                        `deepseek-v4-pro\0${suffix}`,
+                        [{ role: "user", content: suffix }],
+                        1
+                    );
+                }
+                assert.ok(
+                    ![...api.conversationMessageSnapshots.keys()].includes(scope),
+                    "the 4-entry map evicted the scope"
+                );
+                api.stabilizeMessagePrefix(
+                    "request-after",
+                    "deepseek-v4-pro",
+                    scope,
+                    [{ role: "user", content: "after" }],
+                    "static-hash",
+                    "tools-hash",
+                    1,
+                    []
+                );
+                await api.flushSessionState();
+                const written = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
+                    prefixSnapshot: { requestId: string };
+                    conversation: { messages: OpenAIChatMessage[] };
+                };
+                assert.strictEqual(written.prefixSnapshot.requestId, "request-after");
+                assert.deepStrictEqual(
+                    written.conversation.messages,
+                    conversation,
+                    "the evicted conversation stays on disk"
+                );
+            } finally {
+                fs.rmSync(storageDir, { recursive: true, force: true });
+            }
+        });
+
+        test("writes only the changed kind and keeps other kinds from the scope file", async () => {
+            const memento = new MockMemento();
+            matchSessionStateVersion(memento);
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-session-"));
+            const scope = "deepseek-v4-pro\0partial-write";
+            const otherScope = "deepseek-v4-pro\0untouched";
+            const toolCatalog = {
+                tools: [{
+                    type: "function",
+                    function: { name: "read_file", description: "read", parameters: {} },
+                }],
+                toolChoice: "auto",
+                fingerprint: "catalog-fingerprint",
+                updatedAt: Date.now() - 60_000,
+            };
+            const filePath = writeSessionScopeFile(storageDir, scope, {
+                prefixSnapshot: createPrefixSnapshot("request-before", "before"),
+                conversation: {
+                    messages: [{ role: "user", content: "before" }],
+                    tokenCount: 3,
+                    updatedAt: Date.now() - 60_000,
+                },
+                toolCatalog,
+            });
+            const otherPath = writeSessionScopeFile(storageDir, otherScope, {
+                conversation: {
+                    messages: [{ role: "user", content: "other" }],
+                    tokenCount: 1,
+                    updatedAt: Date.now(),
+                },
+            });
+            const otherBefore = fs.readFileSync(otherPath, "utf8");
+            try {
+                const provider = createStoredProvider(memento, storageDir);
+                const api = sessionStateApi(provider);
+                api.setConversationMessageSnapshot(scope, [{ role: "user", content: "after" }], 7);
+                await api.flushSessionState();
+                const written = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
+                    conversation: { messages: OpenAIChatMessage[]; tokenCount: number };
+                    prefixSnapshot: { staticFieldsHash: string };
+                    toolCatalog: { fingerprint: string };
+                };
+                assert.deepStrictEqual(written.conversation.messages, [{ role: "user", content: "after" }]);
+                assert.strictEqual(written.conversation.tokenCount, 7);
+                assert.strictEqual(written.prefixSnapshot.staticFieldsHash, "static-hash");
+                assert.strictEqual(written.toolCatalog.fingerprint, "catalog-fingerprint");
+                assert.strictEqual(fs.readFileSync(otherPath, "utf8"), otherBefore, "other scopes are not rewritten");
+            } finally {
+                fs.rmSync(storageDir, { recursive: true, force: true });
+            }
+        });
+
+        test("removes a deleted conversation kind and deletes the file when no kind remains", async () => {
+            const memento = new MockMemento();
+            matchSessionStateVersion(memento);
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-session-"));
+            const scopeWithPrefix = "deepseek-v4-pro\0delete-kind";
+            const conversationOnly = "deepseek-v4-pro\0delete-file";
+            const prefixPath = writeSessionScopeFile(storageDir, scopeWithPrefix, {
+                prefixSnapshot: createPrefixSnapshot("request-before", "before"),
+                conversation: {
+                    messages: [{ role: "user", content: "before" }],
+                    tokenCount: 1,
+                    updatedAt: Date.now(),
+                },
+            });
+            const conversationPath = writeSessionScopeFile(storageDir, conversationOnly, {
+                conversation: {
+                    messages: [{ role: "user", content: "only" }],
+                    tokenCount: 1,
+                    updatedAt: Date.now(),
+                },
+            });
+            try {
+                const provider = createStoredProvider(memento, storageDir);
+                const api = sessionStateApi(provider);
+                assert.ok(api.getConversationMessageSnapshot(scopeWithPrefix));
+                assert.ok(api.getConversationMessageSnapshot(conversationOnly));
+                api.deleteConversationMessageSnapshot(scopeWithPrefix);
+                api.deleteConversationMessageSnapshot(conversationOnly);
+                await api.flushSessionState();
+                const remaining = JSON.parse(fs.readFileSync(prefixPath, "utf8")) as {
+                    conversation?: unknown;
+                    prefixSnapshot?: { staticFieldsHash: string };
+                };
+                assert.strictEqual(remaining.conversation, undefined);
+                assert.strictEqual(remaining.prefixSnapshot?.staticFieldsHash, "static-hash");
+                assert.strictEqual(fs.existsSync(conversationPath), false, "an empty scope file is deleted");
+            } finally {
+                fs.rmSync(storageDir, { recursive: true, force: true });
+            }
+        });
+
+        test("splits session-state.json into scope files and applies retention", () => {
+            const memento = new MockMemento();
+            matchSessionStateVersion(memento);
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-session-"));
+            const now = Date.now();
+            const freshScope = "deepseek-v4-pro\0migrate-fresh";
+            const oldScope = "deepseek-v4-pro\0migrate-old";
+            const prefixOnlyScope = "deepseek-v4-pro\0migrate-prefix-only";
+            fs.writeFileSync(path.join(storageDir, "session-state.json"), JSON.stringify({
+                prefixSnapshots: {
+                    [freshScope]: createPrefixSnapshot("fresh", "fresh"),
+                    [oldScope]: createPrefixSnapshot("old", "old"),
+                    [prefixOnlyScope]: createPrefixSnapshot("prefix-only", "prefix-only"),
+                },
+                conversations: {
+                    [freshScope]: {
+                        messages: [{ role: "user", content: "fresh" }],
+                        tokenCount: 1,
+                        updatedAt: now - 1_000,
+                    },
+                    [oldScope]: {
+                        messages: [{ role: "user", content: "old" }],
+                        tokenCount: 1,
+                        updatedAt: now - 8 * 24 * 60 * 60 * 1000,
+                    },
+                },
+                toolCatalogs: {},
+            }), "utf8");
+            try {
+                const provider = createStoredProvider(memento, storageDir);
+                const api = sessionStateApi(provider);
+                const snapshot = api.getConversationMessageSnapshot(freshScope);
+                assert.deepStrictEqual(snapshot?.messages, [{ role: "user", content: "fresh" }]);
+                const freshPath = sessionScopeFilePath(storageDir, freshScope);
+                assert.ok(fs.existsSync(freshPath), "the recent scope is written");
+                const migrated = JSON.parse(fs.readFileSync(freshPath, "utf8")) as {
+                    prefixSnapshot?: { requestId: string };
+                    conversation?: { messages: OpenAIChatMessage[] };
+                };
+                assert.strictEqual(migrated.prefixSnapshot?.requestId, "fresh");
+                assert.deepStrictEqual(migrated.conversation?.messages, [{ role: "user", content: "fresh" }]);
+                assert.ok(
+                    !fs.existsSync(sessionScopeFilePath(storageDir, oldScope)),
+                    "scopes older than 7 days are not written"
+                );
+                assert.ok(
+                    !fs.existsSync(sessionScopeFilePath(storageDir, prefixOnlyScope)),
+                    "prefix-only scopes without a timestamp are not written"
+                );
+                assert.ok(
+                    !fs.existsSync(path.join(storageDir, "session-state.json")),
+                    "the monolithic file is deleted after the split"
+                );
+            } finally {
+                fs.rmSync(storageDir, { recursive: true, force: true });
+            }
+        });
+
+        test("migration never overwrites an existing newer scope file", () => {
+            const memento = new MockMemento();
+            matchSessionStateVersion(memento);
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-session-"));
+            const scope = "deepseek-v4-pro\0migration-existing";
+            const existingPath = writeSessionScopeFile(storageDir, scope, {
+                conversation: {
+                    messages: [{ role: "user", content: "newer" }],
+                    tokenCount: 1,
+                    updatedAt: Date.now(),
+                },
+            });
+            const existingBefore = fs.readFileSync(existingPath, "utf8");
+            fs.writeFileSync(path.join(storageDir, "session-state.json"), JSON.stringify({
+                prefixSnapshots: { [scope]: createPrefixSnapshot("legacy", "older") },
+                conversations: {
+                    [scope]: {
+                        messages: [{ role: "user", content: "older" }],
+                        tokenCount: 1,
+                        updatedAt: Date.now() - 60_000,
+                    },
+                },
+                toolCatalogs: {},
+            }), "utf8");
+            try {
+                const capture = createLogCapture();
+                const provider = new LlamaCppChatModelProvider(
+                    new MockSecretStorage(), "test-user-agent", capture.logger, undefined, memento, storageDir
+                );
+                const api = sessionStateApi(provider);
+                const restored = api.getConversationMessageSnapshot(scope);
+                assert.deepStrictEqual(restored?.messages, [{ role: "user", content: "newer" }]);
+                assert.strictEqual(
+                    fs.readFileSync(existingPath, "utf8"),
+                    existingBefore,
+                    "the existing scope file is not overwritten"
+                );
+                assert.ok(
+                    !fs.existsSync(path.join(storageDir, "session-state.json")),
+                    "the legacy file is still consumed"
+                );
+                const migrated = capture.events.find(entry => entry.event === "chat.cache.session_state_migrated");
+                assert.ok(migrated, "the migration is logged");
+                assert.strictEqual(
+                    (migrated?.data as { skippedExisting?: number } | undefined)?.skippedExisting,
+                    1
+                );
+            } finally {
+                fs.rmSync(storageDir, { recursive: true, force: true });
+            }
+        });
+
+        test("migrates legacy globalState snapshots into scope files", async () => {
+            const memento = new MockMemento();
+            matchSessionStateVersion(memento);
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-session-"));
+            const scope = "deepseek-v4-pro\0vscdb-migration";
+            const conversation = {
+                messages: [{ role: "user", content: "from vscdb" }],
+                tokenCount: 4,
+                updatedAt: Date.now(),
+            };
+            void memento.update("llamacpp.prefix_snapshots", {
+                [scope]: createPrefixSnapshot("vscdb", "from vscdb"),
+            });
+            void memento.update("llamacpp.continuation_snapshots.v1", {
+                conversations: { [scope]: conversation },
+                toolCatalogs: {},
+            });
+            try {
+                const provider = createStoredProvider(memento, storageDir);
+                const api = sessionStateApi(provider);
+                await api.flushSessionState();
+                assert.ok(fs.existsSync(sessionScopeFilePath(storageDir, scope)));
+                assert.strictEqual(memento.get("llamacpp.prefix_snapshots"), undefined);
+                assert.strictEqual(memento.get("llamacpp.continuation_snapshots.v1"), undefined);
+                const restored = api.getConversationMessageSnapshot(scope);
+                assert.deepStrictEqual(restored?.messages, conversation.messages);
+            } finally {
+                fs.rmSync(storageDir, { recursive: true, force: true });
+            }
+        });
+
+        test("discards the scope store when the extension minor version changes", () => {
+            const memento = new MockMemento();
+            void memento.update("llamacpp.prefix_snapshots.version", "0.0.1");
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-session-"));
+            const scope = "deepseek-v4-pro\0version-change";
+            writeSessionScopeFile(storageDir, scope, {
+                conversation: { messages: [{ role: "user", content: "old" }], tokenCount: 1, updatedAt: Date.now() },
+            });
+            fs.writeFileSync(path.join(storageDir, "session-state.json"), JSON.stringify({
+                prefixSnapshots: { [scope]: createPrefixSnapshot("old", "old") },
+                conversations: {},
+                toolCatalogs: {},
+            }), "utf8");
+            try {
+                const provider = createStoredProvider(memento, storageDir);
+                const api = sessionStateApi(provider);
+                assert.strictEqual(api.getConversationMessageSnapshot(scope), undefined);
+                assert.ok(!fs.existsSync(sessionStateDir(storageDir)), "the scope file folder is discarded");
+                assert.ok(!fs.existsSync(path.join(storageDir, "session-state.json")), "the old file is discarded");
+            } finally {
+                fs.rmSync(storageDir, { recursive: true, force: true });
+            }
+        });
+
+        test("prunes old and excess scope files but keeps scopes used in this host", async () => {
+            const memento = new MockMemento();
+            matchSessionStateVersion(memento);
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-session-"));
+            const now = Date.now();
+            const dayMs = 24 * 60 * 60 * 1000;
+            const scopes: Array<{ scope: string; filePath: string }> = [];
+            for (let index = 0; index < 30; index++) {
+                const scope = `deepseek-v4-pro\0retention-${index}`;
+                const filePath = writeSessionScopeFile(storageDir, scope, {
+                    updatedAt: now - index * 1_000,
+                    conversation: {
+                        messages: [{ role: "user", content: `retention-${index}` }],
+                        tokenCount: 1,
+                        updatedAt: now - index * 1_000,
+                    },
+                });
+                const touched = new Date(now - index * 60_000);
+                fs.utimesSync(filePath, touched, touched);
+                scopes.push({ scope, filePath });
+            }
+            const oldUnused = new Date(now - 8 * dayMs);
+            fs.utimesSync(scopes[28].filePath, oldUnused, oldUnused);
+            const oldUsed = new Date(now - 9 * dayMs);
+            fs.utimesSync(scopes[29].filePath, oldUsed, oldUsed);
+            try {
+                const provider = createStoredProvider(memento, storageDir);
+                const api = sessionStateApi(provider);
+                assert.ok(api.getConversationMessageSnapshot(scopes[29].scope), "the oldest scope is loaded before pruning");
+                await api.pruneSessionState();
+                assert.ok(fs.existsSync(scopes[29].filePath), "a scope used in this host is never pruned");
+                assert.ok(!fs.existsSync(scopes[28].filePath), "an old unused scope is pruned");
+                const remaining = fs.readdirSync(sessionStateDir(storageDir))
+                    .filter(name => name.endsWith(".json"));
+                assert.strictEqual(remaining.length, 24, "at most 24 scope files are kept");
+                assert.ok(remaining.includes(path.basename(scopes[29].filePath)));
+            } finally {
+                fs.rmSync(storageDir, { recursive: true, force: true });
+            }
+        });
+
+        test("prunes the oldest scope files until the size budget fits", async () => {
+            const memento = new MockMemento();
+            matchSessionStateVersion(memento);
+            const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llamacpp-session-"));
+            const now = Date.now();
+            const payload = "x".repeat(400);
+            const scopes: Array<{ scope: string; filePath: string }> = [];
+            for (let index = 0; index < 4; index++) {
+                const scope = `deepseek-v4-pro\0size-${index}`;
+                const filePath = writeSessionScopeFile(storageDir, scope, {
+                    conversation: {
+                        messages: [{ role: "user", content: `${index}-${payload}` }],
+                        tokenCount: 1,
+                        updatedAt: now - index * 1_000,
+                    },
+                });
+                const touched = new Date(now - index * 60_000);
+                fs.utimesSync(filePath, touched, touched);
+                scopes.push({ scope, filePath });
+            }
+            try {
+                const provider = createStoredProvider(memento, storageDir);
+                const api = sessionStateApi(provider);
+                assert.ok(api.getConversationMessageSnapshot(scopes[3].scope), "the oldest scope is protected");
+                await api.pruneSessionState({ maxBytes: 700 });
+                const remaining = fs.readdirSync(sessionStateDir(storageDir))
+                    .filter(name => name.endsWith(".json"));
+                assert.deepStrictEqual(
+                    remaining,
+                    [path.basename(scopes[3].filePath)],
+                    "only the scope used in this host remains"
+                );
+            } finally {
+                fs.rmSync(storageDir, { recursive: true, force: true });
+            }
+        });
+
+        test("keeps session state in memory when no global storage path is available", async () => {
+            const provider = new LlamaCppChatModelProvider(
+                new MockSecretStorage(), "test-user-agent", undefined, undefined, new MockMemento()
+            );
+            const api = sessionStateApi(provider);
+            const scope = "deepseek-v4-pro\0memory-only";
+            api.setConversationMessageSnapshot(scope, [{ role: "user", content: "memory" }], 9);
+            await api.flushSessionState();
+            assert.deepStrictEqual(
+                api.getConversationMessageSnapshot(scope)?.messages,
+                [{ role: "user", content: "memory" }]
+            );
+            assert.strictEqual(provider.armManualCompaction("memory-only"), true);
         });
 
         test("returns exact usage from the final SSE usage chunk", async () => {
