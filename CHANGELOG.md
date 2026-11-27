@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.1.3 (development build) - 2026-11-27
+
+- Changed: tools fit their output to what the model's provider takes in one
+  result, instead of the provider dropping its middle (Claude at 16,000
+  characters, Codex 12,000, HTTP models 24,000). `read_file` stops early and
+  ends with the `startLine` to continue from, and shows a line longer than the
+  page cut; the terminal tools return less of the newest output; `changes_diff`
+  names the files it left out.
+- Changed: every built-in tool schema lists the arguments it takes
+  (`additionalProperties: false`); 22 of 30 took any argument and ignored an
+  unknown one silently (`grep_search` got `-A` three times). A call with an
+  unknown argument still runs without it, and its result names the argument
+  and the ones the tool takes, on Claude too, whose tool check drops it first.
+- Changed: self-cleaning also shortens what earlier requests' edits and
+  subagent tasks wrote: `content`, `oldString`/`newString` and `prompt` from
+  300 characters become a note with their size, while the file and the other
+  arguments stay. Tool call arguments were a third of the live window. The
+  **Context cleaned** card and Session Quality count them.
+- Changed: an open subagent is cleaned like the chat before its next task, when
+  its history is over the chat budget or half its model's context: stale
+  results, edit arguments and memory indexes of its earlier tasks become
+  stubs, and the provider starts its session again from the cleaned history.
+  Its panel shows **Earlier tasks cleaned**. Before, it only shortened long
+  results at half the context and refused at 80%.
+- Added: Session Quality → **Request breakdown**: what the first request of
+  each turn spends its tokens on (system prompt, tool schemas, summary, memory,
+  user requests, model answers, tool arguments, tool results, images), for the
+  latest turn and on average; the log has it as `chat.request.breakdown`.
+- Changed: a terminal result in the state `running` says how to wait for it
+  with `read_terminal` and `waitMs`, or stop it, instead of starting it again;
+  `run_in_terminal` says how long a terminal ID lives and that a call without
+  one reuses an idle terminal.
+- Changed: the system prompt no longer repeats what the `subagent` and memory
+  tools say about themselves: 605 characters less in every request.
+- Fixed: after a test run, a click on a chat notification in Windows opened an
+  empty window of the test build of VS Code. Every VS Code start takes over
+  `vscode://` links; `npm test` now gives them back to the installed VS Code
+  (`node scripts/run-vscode-test.mjs --restore-only` repairs them by hand).
+
 ## 2.1.2 (development build) - 2026-11-27
 
 - Changed: the VSIX is 10.6 MB instead of 115 MB. The Claude runtime

@@ -74,6 +74,11 @@ export interface ChatToolInvokeContext {
 	/** Whose terminals the terminal tools use: the chat or one subagent run. */
 	terminalOwner?: { id: string; label: string };
 	callId?: string;
+	/**
+	 * Characters of one result the model's provider forwards uncut (Claude 16k, Codex 12k, HTTP 24k by default).
+	 * Tools that page their output fit it and say how to continue; undefined when the provider does not cut.
+	 */
+	resultChars?: number;
 	/** Runs a nested agent turn and resolves with its final report; absent inside a subagent. */
 	runSubagent?(request: SubagentRequest, token: vscode.CancellationToken): Promise<string>;
 	/** Closes an open subagent of this chat and resolves with a short result; absent inside a subagent. */

@@ -5,7 +5,8 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { DELETE_FOLDER, WRITE_OUTSIDE_WORKSPACE } from "../approvals";
 import { defaultEditDiagnosticsSource, reportEditErrors, snapshotDiagnostics, type EditDiagnosticsSource } from "./edit-diagnostics";
-import { CHAT_TOOL_GROUPS, MAX_IMAGE_BYTES, TOOL_INPUT_NOT_OBJECT, type ChatTool, type ChatToolConfirmation, type ChatToolOutput } from "./types";
+import { CHAT_TOOL_GROUPS, MAX_IMAGE_BYTES, TOOL_INPUT_NOT_OBJECT, type ChatTool, type ChatToolConfirmation, type ChatToolInvokeContext, type ChatToolOutput } from "./types";
+import { resultBudget } from "./result-budget";
 import {
 	displayPath,
 	isInsideWorkspace,
@@ -648,7 +649,7 @@ export function createCoreTools(options: {
 		name: "read_file",
 		group: CHAT_TOOL_GROUPS.files,
 		readOnly: true,
-		description: "Reads a text file from the workspace. Returns at most 2000 lines or 200,000 characters; use startLine and endLine to page through larger files. The model provider may cut very long results, so read long files in line ranges.",
+		description: "Reads a text file from the workspace. Returns at most 2000 lines or 200,000 characters, and no more than your model takes in one tool result; a shorter page ends with the startLine to continue from. Use startLine and endLine for a range.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -658,11 +659,12 @@ export function createCoreTools(options: {
 			},
 			required: ["filePath"],
 		},
-		async invoke(input: unknown, token: vscode.CancellationToken): Promise<string> {
+		async invoke(input: unknown, token: vscode.CancellationToken, context?: ChatToolInvokeContext): Promise<string> {
 			checkCancellation(token);
 			const record = inputRecord(input);
 			const file = resolveToolPath(record.filePath, roots());
 			const shown = displayPath(file, roots());
+			const charBudget = resultBudget(MAX_READ_CHARS, context?.resultChars);
 			const startLine = integerField(record, "startLine", 1, 1);
 			const endLineSpecified = record.endLine !== undefined;
 			const endLine = integerField(record, "endLine", startLine + MAX_READ_LINES - 1, 1);
@@ -701,23 +703,33 @@ export function createCoreTools(options: {
 			for (let line = startLine; line <= cappedEnd; line++) {
 				const text = allLines[line - 1];
 				const addition = text.length + (rendered.length > 0 ? 1 : 0);
-				if (characters + addition > MAX_READ_CHARS) {
+				if (characters + addition > charBudget) {
 					truncatedForChars = true;
 					break;
 				}
 				rendered.push(text);
 				characters += addition;
 			}
+			// A single line longer than the page is shown cut, so the reader still moves on.
+			const cutLine = rendered.length === 0 && truncatedForChars ? allLines[startLine - 1].length : undefined;
+			if (cutLine !== undefined) {
+				rendered.push(allLines[startLine - 1].slice(0, charBudget));
+			}
 			const lastLine = rendered.length > 0 ? startLine + rendered.length - 1 : startLine;
 			let output = `File: ${shown} (lines ${startLine}-${lastLine} of ${allLines.length})`;
 			if (rendered.length > 0) {
 				output += `\n${rendered.join("\n")}`;
 			}
-			if (truncatedForLines) {
-				output += `\n… (truncated at ${MAX_READ_LINES} lines)`;
-			}
-			if (truncatedForChars) {
-				output += `\n… (truncated at ${MAX_READ_CHARS} characters)`;
+			if (truncatedForChars || truncatedForLines) {
+				const reason = !truncatedForChars ? `the ${MAX_READ_LINES}-line limit`
+					: charBudget < MAX_READ_CHARS ? `${charBudget.toLocaleString("en-US")} characters, about what your model takes in one tool result`
+						: `the ${MAX_READ_CHARS.toLocaleString("en-US")}-character limit`;
+				const cut = cutLine !== undefined ? `; line ${startLine} has ${cutLine.toLocaleString("en-US")} characters, only the first ${charBudget.toLocaleString("en-US")} are shown` : "";
+				// Without endLine the reader wants the whole file, so the page continues to its end.
+				const wantedEnd = endLineSpecified ? requestedEnd : allLines.length;
+				output += lastLine < wantedEnd
+					? `\n… (stopped at ${reason}${cut}). Continue with startLine: ${lastLine + 1}.`
+					: `\n… (stopped at ${reason}${cut}).`;
 			}
 			return output;
 		},

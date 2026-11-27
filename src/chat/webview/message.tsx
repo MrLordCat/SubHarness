@@ -398,6 +398,7 @@ function summarizedText(summarizedMessages: number, trimmedTurn: CompactionPart[
 function CleaningCard({ part, cleaning }: { part: CompactionPart; cleaning: NonNullable<CompactionPart["cleaning"]> }) {
 	const removed = [
 		...(cleaning.staleResults > 0 ? [`${cleaning.staleResults} stale tool ${cleaning.staleResults === 1 ? "result" : "results"} replaced with a stub`] : []),
+		...(cleaning.staleArguments ? [`arguments of ${cleaning.staleArguments} earlier ${cleaning.staleArguments === 1 ? "edit or subagent task" : "edits and subagent tasks"} shortened`] : []),
 		...(cleaning.summary ? [`${summarizedText(cleaning.summarizedMessages, part.trimmedTurn)} summarized`] : []),
 	].join(" · ");
 	return (

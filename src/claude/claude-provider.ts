@@ -21,6 +21,7 @@ import {
 } from "./availability";
 import {
 	ClaudeAgentSession,
+	CLAUDE_TOOL_RESULT_MAX_CHARS,
 	hasClaudeAccountEvidence,
 	resolveClaudeCodeBinary,
 	validatePersistedClaudeSession,
@@ -1204,6 +1205,11 @@ export class ClaudeChatModelProvider implements vscode.LanguageModelChatProvider
 			details.push(`Last request: ${this.lastRequestSummary}`);
 		}
 		vscode.window.showInformationMessage(`Claude: ${details.join(". ")}.`);
+	}
+
+	/** Characters of one tool result Claude gets uncut; the chat's tools page their output to fit. */
+	toolResultCharLimit(): number {
+		return CLAUDE_TOOL_RESULT_MAX_CHARS;
 	}
 
 	async refreshSubscriptionUsage(force = false): Promise<void> {

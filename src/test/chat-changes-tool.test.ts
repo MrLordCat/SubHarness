@@ -28,6 +28,9 @@ suite("changes_diff tool", () => {
 		});
 		assert.deepStrictEqual(result, { text: "1 file changed in this turn", isError: false });
 		assert.deepStrictEqual(asked, [{ scope: "turn", paths: ["a.ts"] }]);
+		// A model whose provider takes 12,000 characters of a result gets a diff that fits, with room for its note.
+		await source.invoke(CHANGES_DIFF_TOOL_NAME, {}, token, { approve: async () => true, resultChars: 12_000, changesDiff: async request => { asked.push(request); return "ok"; } });
+		assert.deepStrictEqual(asked[1], { scope: "turn", maxChars: 11_400 });
 		await assert.rejects(tool.invoke({}, token, {}), /does not track file changes.*Review the changed files with read_file/);
 	});
 });

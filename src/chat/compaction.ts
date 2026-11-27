@@ -499,6 +499,8 @@ export interface CompactChatOptions {
 	transcriptPath?: string;
 	/** Call ids whose results stay stubbed; the active compaction's when absent. */
 	staleResults?: readonly string[];
+	/** Call ids whose long arguments stay shortened; the active compaction's when absent. */
+	staleArguments?: readonly string[];
 }
 
 /** A compaction part for the history, or undefined when the history already fits. */
@@ -512,6 +514,7 @@ export async function compactChatHistory(history: readonly ChatMessage[], option
 		throw new vscode.CancellationError();
 	}
 	const stale = keptStaleResults(history, plan.keepFrom, options.staleResults ?? activeCompaction(history)?.part.staleResults);
+	const staleArguments = keptStaleCalls(history, plan.keepFrom, options.staleArguments ?? activeCompaction(history)?.part.staleArguments);
 	const part: ChatCompactionPart = {
 		kind: "compaction",
 		summary: result.summary,
@@ -528,13 +531,13 @@ export async function compactChatHistory(history: readonly ChatMessage[], option
 		...(options.transcriptPath ? { transcriptPath: options.transcriptPath } : {}),
 		...(stale.length > 0 ? { staleResults: stale } : {}),
 		...(plan.staleMemoryIndex?.length ? { staleMemoryIndex: [...plan.staleMemoryIndex] } : {}),
+		...(staleArguments.length > 0 ? { staleArguments } : {}),
 	};
 	part.tokensAfter = plan.keptTokens + estimateTextTokens(compactionSummaryText(part));
 	return part;
 }
 
-/** The stale results a new compaction keeps stubbed: those of the messages it keeps. */
-export function keptStaleResults(history: readonly ChatMessage[], keepFrom: number, stale: readonly string[] | undefined): string[] {
+function keptCallIds(history: readonly ChatMessage[], keepFrom: number, stale: readonly string[] | undefined, kind: "toolResult" | "toolCall"): string[] {
 	if (!stale?.length) {
 		return [];
 	}
@@ -542,10 +545,20 @@ export function keptStaleResults(history: readonly ChatMessage[], keepFrom: numb
 	const kept: string[] = [];
 	for (const message of history.slice(keepFrom)) {
 		for (const part of message.parts) {
-			if (part.kind === "toolResult" && wanted.has(part.callId)) {
+			if (part.kind === kind && wanted.has(part.callId)) {
 				kept.push(part.callId);
 			}
 		}
 	}
 	return kept;
+}
+
+/** The stale results a new compaction keeps stubbed: those of the messages it keeps. */
+export function keptStaleResults(history: readonly ChatMessage[], keepFrom: number, stale: readonly string[] | undefined): string[] {
+	return keptCallIds(history, keepFrom, stale, "toolResult");
+}
+
+/** The tool calls whose long arguments a new compaction keeps shortened: those of the messages it keeps. */
+export function keptStaleCalls(history: readonly ChatMessage[], keepFrom: number, stale: readonly string[] | undefined): string[] {
+	return keptCallIds(history, keepFrom, stale, "toolCall");
 }

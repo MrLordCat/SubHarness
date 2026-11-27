@@ -245,4 +245,27 @@ suite("diagnostics", () => {
 		assert.strictEqual(tracker.summary.chatCleanings, 0);
 		assert.strictEqual(tracker.summary.chatCleaningSavedTokens, 0);
 	});
+
+	test("keeps the newest 200 request breakdowns as copies and clears them", () => {
+		const tracker = new SessionQualityTracker();
+		let changes = 0;
+		tracker.onDidChange(() => { changes++; });
+		const event = (index: number) => ({
+			conversationId: `chat-${index}`, modelId: "deepseek::flash", at: index,
+			tokens: { system: 1, tools: 2, summary: 0, memory: 0, requests: 3, answers: 4, toolArguments: 5, toolResults: 6, images: 0 },
+			total: 21, scale: 0.5, messages: 4, stubbedResults: 0, shortenedArguments: 0,
+		});
+		const first = event(0);
+		tracker.recordBreakdown(first);
+		first.tokens.toolResults = 999;
+		assert.strictEqual(tracker.breakdowns[0].tokens.toolResults, 6, "the tracker keeps its own copy");
+		for (let index = 1; index <= 205; index++) {
+			tracker.recordBreakdown(event(index));
+		}
+		assert.strictEqual(tracker.breakdowns.length, 200);
+		assert.strictEqual(tracker.breakdowns[199].conversationId, "chat-205");
+		assert.strictEqual(changes, 206);
+		tracker.clear();
+		assert.strictEqual(tracker.breakdowns.length, 0);
+	});
 });

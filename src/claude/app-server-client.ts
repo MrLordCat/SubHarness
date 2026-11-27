@@ -17,7 +17,7 @@ import type {
 	SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk" with { "resolution-mode": "import" };
 import type { LlamaLogSink } from "../logger";
-import { asRecord, isCacheControlPart, stripTerminalControlNoise } from "../utils";
+import { asRecord, isCacheControlPart, stableJsonStringify, stripTerminalControlNoise } from "../utils";
 import { toolResultCharLimit } from "../tools/tool-result-limits";
 import {
 	chooseClaudeRuntimeBinary,
@@ -29,7 +29,9 @@ import {
 
 export const CLAUDE_ACTIVE_TURN_TIMEOUT_MS = 300_000;
 const TOOL_CARD_SETTLE_MS = 30;
-const MAX_TOOL_RESULT_CHARS = 16_000;
+/** Claude gets at most this much of one tool result (subagent reports excepted, see tool-result-limits). */
+export const CLAUDE_TOOL_RESULT_MAX_CHARS = 16_000;
+const MAX_TOOL_RESULT_CHARS = CLAUDE_TOOL_RESULT_MAX_CHARS;
 
 const CLAUDE_VSCODE_SYSTEM_PROMPT = [
 	"You are Claude running as a language model inside the SubHarness chat in VS Code.",
@@ -570,6 +572,13 @@ export class ClaudeAgentSession implements vscode.Disposable {
 	private readonly input = new AsyncMessageQueue();
 	private readonly pendingTools = new PendingToolRegistry<PendingToolCall>();
 	private readonly queuedToolCalls: PendingToolCall[] = [];
+	/** Tool definitions by the name Claude calls them (mcp__vscode__<name>). */
+	private readonly toolsByClaudeName = new Map<string, vscode.LanguageModelChatTool>();
+	/**
+	 * Arguments the SDK's input check drops because the schema does not list them, seen in canUseTool
+	 * before the check, by tool name. delegateTool puts them back, so the chat can name them in the result.
+	 */
+	private readonly droppedArguments = new Map<string, Array<{ known: string; extra: Record<string, unknown> }>>();
 	private query: Query | undefined;
 	private pump: Promise<void> | undefined;
 	private activeTurn: ActiveTurn | undefined;
@@ -812,6 +821,7 @@ export class ClaudeAgentSession implements vscode.Disposable {
 		const sdk = await import("@anthropic-ai/claude-agent-sdk");
 		const mcpTools = this.options.tools.map((definition, index) => {
 			const mcpName = createMcpToolName(definition.name, index);
+			this.toolsByClaudeName.set(`mcp__vscode__${mcpName}`, definition);
 			const schema = createZodShape(definition.inputSchema);
 			return sdk.tool(
 				mcpName,
@@ -844,9 +854,13 @@ export class ClaudeAgentSession implements vscode.Disposable {
 			includePartialMessages: true,
 			permissionMode: "default",
 			...(this.options.maxTurns !== undefined ? { maxTurns: this.options.maxTurns } : {}),
-			canUseTool: async (toolName, input) => isClaudeVsCodeToolName(toolName)
-				? { behavior: "allow", updatedInput: input }
-				: { behavior: "deny", message: `Only VS Code-hosted tools are available; denied ${toolName}.` },
+			canUseTool: async (toolName, input) => {
+				if (!isClaudeVsCodeToolName(toolName)) {
+					return { behavior: "deny", message: `Only VS Code-hosted tools are available; denied ${toolName}.` };
+				}
+				this.rememberDroppedArguments(toolName, input);
+				return { behavior: "allow", updatedInput: input };
+			},
 			...(this.options.effort ? { effort: this.options.effort } : {}),
 			env: {
 				...process.env,
@@ -1100,10 +1114,46 @@ export class ClaudeAgentSession implements vscode.Disposable {
 		this.completeActiveTurn();
 	}
 
-	private delegateTool(name: string, input: Record<string, unknown>): Promise<CallToolResult> {
+	private rememberDroppedArguments(claudeName: string, input: Record<string, unknown>): void {
+		const definition = this.toolsByClaudeName.get(claudeName);
+		const properties = asRecord(asRecord(definition?.inputSchema).properties);
+		if (!definition || Object.keys(properties).length === 0) {
+			return;
+		}
+		const listed = (name: string) => Object.prototype.hasOwnProperty.call(properties, name);
+		const extra = Object.fromEntries(Object.entries(input).filter(([name]) => !listed(name)));
+		if (Object.keys(extra).length === 0) {
+			return;
+		}
+		const queue = this.droppedArguments.get(definition.name) ?? [];
+		queue.push({ known: stableJsonStringify(Object.fromEntries(Object.entries(input).filter(([name]) => listed(name)))), extra });
+		// A call that never reaches the tool (a failed input check) leaves its entry behind.
+		if (queue.length > 16) {
+			queue.shift();
+		}
+		this.droppedArguments.set(definition.name, queue);
+	}
+
+	/** The arguments as the model sent them: the dropped ones of the matching call are put back. */
+	private restoreDroppedArguments(name: string, input: Record<string, unknown>): Record<string, unknown> {
+		const queue = this.droppedArguments.get(name);
+		if (!queue?.length) {
+			return input;
+		}
+		const known = stableJsonStringify(input);
+		const index = queue.findIndex(entry => entry.known === known);
+		if (index < 0) {
+			return input;
+		}
+		const [entry] = queue.splice(index, 1);
+		return { ...input, ...entry.extra };
+	}
+
+	private delegateTool(name: string, sdkInput: Record<string, unknown>): Promise<CallToolResult> {
 		if (this.disposed) {
 			return Promise.reject(new Error("Claude session closed"));
 		}
+		const input = this.restoreDroppedArguments(name, sdkInput);
 		if (this.keepAliveMode) {
 			// Keep-alive turns must never execute tools or wait on VS Code.
 			return Promise.resolve({

@@ -69,7 +69,7 @@ export interface ChatWindowDeps {
 	/** Shared durable memory the chat shows to every provider. */
 	memory?: SharedMemoryService;
 	/** Session Quality tracker that records finished context cleanings. */
-	sessionQuality?: Pick<SessionQualityTracker, "recordCleaning">;
+	sessionQuality?: Pick<SessionQualityTracker, "recordCleaning" | "recordBreakdown">;
 }
 
 const DEEPSEEK_KEY_SECRET = "llamacpp.deepSeekApiKey";
@@ -352,6 +352,7 @@ export function registerChatWindow(context: vscode.ExtensionContext, deps: ChatW
 			},
 			cleaningBudget: () => resolveChatContextBudget(),
 			onCleaned: event => deps.sessionQuality?.recordCleaning(event),
+			onRequestBreakdown: event => deps.sessionQuality?.recordBreakdown(event),
 		},
 	});
 	const host = registerChatView(context, controller);

@@ -421,19 +421,19 @@ function selectBoundedMessages(
 	return selected;
 }
 
+/** The limit the adapter applies to one tool result for a configured value. */
+export function clampCodexToolResultChars(value: number | undefined): number {
+	const configured = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : DEFAULT_MAX_TOOL_RESULT_CHARS;
+	return Math.max(MIN_MAX_TOOL_RESULT_CHARS, Math.min(MAX_MAX_TOOL_RESULT_CHARS, configured));
+}
+
 export function serializeCodexConversation(
 	messages: readonly vscode.LanguageModelChatRequestMessage[],
 	options: CodexConversationSerializationOptions = {}
 ): CodexConversationInput {
 	const serialized: SerializedConversationMessage[] = [];
 	const imageEntries: Array<{ messageIndex: number; url: string }> = [];
-	const configuredToolResultMax = Number.isFinite(options.maxToolResultChars)
-		? Math.floor(options.maxToolResultChars!)
-		: DEFAULT_MAX_TOOL_RESULT_CHARS;
-	const maxToolResultChars = Math.max(
-		MIN_MAX_TOOL_RESULT_CHARS,
-		Math.min(MAX_MAX_TOOL_RESULT_CHARS, configuredToolResultMax)
-	);
+	const maxToolResultChars = clampCodexToolResultChars(options.maxToolResultChars);
 	let truncatedToolResultCount = 0;
 	const callNames = new Map<string, string>();
 

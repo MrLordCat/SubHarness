@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { CocoTerminalManager, type CocoTerminalRunInput, type CocoTerminalSnapshot } from "../../coco/terminal-manager";
 import { commandKind } from "../approvals";
 import { findDangerousCommands, type DangerousCommandRule } from "./danger";
+import { resultBudget } from "./result-budget";
 import { CHAT_TOOL_GROUPS, type ChatTool, type ChatToolConfirmation } from "./types";
 
 export interface ChatTerminalToolsOptions {
@@ -31,9 +32,12 @@ const RUN_DEFAULT_MAX_CHARS = 30_000;
 /** send and kill return a snapshot with the manager's own default limit. */
 const MANAGER_DEFAULT_MAX_CHARS = 12_000;
 
-/** The same clamp the manager applies, so the truncation note names the limit actually used. */
-function terminalMaxChars(value: number | undefined, fallback: number): number {
-	return Math.min(OUTPUT_LIMIT, Math.max(1, Math.round(value ?? fallback)));
+/**
+ * The same clamp the manager applies, so the truncation note names the limit actually used. A model whose
+ * provider takes less of one result gets less, so the provider does not cut the middle of the output.
+ */
+function terminalMaxChars(value: number | undefined, fallback: number, resultChars?: number): number {
+	return resultBudget(Math.min(OUTPUT_LIMIT, Math.max(1, Math.round(value ?? fallback))), resultChars);
 }
 
 /** Plain text keeps newlines readable instead of routing every line through JSON escapes. */
@@ -41,6 +45,7 @@ export function formatTerminalSnapshot(snapshot: CocoTerminalSnapshot, limit: nu
 	const state = snapshot.exitCode === undefined ? snapshot.state : `${snapshot.state}, exit code ${snapshot.exitCode}`;
 	const lines = [`Terminal: ${snapshot.terminalName} (terminalId: ${snapshot.terminalId})`, `State: ${state}`];
 	if (snapshot.state === "waiting for input") { lines.push("The command is waiting for input. Answer with send_to_terminal, or interrupt it with send_to_terminal { interrupt: true }."); }
+	if (snapshot.state === "running") { lines.push(`The command is still running; do not start it again. Wait for it with read_terminal { "terminalId": "${snapshot.terminalId}", "waitMs": 60000 }, or stop it with send_to_terminal { "interrupt": true }.`); }
 	if (snapshot.outputError) { lines.push(`Note: ${snapshot.outputError}`); }
 	if (!snapshot.output) {
 		lines.push("Output: (none)");
@@ -78,7 +83,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 		{
 			name: "run_in_terminal",
 			group: CHAT_TOOL_GROUPS.terminal,
-			description: "Run a shell command in a VS Code terminal the user can see. Reuses an idle terminal of this chat or subagent, each subagent having its own; cwd changes its directory first. A terminal whose sync command timed out and printed nothing for a minute is closed and replaced. mode sync waits up to timeoutMs (default 120000); async returns after about a second, for servers and watchers. If the result's state is running, read that terminal instead of rerunning.",
+			description: "Run a shell command in a VS Code terminal the user can see. Without terminalId an idle terminal of this chat or subagent is reused, or a new one opens; cwd changes its directory first. A terminalId lives until kill_terminal, the user closes it, a silent timed-out command is replaced, or the window reloads. mode sync waits up to timeoutMs (default 120000); async returns after about a second, for servers and watchers. A running result says how to wait for it; do not rerun.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -88,7 +93,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 					timeoutMs: { type: "number", minimum: 0, maximum: 3_600_000, description: "Sync wait limit; a timeout leaves the command running." },
 					terminalId: { type: "string", description: "Use this idle chat terminal. Omit to reuse the last idle one." },
 					newTerminal: { type: "boolean", default: false, description: "Open a separate terminal even if one is idle." },
-					maxChars: { type: "number", minimum: 1, maximum: 128_000, description: "Most recent output characters to return (default 30000)." },
+					maxChars: { type: "number", minimum: 1, maximum: 128_000, description: "Most recent output characters to return (default 30000, less when your model takes less in one tool result)." },
 				},
 				required: ["command"],
 				additionalProperties: false,
@@ -99,7 +104,7 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 					throw new Error("Trust this workspace before running terminal commands.");
 				}
 				const value = record(input);
-				const maxChars = terminalMaxChars(optionalNumber(value.maxChars), RUN_DEFAULT_MAX_CHARS);
+				const maxChars = terminalMaxChars(optionalNumber(value.maxChars), RUN_DEFAULT_MAX_CHARS, context?.resultChars);
 				const run: CocoTerminalRunInput = {
 					owner: context?.terminalOwner?.id,
 					ownerLabel: context?.terminalOwner?.label,
@@ -124,14 +129,14 @@ export function createChatTerminalTools(options: ChatTerminalToolsOptions): Chat
 				properties: {
 					terminalId: { type: "string", description: "Id of the terminal to read, as shown in run_in_terminal's result." },
 					waitMs: { type: "number", minimum: 0, maximum: 60_000, description: "Wait this many milliseconds for a running command to finish; 0 returns immediately." },
-					maxChars: { type: "number", minimum: 1, maximum: 128_000, description: "Most recent output characters to return (default 30000)." },
+					maxChars: { type: "number", minimum: 1, maximum: 128_000, description: "Most recent output characters to return (default 30000, less when your model takes less in one tool result)." },
 				},
 				required: ["terminalId"],
 				additionalProperties: false,
 			},
 			invoke: async (input, token, context) => {
 				const value = record(input);
-				const maxChars = terminalMaxChars(optionalNumber(value.maxChars), RUN_DEFAULT_MAX_CHARS);
+				const maxChars = terminalMaxChars(optionalNumber(value.maxChars), RUN_DEFAULT_MAX_CHARS, context?.resultChars);
 				const snapshot = await manager.read(requireString(value, "terminalId"), optionalNumber(value.waitMs), maxChars, token, context?.terminalOwner?.id);
 				return formatTerminalSnapshot(snapshot, maxChars);
 			},

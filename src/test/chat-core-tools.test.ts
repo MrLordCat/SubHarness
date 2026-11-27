@@ -34,10 +34,10 @@ suite("Chat core tools", () => {
 		return (await invokeOutput(name, input)).text;
 	}
 
-	async function invokeOutput(name: string, input: unknown): Promise<ChatToolOutput> {
+	async function invokeOutput(name: string, input: unknown, resultChars?: number): Promise<ChatToolOutput> {
 		const source = new vscode.CancellationTokenSource();
 		tokens.push(source);
-		const result = await tool(name).invoke(input, source.token);
+		const result = await tool(name).invoke(input, source.token, resultChars === undefined ? undefined : { resultChars });
 		return typeof result === "string" ? { text: result } : result;
 	}
 
@@ -82,8 +82,30 @@ suite("Chat core tools", () => {
 		await fsp.writeFile(path.join(tmpDir, "long.txt"), lines.join("\n"), "utf8");
 		const result = await invoke("read_file", { filePath: "long.txt" });
 		assert.ok(result.startsWith("File: long.txt (lines 1-2000 of 2005)\n"));
-		assert.match(result, /truncated at 2000 lines/);
+		assert.ok(result.endsWith("\n… (stopped at the 2000-line limit). Continue with startLine: 2001."));
 		assert.strictEqual(result.split("\n").filter(line => line.startsWith("line ")).length, 2000);
+	});
+
+	test("read_file pages a long file to the model's tool-result limit and names the next startLine", async () => {
+		const lines = Array.from({ length: 300 }, (_, index) => `line ${String(index + 1).padStart(3, "0")} ${"x".repeat(40)}`);
+		await fsp.writeFile(path.join(tmpDir, "paged.txt"), lines.join("\n"), "utf8");
+		// 2,000 characters for the model leave 1,400 for the page: 28 lines of 49 characters plus newlines.
+		const first = (await invokeOutput("read_file", { filePath: "paged.txt" }, 2_000)).text;
+		assert.ok(first.startsWith("File: paged.txt (lines 1-28 of 300)\nline 001 "));
+		assert.ok(first.endsWith("… (stopped at 1,400 characters, about what your model takes in one tool result). Continue with startLine: 29."));
+		assert.ok(first.length <= 2_000);
+		const next = (await invokeOutput("read_file", { filePath: "paged.txt", startLine: 29 }, 2_000)).text;
+		assert.ok(next.startsWith("File: paged.txt (lines 29-56 of 300)\nline 029 "));
+		// A range that fits is returned whole without a note; a model without a limit gets the whole file.
+		assert.strictEqual((await invokeOutput("read_file", { filePath: "paged.txt", startLine: 299 }, 2_000)).text.split("\n").length, 3);
+		assert.ok((await invoke("read_file", { filePath: "paged.txt" })).startsWith("File: paged.txt (lines 1-300 of 300)"));
+	});
+
+	test("read_file shows a line longer than the page cut and moves on to the next line", async () => {
+		await fsp.writeFile(path.join(tmpDir, "wide.txt"), `${"y".repeat(5_000)}\nsecond\n`, "utf8");
+		const result = (await invokeOutput("read_file", { filePath: "wide.txt" }, 2_000)).text;
+		assert.ok(result.startsWith(`File: wide.txt (lines 1-1 of 2)\n${"y".repeat(1_400)}\n`));
+		assert.ok(result.endsWith("line 1 has 5,000 characters, only the first 1,400 are shown). Continue with startLine: 2."));
 	});
 
 	test("read_file rejects binary files and missing files", async () => {

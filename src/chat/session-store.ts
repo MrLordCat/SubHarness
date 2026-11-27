@@ -825,9 +825,11 @@ function isChatPart(value: unknown): value is ChatPart {
 				&& (value.requests === undefined || (Array.isArray(value.requests) && value.requests.every(request => typeof request === "string")))
 				&& (value.staleResults === undefined || (Array.isArray(value.staleResults) && value.staleResults.every(callId => typeof callId === "string")))
 				&& (value.staleMemoryIndex === undefined || (Array.isArray(value.staleMemoryIndex) && value.staleMemoryIndex.every(id => typeof id === "string")))
+				&& (value.staleArguments === undefined || (Array.isArray(value.staleArguments) && value.staleArguments.every(callId => typeof callId === "string")))
 				&& (value.cleaning === undefined || (isRecord(value.cleaning) && typeof value.cleaning.staleResults === "number"
 					&& typeof value.cleaning.summary === "boolean" && typeof value.cleaning.summarizedMessages === "number"
-					&& typeof value.cleaning.budgetTokens === "number"));
+					&& typeof value.cleaning.budgetTokens === "number"
+					&& (value.cleaning.staleArguments === undefined || typeof value.cleaning.staleArguments === "number")));
 		case "subagent":
 			return typeof value.callId === "string"
 				&& typeof value.description === "string"

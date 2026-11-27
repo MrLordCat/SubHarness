@@ -3,7 +3,8 @@ import * as vscode from "vscode";
 import type { ChatToolExecutor } from "../chat/agent-loop";
 import type { ChatMemoryContext } from "../chat/memory-context";
 import type { ChatMessage, ChatSubagentRun, ChatSubagentStep } from "../chat/shared/protocol";
-import { fitSubagentHistory, runChatSubagent, SUBAGENT_INSTRUCTIONS } from "../chat/subagent-runner";
+import { staleToolResultText } from "../chat/lm-messages";
+import { cleanSubagentHistory, fitSubagentHistory, runChatSubagent, SUBAGENT_INSTRUCTIONS } from "../chat/subagent-runner";
 import { createChatToolSource } from "../chat/tool-executor";
 import { ChatToolCatalog, type ToolRegistry } from "../chat/tools/catalog";
 import { createCloseSubagentTool, createSubagentTool, parseSubagentInput, SUBAGENT_TOOL_NAME, subagentLimitMessage } from "../chat/tools/subagent-tool";
@@ -96,6 +97,7 @@ function subagentRun(backend: FakeBackend, options: {
 	request?: SubagentRequest;
 	history?: ChatMessage[];
 	memory?: ChatMemoryContext;
+	cleaningBudget?: number;
 	onHistory?: (history: ChatMessage[]) => void;
 	onFinish: (run: ChatSubagentRun) => void;
 }): Promise<string> {
@@ -111,6 +113,7 @@ function subagentRun(backend: FakeBackend, options: {
 		onFinish: options.onFinish,
 		history: options.history,
 		memory: options.memory,
+		cleaningBudget: options.cleaningBudget,
 		onHistory: options.onHistory,
 	}).then(result => result.report);
 }
@@ -146,6 +149,51 @@ suite("chat subagent", () => {
 		const fitted = fitSubagentHistory([old, recent, recent, recent], 10000);
 		assert.ok(JSON.stringify(fitted[0]).length < JSON.stringify(old).length);
 		assert.throws(() => fitSubagentHistory([recent, { ...recent, parts: [{ kind: "text", text: "x".repeat(30000) }] }], 1000), /context is nearly full/);
+	});
+	test("an open subagent's stale results of earlier tasks are cleaned once it is over the budget", () => {
+		const task = (id: string): ChatMessage => ({ id, role: "user", turn: 1, createdAt: 1, parts: [{ kind: "text", text: `task ${id}` }] });
+		const lookup: ChatMessage = { id: "a1", role: "assistant", turn: 1, createdAt: 1, parts: [
+			{ kind: "toolCall", callId: "grep-1", name: "grep_search", input: { query: "x" } },
+			{ kind: "toolResult", callId: "grep-1", text: "match\n".repeat(4_000) },
+			{ kind: "text", text: "found" },
+		] };
+		const history = [task("t1"), lookup, task("t2")];
+		const part = cleanSubagentHistory(history, 1_000, 100_000);
+		assert.ok(part);
+		assert.deepStrictEqual(part.staleResults, ["grep-1"]);
+		assert.strictEqual(part.method, "none");
+		assert.strictEqual(cleanSubagentHistory(history, 0, 100_000), undefined, "a budget of 0 turns cleaning off");
+		assert.strictEqual(cleanSubagentHistory(history, 1_000_000, 1_000_000), undefined, "a history under the budget stays");
+		assert.strictEqual(cleanSubagentHistory([task("t1"), lookup], 1_000, 100_000), undefined, "results of the current task are kept");
+		assert.ok(cleanSubagentHistory(history, 1_000_000, 2_000), "half the model's context bounds a larger budget");
+	});
+	test("the next task of an open subagent sends the cleaned history and starts the provider session again", async () => {
+		const first = new FakeBackend([
+			p => p.report(new vscode.LanguageModelToolCallPart("grep-1", "read", { path: "a.txt" })),
+			p => p.report(new vscode.LanguageModelTextPart("first report")),
+		]);
+		const big = "line of output\n".repeat(2_000);
+		let history: ChatMessage[] = [];
+		await subagentRun(first, {
+			tools: { tools: [READ_TOOL], invoke: async () => ({ text: big, isError: false }) },
+			onFinish: () => undefined, onHistory: value => { history = value; },
+		});
+		// Large results go stale two tasks later, so a third task finds the first one's result stale.
+		const second = new FakeBackend([p => p.report(new vscode.LanguageModelTextPart("second report"))]);
+		await subagentRun(second, { callId: "call-2", history, onFinish: () => undefined, onHistory: value => { history = value; } });
+		const third = new FakeBackend([p => p.report(new vscode.LanguageModelTextPart("third report"))]);
+		let finished: ChatSubagentRun | undefined;
+		await subagentRun(third, { callId: "call-3", history, cleaningBudget: 1_000, onFinish: run => { finished = run; }, onHistory: value => { history = value; } });
+		const sent = third.requests[0];
+		const results = sent.messages.flatMap(message => message.content)
+			.filter((content): content is vscode.LanguageModelToolResultPart => content instanceof vscode.LanguageModelToolResultPart);
+		assert.strictEqual(results.length, 1);
+		assert.strictEqual((results[0].content[0] as vscode.LanguageModelTextPart).value, staleToolResultText(big));
+		assert.strictEqual(sent.options.modelOptions?._aabHistoryReset, true, "the provider replays the cleaned history into a new session");
+		assert.strictEqual(history.at(-1)?.parts[0].kind, "compaction", "the cleaning part stays with the task's answer");
+		const stored = history.flatMap(message => message.parts).find(part => part.kind === "toolResult");
+		assert.ok(stored?.kind === "toolResult" && stored.text === big, "the history keeps the full result");
+		assert.ok(finished?.steps.some(step => step.kind === "notice" && step.level === "info" && step.text.startsWith("Earlier tasks cleaned: 1 stale tool result replaced with a stub")));
 	});
 	test("parseSubagentInput matches the model by label, id or label case and derives a description", () => {
 		const byLabel = parseSubagentInput({ description: "  Check files  ", prompt: "Inspect a.txt", model: "Smart (Claude)" }, MODELS);

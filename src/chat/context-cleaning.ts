@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { estimateChatMessageTokens, estimateTextTokens } from "./compaction";
-import { activeCompaction, compactionSummaryText, compactionWindow, hasCompactionSummary, hasMemoryIndex, stubStaleToolResults, withoutMemoryIndex, type ChatCompactionPart } from "./lm-messages";
+import { activeCompaction, compactionSummaryText, compactionWindow, hasCompactionSummary, hasMemoryIndex, shortenToolArguments, stubStaleToolArguments, stubStaleToolResults, withoutMemoryIndex, type ChatCompactionPart } from "./lm-messages";
 import type { ChatMessage, ChatPart } from "./shared/protocol";
 import { ASK_QUESTIONS_TOOL_NAME, TODO_TOOL_NAME } from "./tools/interaction-tools";
 import { CLOSE_SUBAGENT_TOOL_NAME, SUBAGENT_TOOL_NAME, WAIT_SUBAGENTS_TOOL_NAME } from "./tools/subagent-tool";
@@ -197,6 +197,21 @@ export function findStaleMemoryIndexes(messages: readonly ChatMessage[]): Set<st
 	return new Set(withIndex.slice(0, -1).map(message => message.id));
 }
 
+/**
+ * Tool calls of earlier requests whose long arguments no longer help: the text an edit wrote (the file holds it now,
+ * and read_file shows it) and the task a finished subagent was given (its report is in the result). Calls of the
+ * current request keep their arguments, as do calls the turn stopped before they had a result.
+ */
+export function findStaleToolArguments(messages: readonly ChatMessage[]): Set<string> {
+	const stale = new Set<string>();
+	for (const use of toolUses(messages)) {
+		if (use.age > 0 && shortenToolArguments(use.name, use.input) !== use.input) {
+			stale.add(use.callId);
+		}
+	}
+	return stale;
+}
+
 /** The prompt tokens the provider reported for the chat's last request. */
 export function lastReportedPromptTokens(history: readonly ChatMessage[]): number | undefined {
 	for (let index = history.length - 1; index >= 0; index--) {
@@ -206,6 +221,18 @@ export function lastReportedPromptTokens(history: readonly ChatMessage[]): numbe
 		}
 	}
 	return undefined;
+}
+
+/**
+ * Provider tokens per estimated token: the last reported prompt over the chat's estimate of the history it covered
+ * (everything but the newest message). 0.5 before the provider reported a request.
+ */
+export function providerTokenScale(history: readonly ChatMessage[], fixedTokens: number, tokensBefore = estimateRequestTokens(history, fixedTokens)): number {
+	const newest = history.at(-1);
+	const reported = lastReportedPromptTokens(history);
+	const previous = tokensBefore - (newest ? estimateChatMessageTokens(newest) : 0);
+	const measured = reported !== undefined && previous > 0 ? reported / previous : DEFAULT_TOKEN_SCALE;
+	return Math.min(MAX_TOKEN_SCALE, Math.max(MIN_TOKEN_SCALE, measured));
 }
 
 /** The chat's estimate of a request with this history: the system prompt, the summary and the kept messages. */
@@ -223,6 +250,8 @@ export interface ChatCleaningEvent {
 	tokensBefore: number;
 	tokensAfter: number;
 	staleResults: number;
+	/** Tool calls whose long arguments this cleaning shortened. */
+	staleArguments?: number;
 	summary: boolean;
 	summarizedMessages: number;
 	durationMs: number;
@@ -255,6 +284,10 @@ export interface ContextCleaningPlan {
 	staleMemoryIndex: string[];
 	/** Memory indexes this cleaning strips for the first time. */
 	newStaleMemoryIndex: number;
+	/** Every tool call whose long arguments the cleaned history shortens: the earlier ones still kept and the new ones. */
+	staleArguments: string[];
+	/** Call ids whose arguments this cleaning shortens for the first time. */
+	freshArguments: string[];
 	/** Provider tokens per estimated token, from the last reported request. */
 	scale: number;
 	/** In estimate units. */
@@ -275,10 +308,7 @@ export function planContextCleaning(history: readonly ChatMessage[], options: Co
 		return undefined;
 	}
 	const tokensBefore = estimateRequestTokens(history, options.fixedTokens);
-	const reported = lastReportedPromptTokens(history);
-	const previous = tokensBefore - estimateChatMessageTokens(newest);
-	const measured = reported !== undefined && previous > 0 ? reported / previous : DEFAULT_TOKEN_SCALE;
-	const scale = Math.min(MAX_TOKEN_SCALE, Math.max(MIN_TOKEN_SCALE, measured));
+	const scale = providerTokenScale(history, options.fixedTokens, tokensBefore);
 	if (tokensBefore * scale <= options.budgetTokens) {
 		return undefined;
 	}
@@ -291,15 +321,18 @@ export function planContextCleaning(history: readonly ChatMessage[], options: Co
 	const earlierIndex = new Set(active?.part.staleMemoryIndex ?? []);
 	const foundIndex = findStaleMemoryIndexes(window);
 	const freshIndex = new Set([...foundIndex].filter(id => !earlierIndex.has(id)));
+	const earlierArguments = new Set(active?.part.staleArguments ?? []);
+	const freshArguments = new Set([...findStaleToolArguments(window)].filter(callId => !earlierArguments.has(callId)));
 	const stubbed = history.map((message, index) => {
-		if (index < start || fresh.size === 0) {
+		if (index < start || (fresh.size === 0 && freshArguments.size === 0)) {
 			return message;
 		}
-		const parts = stubStaleToolResults(message.parts, fresh);
+		const parts = stubStaleToolArguments(stubStaleToolResults(message.parts, fresh), freshArguments);
 		return parts === message.parts ? message : { ...message, parts };
 	});
 	const staleResults: string[] = [];
 	const staleMemoryIndex: string[] = [];
+	const staleArguments: string[] = [];
 	for (const message of history.slice(start)) {
 		if (message.role === "user" && message.memoryContext !== undefined && (earlierIndex.has(message.id) || foundIndex.has(message.id))) {
 			staleMemoryIndex.push(message.id);
@@ -307,6 +340,8 @@ export function planContextCleaning(history: readonly ChatMessage[], options: Co
 		for (const part of message.parts) {
 			if (part.kind === "toolResult" && (earlier.has(part.callId) || fresh.has(part.callId))) {
 				staleResults.push(part.callId);
+			} else if (part.kind === "toolCall" && (earlierArguments.has(part.callId) || freshArguments.has(part.callId))) {
+				staleArguments.push(part.callId);
 			}
 		}
 	}
@@ -320,6 +355,8 @@ export function planContextCleaning(history: readonly ChatMessage[], options: Co
 		freshResults: [...fresh],
 		staleMemoryIndex,
 		newStaleMemoryIndex: freshIndex.size,
+		staleArguments,
+		freshArguments: [...freshArguments],
 		scale,
 		tokensBefore,
 		tokensAfterStubs: estimateRequestTokens(rendered, options.fixedTokens),
@@ -361,12 +398,18 @@ export function staleOnlyCompaction(history: readonly ChatMessage[], plan: Conte
 	// The plan lists every result still stubbed and every memory index still stripped; earlier lists must not outlive it.
 	delete base.staleResults;
 	delete base.staleMemoryIndex;
+	delete base.staleArguments;
 	return {
 		...base,
 		tokensBefore: Math.round(plan.tokensBefore * plan.scale),
 		tokensAfter: Math.round(plan.tokensAfterStubs * plan.scale),
 		...(plan.staleResults.length > 0 ? { staleResults: [...plan.staleResults] } : {}),
 		...(plan.staleMemoryIndex.length > 0 ? { staleMemoryIndex: [...plan.staleMemoryIndex] } : {}),
-		cleaning: { staleResults: plan.newStale, summary: false, summarizedMessages: 0, budgetTokens: plan.budgetTokens },
+		...(plan.staleArguments.length > 0 ? { staleArguments: [...plan.staleArguments] } : {}),
+		cleaning: {
+			staleResults: plan.newStale,
+			...(plan.freshArguments.length > 0 ? { staleArguments: plan.freshArguments.length } : {}),
+			summary: false, summarizedMessages: 0, budgetTokens: plan.budgetTokens,
+		},
 	};
 }

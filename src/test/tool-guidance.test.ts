@@ -12,6 +12,7 @@ import { createCheckTool } from "../chat/tools/check-tools";
 import { createChangesDiffTool } from "../chat/tools/changes-tools";
 import { createToolAccessTools } from "../chat/tools/tool-access-tools";
 import type { ChatTool } from "../chat/tools/types";
+import { strictToolSchema } from "../chat/tools/unknown-arguments";
 import { createWebTools } from "../chat/tools/web-tools";
 import { COCO_CHAT_TOOL_POLICY } from "../coco/tool-policy";
 import { COCO_TOOL_DESCRIPTION_LIMIT } from "../coco/turn-bridge";
@@ -80,6 +81,15 @@ suite("Tool descriptions and guidance", () => {
 	test("every built-in tool argument has a description", () => {
 		for (const tool of bridgeTools()) {
 			assert.deepStrictEqual(undocumentedArguments(tool.inputSchema), [], `${tool.name} has arguments without a description`);
+		}
+	});
+
+	test("every built-in tool with arguments is offered with a strict schema", () => {
+		for (const tool of bridgeTools()) {
+			const offered = strictToolSchema(tool.inputSchema) as { properties?: Record<string, unknown>; additionalProperties?: unknown };
+			if (Object.keys(offered.properties ?? {}).length > 0) {
+				assert.strictEqual(offered.additionalProperties, false, `${tool.name} accepts arguments it does not list`);
+			}
 		}
 	});
 

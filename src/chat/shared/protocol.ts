@@ -72,6 +72,11 @@ export type ChatPart =
 		 * blocks without the index list, while their entry texts stay.
 		 */
 		staleMemoryIndex?: string[];
+		/**
+		 * Call ids of tool calls in kept messages whose long arguments (the text of an earlier request's edit, a finished
+		 * subagent's task) reach the model as a note with their size; the call keeps its other arguments.
+		 */
+		staleArguments?: string[];
 		/** Set when self-cleaning over the chat context budget made the part, not a model switch. */
 		cleaning?: ChatContextCleaning;
 	}
@@ -82,6 +87,8 @@ export type ChatPart =
 export interface ChatContextCleaning {
 	/** Tool results this cleaning replaced with stubs. */
 	staleResults: number;
+	/** Tool calls of earlier edits and subagent tasks whose long arguments this cleaning shortened. */
+	staleArguments?: number;
 	/** This cleaning wrote a new summary; false when it kept the earlier one, or there is none. */
 	summary: boolean;
 	/** Messages this cleaning added to the summary; a trimmed answer counts none. */

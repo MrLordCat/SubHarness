@@ -1,3 +1,5 @@
+import { CHANGE_DIFF_DEFAULT_CHARS } from "../changes/change-tracker";
+import { resultBudget } from "./result-budget";
 import { CHAT_TOOL_GROUPS, type ChatChangesDiffRequest, type ChatTool } from "./types";
 
 export const CHANGES_DIFF_TOOL_NAME = "changes_diff";
@@ -60,11 +62,15 @@ export function createChangesDiffTool(): ChatTool {
 				scope: { type: "string", enum: ["turn", "pending"], description: "\"turn\" (default): this turn; \"pending\": everything waiting for Keep or Undo." },
 				paths: { type: "array", items: { type: "string" }, description: "Files or folders, relative to the workspace or absolute; omit for every changed file." },
 				contextLines: { type: "number", minimum: 0, maximum: 20, description: "Unchanged lines around each change (default 3)." },
-				maxChars: { type: "number", minimum: MIN_CHARS, maximum: MAX_CHARS, description: "Upper bound of the answer in characters (default 40000)." },
+				maxChars: { type: "number", minimum: MIN_CHARS, maximum: MAX_CHARS, description: "Upper bound of the answer in characters (default 40000, less when your model takes less in one tool result)." },
 			},
 		},
 		invoke: async (input, _token, context) => {
-			const request = parseChangesDiffInput(input);
+			const parsed = parseChangesDiffInput(input);
+			// The default page fits what the model's provider takes, so the diff names the files it left out
+			// instead of the provider dropping its middle.
+			const maxChars = Math.max(MIN_CHARS, resultBudget(parsed.maxChars ?? CHANGE_DIFF_DEFAULT_CHARS, context?.resultChars));
+			const request: ChatChangesDiffRequest = parsed.maxChars === undefined && maxChars === CHANGE_DIFF_DEFAULT_CHARS ? parsed : { ...parsed, maxChars };
 			if (!context?.changesDiff) {
 				throw new Error("This chat does not track file changes, so there is no diff to show. Review the changed files with read_file, or run git diff in a terminal.");
 			}

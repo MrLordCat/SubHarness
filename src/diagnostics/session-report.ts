@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import type { ChatCleaningEvent } from "../chat/context-cleaning";
+import type { ChatRequestBreakdownEvent } from "../chat/request-breakdown";
 import type { LlamaChatContextUsageMetrics, LlamaChatTurnMetrics } from "../llama-provider";
 
 export interface SessionTurnRecord {
@@ -90,6 +91,7 @@ export class SessionQualityTracker {
 	private readonly contexts = new Map<string, LlamaChatContextUsageMetrics>();
 	private readonly _records: SessionTurnRecord[] = [];
 	private readonly _cleanings: ChatCleaningEvent[] = [];
+	private readonly _breakdowns: ChatRequestBreakdownEvent[] = [];
 	private readonly _onDidChange = new vscode.EventEmitter<void>();
 	readonly onDidChange = this._onDidChange.event;
 
@@ -98,6 +100,17 @@ export class SessionQualityTracker {
 
 	/** Read-only view of finished cleanings (most recent last, at most 200). */
 	get cleanings(): readonly ChatCleaningEvent[] { return this._cleanings; }
+
+	/** What the first request of each chat turn spent its tokens on (most recent last, at most 200). */
+	get breakdowns(): readonly ChatRequestBreakdownEvent[] { return this._breakdowns; }
+
+	recordBreakdown(event: ChatRequestBreakdownEvent): void {
+		this._breakdowns.push({ ...event, tokens: { ...event.tokens } });
+		if (this._breakdowns.length > 200) {
+			this._breakdowns.shift();
+		}
+		this._onDidChange.fire();
+	}
 
 	recordContext(context: LlamaChatContextUsageMetrics): void {
 		this.contexts.set(context.requestId, { ...context });
@@ -188,6 +201,7 @@ export class SessionQualityTracker {
 		this.contexts.clear();
 		this._records.length = 0;
 		this._cleanings.length = 0;
+		this._breakdowns.length = 0;
 		this._onDidChange.fire();
 	}
 

@@ -1,8 +1,8 @@
 import * as assert from "node:assert";
 import * as vscode from "vscode";
-import { cleaningPaysOff, estimateRequestTokens, findStaleMemoryIndexes, findStaleToolResults, IMAGE_RESULT_CHARS, LARGE_RESULT_CHARS, planContextCleaning, resolveChatContextBudget, staleOnlyCompaction, STALE_RESULT_MIN_CHARS } from "../chat/context-cleaning";
+import { cleaningPaysOff, estimateRequestTokens, findStaleMemoryIndexes, findStaleToolArguments, findStaleToolResults, IMAGE_RESULT_CHARS, LARGE_RESULT_CHARS, planContextCleaning, resolveChatContextBudget, staleOnlyCompaction, STALE_RESULT_MIN_CHARS } from "../chat/context-cleaning";
 import { estimateChatMessageTokens, compactChatHistory } from "../chat/compaction";
-import { historyResetPending, staleToolResultText, stripMemoryIndex, toLanguageModelMessages, type ChatCompactionPart } from "../chat/lm-messages";
+import { historyResetPending, shortenToolArguments, staleArgumentText, staleToolResultText, STALE_ARGUMENT_MIN_CHARS, stripMemoryIndex, toLanguageModelMessages, type ChatCompactionPart } from "../chat/lm-messages";
 import type { ChatMessage, ChatPart } from "../chat/shared/protocol";
 import { isHistoryReset, isProviderSwitch } from "../providers/provider-switch";
 
@@ -15,6 +15,10 @@ function user(extra: Partial<ChatMessage> = {}): ChatMessage {
 }
 function use(id: string, name: string, input: object = {}, size = STALE_RESULT_MIN_CHARS): ChatMessage {
 	return msg("assistant", [{ kind: "toolCall", callId: id, name, input }, { kind: "toolResult", callId: id, text: "x".repeat(size) }]);
+}
+/** A tool call with a short result, as an edit or a subagent leaves it. */
+function call(id: string, name: string, input: object): ChatMessage {
+	return msg("assistant", [{ kind: "toolCall", callId: id, name, input }, { kind: "toolResult", callId: id, text: "Done." }]);
 }
 function part(first: ChatMessage, extra: Partial<ChatCompactionPart> = {}): ChatCompactionPart {
 	return { kind: "compaction", method: "none", summary: "", keepFromMessageId: first.id, summarizedMessages: 0, tokensBefore: 100, tokensAfter: 50, ...extra };
@@ -218,6 +222,67 @@ suite("context cleaning", () => {
 		assert.ok(texts[2].includes("Index of entries:"));
 		assert.deepStrictEqual(render(), texts, "the stored marks keep every render byte-identical");
 		assert.ok(first.memoryContext?.includes("Index of entries:"), "the history keeps the full block");
+	});
+	test("earlier edits and subagent tasks lose their long text, the rest of the call stays", () => {
+		const long = "line\n".repeat(STALE_ARGUMENT_MIN_CHARS);
+		const history = [
+			user(),
+			call("create", "create_file", { filePath: "a.ts", content: long }),
+			call("replace", "replace_string_in_file", { filePath: "b.ts", oldString: long, newString: "short" }),
+			call("multi", "multi_replace_string_in_file", { explanation: "rename", replacements: [{ filePath: "c.ts", oldString: "x", newString: long }, { filePath: "d.ts", oldString: "y", newString: "z" }] }),
+			call("task", "subagent", { description: "step", model: "m", prompt: long }),
+			call("small", "create_file", { filePath: "e.ts", content: "tiny" }),
+			call("read", "read_file", { filePath: long }),
+			user(),
+			call("current", "create_file", { filePath: "f.ts", content: long }),
+		];
+		assert.deepStrictEqual([...findStaleToolArguments(history)], ["create", "replace", "multi", "task"]);
+		const note = staleArgumentText(long);
+		assert.strictEqual(note, `[${(STALE_ARGUMENT_MIN_CHARS + 1).toLocaleString("en-US")} lines, ${long.length.toLocaleString("en-US")} characters; removed to keep the context small]`);
+		assert.deepStrictEqual(shortenToolArguments("replace_string_in_file", { filePath: "b.ts", oldString: long, newString: "short" }), { filePath: "b.ts", oldString: note, newString: "short" });
+		assert.deepStrictEqual(shortenToolArguments("multi_replace_string_in_file", { explanation: "rename", replacements: [{ filePath: "c.ts", oldString: "x", newString: long }, { filePath: "d.ts", oldString: "y", newString: "z" }] }),
+			{ explanation: "rename", replacements: [{ filePath: "c.ts", oldString: "x", newString: note }, { filePath: "d.ts", oldString: "y", newString: "z" }] });
+		assert.deepStrictEqual(shortenToolArguments("subagent", { description: "step", model: "m", prompt: long }), { description: "step", model: "m", prompt: note });
+		const unchanged = { filePath: "e.ts", content: "tiny" };
+		assert.strictEqual(shortenToolArguments("create_file", unchanged), unchanged, "nothing to shorten keeps the same object");
+		assert.deepStrictEqual(shortenToolArguments("create_file", { filePath: "g.ts", content: note }), { filePath: "g.ts", content: note }, "a note is never shortened again");
+	});
+	test("a cleaning shortens old edit arguments, keeps the marks and renders them the same every time", () => {
+		const long = "const value = 1;\n".repeat(200);
+		const first = user(), edit = call("edit", "create_file", { filePath: "a.ts", content: long });
+		const history = [first, edit, user()];
+		const plan = planContextCleaning(history, { budgetTokens: 10, fixedTokens: 0 });
+		assert.ok(plan);
+		assert.deepStrictEqual(plan.freshArguments, ["edit"]);
+		assert.deepStrictEqual(plan.staleArguments, ["edit"]);
+		assert.deepStrictEqual(plan.staleResults, []);
+		assert.ok(plan.tokensAfterStubs < plan.tokensBefore / 2, "the shortened content counts as saved");
+		const cleaned = staleOnlyCompaction(history, plan);
+		assert.ok(cleaned);
+		assert.deepStrictEqual(cleaned.staleArguments, ["edit"]);
+		assert.strictEqual(cleaned.cleaning?.staleArguments, 1);
+		const marked = [...history, msg("assistant", [cleaned])];
+		const render = (): unknown => toLanguageModelMessages(marked).flatMap(message => message.content)
+			.find((content): content is vscode.LanguageModelToolCallPart => content instanceof vscode.LanguageModelToolCallPart)?.input;
+		assert.deepStrictEqual(render(), { filePath: "a.ts", content: staleArgumentText(long) });
+		assert.deepStrictEqual(render(), render());
+		const stored = edit.parts[0];
+		assert.ok(stored.kind === "toolCall" && (stored.input as { content: string }).content === long, "the history keeps the full call");
+		const again = planContextCleaning([...marked, user()], { budgetTokens: 10, fixedTokens: 0 });
+		assert.ok(again);
+		assert.deepStrictEqual(again.freshArguments, [], "a later cleaning does not count the same call again");
+		assert.deepStrictEqual(again.staleArguments, ["edit"]);
+	});
+	test("a summary keeps the argument marks of the messages it keeps", async () => {
+		const long = "x".repeat(STALE_ARGUMENT_MIN_CHARS);
+		const history = [user(), call("dropped", "create_file", { filePath: "a", content: long }), user(), call("kept", "create_file", { filePath: "b", content: long })];
+		const result = await compactChatHistory(history, {
+			limits: { triggerTokens: 1, targetTokens: 1 }, token: new vscode.CancellationTokenSource().token,
+			plan: { keepFrom: 2, dropped: history.slice(0, 2), summarizedMessages: 2, tokensBefore: 100, keptTokens: 10 },
+			staleArguments: ["dropped", "kept", "missing"], summarize: async () => ({ summary: "s", method: "extractive" }),
+		});
+		assert.deepStrictEqual(result?.staleArguments, ["kept"]);
+		assert.strictEqual(result?.staleResults, undefined, "argument marks are not result marks");
 	});
 	test("planning marks superseded memory indexes and counts their saving", () => {
 		const first = user({ memoryContext: memoryBlock("a", "Entry A text.") });

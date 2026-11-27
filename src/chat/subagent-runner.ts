@@ -1,8 +1,9 @@
 import * as vscode from "vscode";
 import { runAgentTurn, type AgentTurnSink, type ChatToolExecutor } from "./agent-loop";
 import { appendChatText, type ChatMessage, type ChatSubagentRun, type ChatSubagentStep } from "./shared/protocol";
-import { estimateChatMessageTokens } from "./compaction";
-import { shortenToolResults } from "./lm-messages";
+import { estimateChatMessageTokens, estimateTextTokens } from "./compaction";
+import { cleaningPaysOff, estimateRequestTokens, planContextCleaning, staleOnlyCompaction } from "./context-cleaning";
+import { shortenToolResults, type ChatCompactionPart } from "./lm-messages";
 import type { ChatMemoryContext } from "./memory-context";
 import type { SubagentRequest } from "./tools/types";
 
@@ -42,6 +43,11 @@ export interface SubagentRunOptions {
 	hostContext?: string;
 	/** Memory for this task. It goes into the task message once, so every tool round sends the same prompt prefix. */
 	memory?: ChatMemoryContext;
+	/**
+	 * The chat context budget in provider tokens (llamacpp.chatContextBudget). An open subagent whose earlier tasks
+	 * take more cleans them like the chat does; 0 or absent turns that off.
+	 */
+	cleaningBudget?: number;
 	/** Live state, at most every UPDATE_INTERVAL_MS. */
 	onUpdate(run: ChatSubagentRun): void;
 	/** Final state, also after a failure or Stop. */
@@ -81,13 +87,41 @@ export interface SubagentRunResult {
 	history: ChatMessage[];
 }
 
-/** Shortens old tool results and rejects a nearly full context. */
-export function fitSubagentHistory(history: ChatMessage[], maxInputTokens: number): ChatMessage[] {
+/**
+ * Cleans an open subagent's earlier tasks before the next one, as the chat cleans its history: once the history with
+ * the new task is over the budget (the chat's, or half the model's context when that is smaller), results, edit
+ * arguments and memory indexes of earlier tasks that went stale become stubs. The part goes first into the task's
+ * answer; the provider then starts its session again from the cleaned history, once. Undefined when nothing pays off.
+ */
+export function cleanSubagentHistory(history: readonly ChatMessage[], budgetTokens: number, maxInputTokens: number, fixedTokens = 0): ChatCompactionPart | undefined {
+	const budget = Math.min(budgetTokens, maxInputTokens > 0 ? Math.floor(maxInputTokens / 2) : Number.POSITIVE_INFINITY);
+	if (!(budget > 0) || history.length < 2) {
+		return undefined;
+	}
+	const plan = planContextCleaning(history, { budgetTokens: budget, fixedTokens });
+	if (!plan || (plan.newStale === 0 && plan.newStaleMemoryIndex === 0 && plan.freshArguments.length === 0)) {
+		return undefined;
+	}
+	const part = staleOnlyCompaction(history, plan);
+	return part && cleaningPaysOff(part, budget) ? part : undefined;
+}
+
+/** What the model receives of the history: with a cleaning part, its stubs count instead of the full results. */
+function historyTokens(history: readonly ChatMessage[], cleaning: ChatCompactionPart | undefined): number {
+	if (!cleaning) {
+		return history.reduce((sum, message) => sum + estimateChatMessageTokens(message), 0);
+	}
+	const marker: ChatMessage = { id: "subagent-cleaning", role: "assistant", turn: 0, createdAt: 0, parts: [cleaning] };
+	return estimateRequestTokens([...history, marker], 0);
+}
+
+/** Shortens old tool results and rejects a nearly full context; a cleaning part's stubs count as the model gets them. */
+export function fitSubagentHistory(history: ChatMessage[], maxInputTokens: number, cleaning?: ChatCompactionPart): ChatMessage[] {
 	let result = history;
-	let total = result.reduce((sum, message) => sum + estimateChatMessageTokens(message), 0);
+	let total = historyTokens(result, cleaning);
 	if (total > maxInputTokens / 2) {
 		result = history.map((message, index) => index < history.length - 3 ? { ...message, parts: shortenToolResults(message.parts) } : message);
-		total = result.reduce((sum, message) => sum + estimateChatMessageTokens(message), 0);
+		total = historyTokens(result, cleaning);
 	}
 	if (total > maxInputTokens * 0.8) {
 		throw new Error(`This subagent's context is nearly full (${total} of ${maxInputTokens} tokens). Close it with close_subagent and start a new subagent with a short summary of its work.`);
@@ -186,8 +220,22 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<Suba
 			answer.usage = usage;
 		},
 	};
+	const system = [options.system, SUBAGENT_INSTRUCTIONS].filter(Boolean).join("\n\n");
 	try {
-		const inputHistory = options.history?.length ? fitSubagentHistory([...(options.history ?? []), task], model.maxInputTokens) : [task];
+		const withTask = [...(options.history ?? []), task];
+		const cleaning = options.history?.length
+			? cleanSubagentHistory(withTask, options.cleaningBudget ?? 0, model.maxInputTokens, estimateTextTokens(system))
+			: undefined;
+		if (cleaning) {
+			answer.parts.push(cleaning);
+			const cleaned = cleaning.cleaning;
+			const what = [
+				...(cleaned?.staleResults ? [`${cleaned.staleResults} stale tool ${cleaned.staleResults === 1 ? "result" : "results"} replaced with a stub`] : []),
+				...(cleaned?.staleArguments ? [`arguments of ${cleaned.staleArguments} earlier ${cleaned.staleArguments === 1 ? "edit" : "edits"} shortened`] : []),
+			].join(", ") || "older memory indexes removed";
+			addStep({ kind: "notice", level: "info", text: `Earlier tasks cleaned: ${what}; about ${cleaning.tokensBefore.toLocaleString("en-US")} → ${cleaning.tokensAfter.toLocaleString("en-US")} tokens.` });
+		}
+		const inputHistory = options.history?.length ? fitSubagentHistory(withTask, model.maxInputTokens, cleaning) : [task];
 		history = [...inputHistory, answer];
 		const result = await runAgentTurn({
 			backend: options.backend,
@@ -198,7 +246,8 @@ export async function runChatSubagent(options: SubagentRunOptions): Promise<Suba
 			tools: options.tools,
 			sink,
 			token,
-			system: [options.system, SUBAGENT_INSTRUCTIONS].filter(Boolean).join("\n\n"),
+			system,
+			...(cleaning ? { initialParts: [cleaning] } : {}),
 			// A delegated task nobody watches step by step keeps a bound; the chat turn itself has none.
 			maxRounds: SUBAGENT_MAX_ROUNDS,
 			// The composite then keeps the run off the parent's conversation, journal and native session.

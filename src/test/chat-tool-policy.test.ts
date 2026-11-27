@@ -263,7 +263,9 @@ suite("chat tool policy", () => {
 		const run = tools.get("run_in_terminal"), read = tools.get("read_terminal");
 		assert.ok(run); assert.ok(read);
 		assert.strictEqual(await run.invoke({ command: "noisy", maxChars: 500 }, token()),
-			"Terminal: Chat 2 (terminalId: term-2)\nState: running\nOutput (the last 500 characters; earlier output was cut, so redirect long output to a file and read it with read_file):\ntail");
+			"Terminal: Chat 2 (terminalId: term-2)\nState: running\n"
+			+ "The command is still running; do not start it again. Wait for it with read_terminal { \"terminalId\": \"term-2\", \"waitMs\": 60000 }, or stop it with send_to_terminal { \"interrupt\": true }.\n"
+			+ "Output (the last 500 characters; earlier output was cut, so redirect long output to a file and read it with read_file):\ntail");
 		assert.deepStrictEqual(calls[0], ["run", 500]);
 		assert.match(await text(read.invoke({ terminalId: "term-2", maxChars: 500 }, token())), /the last 500 characters/);
 		assert.deepStrictEqual(calls[1], ["read", "term-2", undefined, 500]);

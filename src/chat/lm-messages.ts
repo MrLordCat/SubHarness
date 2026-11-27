@@ -120,6 +120,83 @@ export function stubStaleToolResults(parts: ChatPart[], stale: ReadonlySet<strin
 	return changed ? stubbed : parts;
 }
 
+/** An argument string shorter than this stays: its note costs about as much. */
+export const STALE_ARGUMENT_MIN_CHARS = 300;
+
+/**
+ * The arguments whose text a cleaning may shorten, per tool: what an earlier request's edit wrote and what a finished
+ * subagent was told. The file, the model and the other options stay, so the call still reads like a normal one.
+ */
+const STALE_ARGUMENT_FIELDS: Readonly<Record<string, readonly string[]>> = {
+	create_file: ["content"],
+	replace_string_in_file: ["oldString", "newString"],
+	multi_replace_string_in_file: ["oldString", "newString"],
+	subagent: ["prompt"],
+};
+
+/** What the model receives instead of a long argument; built from the text alone, so later requests repeat it exactly. */
+export function staleArgumentText(text: string): string {
+	const lines = text.split(/\r\n|\r|\n/).length;
+	return `[${lines.toLocaleString("en-US")} ${lines === 1 ? "line" : "lines"}, ${text.length.toLocaleString("en-US")} characters; removed to keep the context small]`;
+}
+
+function shortenFields(value: unknown, fields: readonly string[]): unknown {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return value;
+	}
+	const input = value as Record<string, unknown>;
+	let changed = false;
+	const shortened: Record<string, unknown> = { ...input };
+	for (const field of fields) {
+		const text = input[field];
+		if (typeof text === "string" && text.length >= STALE_ARGUMENT_MIN_CHARS) {
+			shortened[field] = staleArgumentText(text);
+			changed = true;
+		}
+	}
+	return changed ? shortened : value;
+}
+
+/**
+ * A tool call's input with its long text arguments replaced by a size note; the same object when the tool has none
+ * or none is long. multi_replace_string_in_file shortens each replacement.
+ */
+export function shortenToolArguments(name: string, input: unknown): unknown {
+	const fields = STALE_ARGUMENT_FIELDS[name];
+	if (!fields) {
+		return input;
+	}
+	if (name !== "multi_replace_string_in_file") {
+		return shortenFields(input, fields);
+	}
+	if (typeof input !== "object" || input === null || !Array.isArray((input as { replacements?: unknown }).replacements)) {
+		return input;
+	}
+	const replacements = (input as { replacements: unknown[] }).replacements;
+	const shortened = replacements.map(item => shortenFields(item, fields));
+	return shortened.some((item, index) => item !== replacements[index]) ? { ...input, replacements: shortened } : input;
+}
+
+/** Tool calls whose long arguments the model no longer needs, as it receives them; the same array when none changes. */
+export function stubStaleToolArguments(parts: ChatPart[], stale: ReadonlySet<string>): ChatPart[] {
+	if (stale.size === 0) {
+		return parts;
+	}
+	let changed = false;
+	const stubbed = parts.map(part => {
+		if (part.kind !== "toolCall" || !stale.has(part.callId)) {
+			return part;
+		}
+		const input = shortenToolArguments(part.name, part.input);
+		if (input === part.input) {
+			return part;
+		}
+		changed = true;
+		return { ...part, input };
+	});
+	return changed ? stubbed : parts;
+}
+
 const MEMORY_OPEN = "<memory>";
 const MEMORY_CLOSE = "</memory>";
 const MEMORY_INDEX_HEADER = "Index of entries:";
@@ -214,7 +291,10 @@ export interface CompactionWindow {
 	partOffsets: number[];
 }
 
-/** The active compaction and the kept messages, with stale results stubbed, superseded memory indexes dropped, the trimmed turn cut and older tool outputs shortened. */
+/**
+ * The active compaction and the kept messages, with stale results stubbed, long arguments of earlier edits and subagent
+ * tasks shortened, superseded memory indexes dropped, the trimmed turn cut and older tool outputs shortened.
+ */
 export function compactionWindow(messages: readonly ChatMessage[]): CompactionWindow {
 	const compaction = activeCompaction(messages);
 	if (!compaction) {
@@ -224,10 +304,11 @@ export function compactionWindow(messages: readonly ChatMessage[]): CompactionWi
 	const { trimmedTurn, abbreviatedUntil } = compaction.part;
 	const stale = new Set(compaction.part.staleResults ?? []);
 	const staleMemory = new Set(compaction.part.staleMemoryIndex ?? []);
+	const staleArguments = new Set(compaction.part.staleArguments ?? []);
 	const until = abbreviatedUntil ? kept.findIndex(message => message.id === abbreviatedUntil) : -1;
 	const partOffsets = kept.map(() => 0);
 	const view = kept.map((message, index) => {
-		let parts = stubStaleToolResults(message.parts, stale);
+		let parts = stubStaleToolArguments(stubStaleToolResults(message.parts, stale), staleArguments);
 		if (trimmedTurn && message.id === trimmedTurn.messageId && message.role === "assistant") {
 			parts = parts.slice(trimmedTurn.fromPart);
 			partOffsets[index] = trimmedTurn.fromPart;

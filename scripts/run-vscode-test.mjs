@@ -7,10 +7,10 @@
 //
 //   node scripts/run-vscode-test.mjs [vscode-test args...]   e.g. --grep "quick access"
 //   node scripts/run-vscode-test.mjs --restore-only          repairs the handler, runs nothing
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const KEY = "HKCU\\Software\\Classes\\vscode\\shell\\open\\command";
 
@@ -66,14 +66,14 @@ if (args[0] === "--restore-only") {
 	process.exit(0);
 }
 
-const before = windows ? readHandler() : undefined;
+if (windows) {
+	const before = readHandler();
+	// vscode-test ends the process itself; the exit handler runs synchronously after it.
+	process.on("exit", () => restoreHandler(before));
+}
+// The VS Code Electron binary can stand in for Node; without the flag the test instances it
+// starts open as VS Code instead of Node. The runner reads its arguments from process.argv.
+delete process.env.ELECTRON_RUN_AS_NODE;
 // The package exports no package.json, so its bin is taken from node_modules beside this script.
 const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "node_modules", "@vscode", "test-cli", "out", "bin.mjs");
-const result = spawnSync(process.execPath, [cli, ...args], { stdio: "inherit" });
-if (windows) {
-	restoreHandler(before);
-}
-if (result.error) {
-	console.error(result.error);
-}
-process.exit(result.status ?? 1);
+await import(pathToFileURL(cli).href);

@@ -150,6 +150,16 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 		if (failed) { throw providerError; }
 	}
 
+	/** Characters of one tool result the model's provider forwards uncut; undefined when it does not cut. */
+	toolResultCharLimit(modelId: string): number | undefined {
+		try {
+			const provider = this.registry.resolve(modelId).provider as { toolResultCharLimit?(modelId: string): number | undefined };
+			return provider.toolResultCharLimit?.(modelId);
+		} catch {
+			return undefined;
+		}
+	}
+
 	/** Releases resources when a chat is left. */
 	abandonConversation(conversationId: string): Promise<void> {
 		return this.registry.abandonConversation(conversationId);

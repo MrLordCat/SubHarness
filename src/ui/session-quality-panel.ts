@@ -244,6 +244,7 @@ export class SessionQualityPanel {
 				overflowRetries: summary.overflowRetries,
 			},
 			cleanings: this._tracker.cleanings.slice(-20),
+			breakdowns: this._tracker.breakdowns.slice(-50),
 			records: rawRecords?.map((record, index) => ({
 				index: index + 1,
 				...record.turn,
@@ -726,7 +727,7 @@ function renderCacheTab(d) {
 	if (cleanings.length) {
 		h += '<section class="section"><div class="section-heading"><h2>Chat cleanings</h2><span class="section-note">Newest first · ' + FMT(s.chatCleanings ?? cleanings.length) + ' recorded · ' + FMT_SHORT(s.chatCleaningSavedTokens ?? 0) + ' tokens saved</span></div>';
 		h += '<div class="table-shell"><table class="turn-table"><thead><tr>';
-		h += '<th>At</th><th>Chat</th><th>Model</th><th>Before → after</th><th>Stale results</th><th>Summarized</th><th>Duration</th>';
+		h += '<th>At</th><th>Chat</th><th>Model</th><th>Before → after</th><th>Stubbed</th><th>Summarized</th><th>Duration</th>';
 		h += '</tr></thead><tbody>';
 		for (const c of [...cleanings].reverse()) {
 			h += '<tr>';
@@ -734,12 +735,39 @@ function renderCacheTab(d) {
 			h += '<td class="compact-number" title="' + escAttr(String(c.conversationId || 'unknown')) + '">' + (c.conversationId ? esc(String(c.conversationId).slice(0, 8)) : '—') + '</td>';
 			h += '<td class="model-cell" title="' + escAttr(String(c.modelId || '')) + '">' + esc(MODEL_LABEL(c.modelId)) + '</td>';
 			h += '<td class="compact-number" title="' + FMT(c.tokensBefore) + ' → ' + FMT(c.tokensAfter) + ' tokens of a ' + FMT(c.budgetTokens) + ' token budget">' + FMT_SHORT(c.tokensBefore) + ' → ' + FMT_SHORT(c.tokensAfter) + '</td>';
-			h += '<td>' + FMT(c.staleResults) + '</td>';
+			h += '<td title="Tool results replaced with a stub; arguments of earlier edits and subagent tasks shortened">' + FMT(c.staleResults) + (c.staleArguments ? ' · ' + FMT(c.staleArguments) + ' args' : '') + '</td>';
 			h += '<td>' + (c.summary ? FMT(c.summarizedMessages) : 'kept') + '</td>';
 			h += '<td>' + DURATION(c.durationMs) + '</td>';
 			h += '</tr>';
 		}
 		h += '</tbody></table></div></section>';
+	}
+
+	// What chat requests spend their tokens on: the newest turn's first request and the average of the recorded turns.
+	const breakdowns = Array.isArray(d.breakdowns) ? d.breakdowns : [];
+	if (breakdowns.length) {
+		const latest = breakdowns[breakdowns.length - 1];
+		const parts = [
+			['system', 'System prompt'], ['tools', 'Tool schemas'], ['summary', 'Summary'], ['memory', 'Memory'],
+			['requests', 'User requests'], ['answers', 'Model answers'], ['toolArguments', 'Tool arguments'],
+			['toolResults', 'Tool results'], ['images', 'Images'],
+		];
+		const valueOf = (b, key) => (b && b.tokens && typeof b.tokens[key] === 'number') ? b.tokens[key] : 0;
+		const mean = (key) => breakdowns.reduce((sum, b) => sum + valueOf(b, key), 0) / breakdowns.length;
+		const meanTotal = breakdowns.reduce((sum, b) => sum + (typeof b.total === 'number' ? b.total : 0), 0) / breakdowns.length;
+		const share = (value, total) => total > 0 ? PCT(value / total * 100) : '—';
+		h += '<section class="section"><div class="section-heading"><h2>Request breakdown</h2><span class="section-note">Latest: ' + esc(MODEL_LABEL(latest.modelId)) + ' at ' + CLOCK(latest.at)
+			+ ' · ' + FMT(latest.stubbedResults || 0) + ' stubbed results · ' + FMT(latest.shortenedArguments || 0) + ' shortened arguments · average of ' + FMT(breakdowns.length) + ' turns</span></div>';
+		h += '<div class="table-shell"><table class="turn-table"><thead><tr><th>Part</th><th>Latest</th><th>Share</th><th>Average</th><th>Share</th></tr></thead><tbody>';
+		for (const [key, label] of parts) {
+			const value = valueOf(latest, key);
+			const average = mean(key);
+			h += '<tr><td>' + label + '</td><td class="compact-number" title="' + FMT(value) + ' tokens">' + FMT_SHORT(value) + '</td><td>' + share(value, latest.total)
+				+ '</td><td class="compact-number" title="' + FMT(Math.round(average)) + ' tokens">' + FMT_SHORT(Math.round(average)) + '</td><td>' + share(average, meanTotal) + '</td></tr>';
+		}
+		h += '<tr><td><strong>Total</strong></td><td class="compact-number"><strong>' + FMT_SHORT(latest.total || 0) + '</strong></td><td></td><td class="compact-number"><strong>'
+			+ FMT_SHORT(Math.round(meanTotal)) + '</strong></td><td></td></tr>';
+		h += '</tbody></table></div><div class="section-note">The chat estimate of the first request of each turn, after cleaning, in provider tokens (×' + esc(String(latest.scale)) + ' from the last reported prompt).</div></section>';
 	}
 
 	// Provider health stays visible even when there are no Claude user turns.

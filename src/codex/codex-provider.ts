@@ -54,6 +54,7 @@ import {
 	MAX_PROMPT_IMAGE_BYTES,
 	MAX_PROMPT_IMAGES,
 	resolveLocalImagePath,
+	clampCodexToolResultChars,
 	serializeCodexConversation,
 	type CodexCompactionResult,
 	type CodexConversationAnchor,
@@ -915,6 +916,11 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		}
 		const config = this.getConfig();
 		return ids.map(modelId => ({ modelId, ...this.resolveModelContextWindowInfo(modelId, config) }));
+	}
+
+	/** Characters of one tool result Codex gets uncut (llamacpp.codexMaxToolResultChars). */
+	toolResultCharLimit(): number {
+		return clampCodexToolResultChars(this.getConfig().get<number>("codexMaxToolResultChars", 12_000));
 	}
 
 	async refreshStatus(): Promise<CodexProviderStatus> {

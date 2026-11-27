@@ -2113,6 +2113,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         return this.clampInt(this.getConfig().get("requestQueueTimeoutMs", 1200000), 0, 1200000, 1200000);
     }
 
+    /** Characters of one tool result this provider forwards uncut; undefined when it does not cut (0). */
+    toolResultCharLimit(): number | undefined {
+        const max = this.getMaxToolResultChars();
+        return max > 0 ? max : undefined;
+    }
+
     private getMaxToolResultChars(): number {
         return this.clampInt(this.getConfig().get("maxToolResultChars", 24000), 0, 1000000, 24000);
     }

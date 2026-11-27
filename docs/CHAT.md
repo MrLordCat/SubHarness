@@ -141,7 +141,23 @@ when it is closed. A command that stops at a prompt such as `(y/n)`,
 to their last state, and runs of repeated lines to one line with a count. A
 terminal ID is unknown once its terminal was closed or the window was
 reloaded; the error says why when it knows and lists the chat's live
-terminals.
+terminals. A result in the state `running` says how to wait for it with
+`read_terminal` and `waitMs`, or stop it, instead of starting it again.
+
+Providers cut a long tool result in the middle: Claude at 16,000 characters,
+Codex at `llamacpp.codexMaxToolResultChars` (12,000) and HTTP models at
+`llamacpp.maxToolResultChars` (24,000). `subagent` and `wait_subagents` reports
+get up to 60,000. The tools that page their output stay under the model's
+limit instead: `read_file` stops early and ends with the `startLine` to
+continue from (a line longer than the page is shown cut), the terminal tools
+return less of the newest output, and `changes_diff` names the files it left
+out.
+
+Every built-in tool lists the arguments it takes (`additionalProperties:
+false`). A call with an argument the tool does not take still runs without it,
+and its result ends with a note that names the ignored argument and the ones
+the tool takes. Claude's tool check drops such an argument before the tool
+runs, so the bridge restores it for the note.
 
 A turn has no limit on tool rounds: it runs until the model answers without a
 tool call or you press **Stop**. A subagent stops after 1000 tool rounds.
@@ -405,7 +421,13 @@ replays:
 
    Results shorter than 1,200 characters stay. So do subagent reports, answers
    to questions, the todo list, memory, and everything of the current request.
-2. When that is not enough, older turns are summarized as on a model switch.
+2. Edits and subagent tasks of earlier requests lose their long text: the
+   `content` of `create_file`, `oldString` and `newString` of the replace
+   tools and the `prompt` of `subagent`, from 300 characters, become a note with
+   their line and character count. The file, the model and the other
+   arguments stay, so the call still reads like a normal one.
+3. Older memory index lists go once a later message carries a newer one.
+4. When that is not enough, older turns are summarized as on a model switch.
 
 Sizes are counted as the provider counts them: the chat's estimate times the
 ratio of the last reported prompt to its estimate. So a session that Claude or
@@ -421,10 +443,21 @@ answers after the cleaning, a retry starts again from the cleaned history too.
 The provider's own compaction near the edge of its window stays a safety net
 for one very long request.
 
+An open subagent (`keepOpen`) is cleaned the same way before its next task,
+when its history is over the chat budget or half its model's context: its
+earlier tasks are its earlier requests. Its panel then shows **Earlier tasks
+cleaned**, and the provider starts its session again from the cleaned history.
+Within one task nothing is stale yet; a very long task relies on the
+provider's own compaction.
+
 The card **Context cleaned** shows how many results were stubbed, how many
-messages were summarized, the size before and after, and the budget. The full
-messages stay in the chat and its log. Session Quality counts the cleanings and
-the tokens they saved.
+arguments were shortened, how many messages were summarized, the size before
+and after, and the budget. The full messages stay in the chat and its log.
+Session Quality counts the cleanings and the tokens they saved, and its
+**Request breakdown** shows what the first request of each turn spends its
+tokens on: system prompt, tool schemas, summary, memory, user requests, model
+answers, tool arguments, tool results and images, for the latest turn and on
+average. The log has the same numbers as `chat.request.breakdown`.
 
 The chat window renders only the visible messages. Long tool output and long
 thinking text reach the window as short previews and load in full when you

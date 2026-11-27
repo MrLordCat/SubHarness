@@ -174,13 +174,14 @@ suite("tool call reliability", () => {
 		assert.ok(tail.ok && !tail.repaired && tail.arguments.mode === "async");
 	});
 
-	test("drops arguments the schema does not list when the call is valid without them", () => {
+	test("passes arguments the schema does not list to the chat when the call is valid without them", () => {
 		const guard = new ToolCallReliabilityGuard();
 		guard.configure([terminalTool, tool], { repairEnabled: true, validateSchema: true });
 		const extra = guard.evaluate("run_in_terminal", '{"command":"git status","mode":"sync","maxResults":20}', true);
 		assert.ok(extra.ok);
-		assert.deepStrictEqual(extra.ok && extra.arguments, { command: "git status", mode: "sync" });
-		assert.strictEqual(extra.ok && extra.repaired, true);
+		// The chat's executor leaves maxResults out and names it in the result.
+		assert.deepStrictEqual(extra.ok && extra.arguments, { command: "git status", mode: "sync", maxResults: 20 });
+		assert.strictEqual(extra.ok && extra.repaired, false);
 
 		const misnamed = guard.evaluate("read_file", '{"file":"README.md"}', true);
 		assert.ok(!misnamed.ok && !misnamed.pending && misnamed.kind === "schema", "a wrong name for a required field is still rejected");

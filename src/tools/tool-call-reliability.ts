@@ -467,7 +467,8 @@ function repairMissingRequiredDescription(
 
 /**
  * Top-level arguments a schema that forbids extra properties does not list. Models often pass an option of another
- * tool (maxResults on run_in_terminal); evaluate drops them when the call is valid without them.
+ * tool (maxResults on run_in_terminal); evaluate accepts the call when it is valid without them, and the
+ * chat's tool executor leaves them out with a note in the result (src/chat/tools/unknown-arguments.ts).
  */
 function unknownTopLevelProperties(argumentsValue: Record<string, unknown>, schema: object | undefined): string[] {
 	const schemaObj = schema as Record<string, unknown> | undefined;
@@ -551,10 +552,8 @@ export class ToolCallReliabilityGuard {
 			if (unknown.length > 0) {
 				const trimmed = Object.fromEntries(Object.entries(parsed.value).filter(([name]) => !unknown.includes(name)));
 				if (validateToolArguments(trimmed, definition.function.parameters, name).length === 0) {
-					for (const name of unknown) {
-						delete parsed.value[name];
-					}
-					repaired = true;
+					// The call goes through with them: the chat leaves them out when it runs the
+					// tool and tells the model which ones it ignored.
 					issues = [];
 				}
 			}

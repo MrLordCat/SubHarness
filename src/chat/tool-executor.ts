@@ -1,6 +1,7 @@
 import type * as vscode from "vscode";
 import type { ChatToolGroup, ChatToolImage } from "./shared/protocol";
 import { TOOL_INPUT_NOT_OBJECT, type ChatTool, type ChatToolConfirmation, type ChatToolInvokeContext } from "./tools/types";
+import { describeSchemaFields, ignoredArgumentsNote, splitUnknownArguments, strictToolSchema } from "./tools/unknown-arguments";
 
 export interface ChatToolCallContext extends ChatToolInvokeContext {
 	/** Resolves true when the user allows the call; a cancelled turn resolves false. */
@@ -47,23 +48,12 @@ function missingToolText(name: string, context?: ChatToolCallContext): string {
 	return `Tool "${name}" is not enabled. ${guidance}`;
 }
 
-/** The top-level arguments of a schema, with required ones marked. */
-function expectedFields(schema: object): string[] {
-	const properties = (schema as { properties?: unknown }).properties;
-	if (typeof properties !== "object" || properties === null || Array.isArray(properties)) {
-		return [];
-	}
-	const required = (schema as { required?: unknown }).required;
-	const names = Array.isArray(required) ? required.filter((name): name is string => typeof name === "string") : [];
-	return Object.keys(properties).map(name => names.includes(name) ? `${name} (required)` : name);
-}
-
 /** Names the tool and its fields when the call's arguments are not an object, a message only they can explain. */
 function describeInvokeError(error: unknown, tool: ChatTool): unknown {
 	if (!(error instanceof Error) || error.message !== TOOL_INPUT_NOT_OBJECT) {
 		return error;
 	}
-	const fields = expectedFields(tool.inputSchema);
+	const fields = describeSchemaFields(tool.inputSchema);
 	return new Error(`Tool input for ${tool.name} must be a JSON object${fields.length > 0 ? ` with these fields: ${fields.join(", ")}` : ""}.`);
 }
 
@@ -71,13 +61,15 @@ function describeInvokeError(error: unknown, tool: ChatTool): unknown {
 export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSource {
 	return {
 		get tools(): readonly vscode.LanguageModelChatTool[] {
-			return catalog.enabledTools().map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }));
+			return catalog.enabledTools().map(tool => ({ name: tool.name, description: tool.description, inputSchema: strictToolSchema(tool.inputSchema) }));
 		},
-		async invoke(name, input, token, context) {
+		async invoke(name, rawInput, token, context) {
 			const tool = catalog.enabledTools().find(candidate => candidate.name === name);
 			if (!tool) {
 				return { text: missingToolText(name, context), isError: true };
 			}
+			// An argument the tool does not take is left out, and the result says so.
+			const { input, ignored } = splitUnknownArguments(tool.inputSchema, rawInput);
 			const confirmation = confirmationFor(tool, input);
 			if (confirmation && !(context && await context.approve(confirmation))) {
 				return { text: DENIED_TOOL_RESULT, isError: true };
@@ -85,6 +77,7 @@ export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSour
 			const output = await tool.invoke(input, token, {
 				terminalOwner: context?.terminalOwner,
 				callId: context?.callId,
+				resultChars: context?.resultChars,
 				runSubagent: context?.runSubagent,
 				closeSubagent: context?.closeSubagent,
 				waitSubagents: context?.waitSubagents,
@@ -93,10 +86,15 @@ export function createChatToolSource(catalog: ChatToolCatalogLike): ChatToolSour
 				requestTools: context?.requestTools,
 				changesDiff: context?.changesDiff,
 			}).catch(error => {
-				throw describeInvokeError(error, tool);
+				const described = describeInvokeError(error, tool);
+				if (ignored.length > 0 && described instanceof Error) {
+					described.message = `${described.message}\n\n${ignoredArgumentsNote(tool.name, ignored, tool.inputSchema)}`;
+				}
+				throw described;
 			});
 			const result = typeof output === "string" ? { text: output } : output;
-			return { text: result.text, isError: false, ...(result.images && result.images.length > 0 ? { images: result.images } : {}) };
+			const text = ignored.length > 0 ? `${result.text}\n\n${ignoredArgumentsNote(tool.name, ignored, tool.inputSchema)}` : result.text;
+			return { text, isError: false, ...(result.images && result.images.length > 0 ? { images: result.images } : {}) };
 		},
 		groups: () => catalog.groups(),
 		setEnabled: (names, enabled) => catalog.setEnabled(names, enabled),

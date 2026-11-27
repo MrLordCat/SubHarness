@@ -7,7 +7,8 @@ import { renderAttachments, type AttachmentContent } from "./attachments";
 import { interruptedAnswerDigest } from "./retry-digest";
 import type { ChatWebviewBridge } from "./chat-view";
 import { compactChatHistory, estimateTextTokens, pickLocalSummaryModel, planChatCompaction, previousModelId, withSummaryTimeout, type ChatCompactionLimits, type ChatSummarizer, type ChatSummaryWriter } from "./compaction";
-import { cleaningPaysOff, CONTEXT_CLEANING_REPLAY_RATIO, planContextCleaning, staleOnlyCompaction, type ChatCleaningEvent } from "./context-cleaning";
+import { cleaningPaysOff, CONTEXT_CLEANING_REPLAY_RATIO, planContextCleaning, providerTokenScale, staleOnlyCompaction, type ChatCleaningEvent } from "./context-cleaning";
+import { chatRequestBreakdown, type ChatRequestBreakdownEvent } from "./request-breakdown";
 import { activeCompaction, systemMessage, type ChatCompactionPart } from "./lm-messages";
 import { MEMORY_INDEX_ID, type ChatMemoryContext, type ChatMemorySource } from "./memory-context";
 import type { ChatMemoryStore } from "./memory-store";
@@ -70,7 +71,10 @@ import type { ChatToolSource } from "./tool-executor";
 import type { ChatChangesDiffRequest, ChatToolConfirmation, ChatToolRequestResult, SubagentModelOption, SubagentRequest, UnavailableSubagentModel } from "./tools/types";
 
 export interface ChatControllerDeps {
-	backend: Pick<vscode.LanguageModelChatProvider, "provideLanguageModelChatResponse" | "provideLanguageModelChatInformation">;
+	backend: Pick<vscode.LanguageModelChatProvider, "provideLanguageModelChatResponse" | "provideLanguageModelChatInformation"> & {
+		/** Characters of one tool result the model's provider forwards uncut; undefined when it does not cut. */
+		toolResultCharLimit?(modelId: string): number | undefined;
+	};
 	onDidChangeModels: vscode.Event<void>;
 	store: ChatSessionStore;
 	/** Requests a chat keeps; older ones are deleted when it is loaded (default CHAT_MAX_REQUESTS). */
@@ -170,6 +174,8 @@ export interface ChatCompactionDeps {
 	cleaningBudget?(): number;
 	/** Told about every finished cleaning. */
 	onCleaned?(event: ChatCleaningEvent): void;
+	/** Told what the first request of every turn spends its tokens on, after the cleaning. */
+	onRequestBreakdown?(event: ChatRequestBreakdownEvent): void;
 }
 
 const ACTIVE_SESSION_KEY = "llamacpp.chat.activeSession";
@@ -1782,7 +1788,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				}
 			}).catch(() => undefined);
 		};
-		const invoke = async (name: string, input: unknown, token: vscode.CancellationToken, callId: string | undefined, nested: boolean, terminalOwner: { id: string; label: string }) => {
+		const invoke = async (name: string, input: unknown, token: vscode.CancellationToken, callId: string | undefined, nested: boolean, terminalOwner: { id: string; label: string }, resultChars: number | undefined) => {
 			const readOnly = source.isReadOnly?.(name) ?? false;
 			// The snapshot must exist before the first tool that may write; read-only rounds cost nothing.
 			if (tracker && !begin && !readOnly) {
@@ -1812,6 +1818,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				const result = await source.invoke(name, input, token, {
 					callId,
 					terminalOwner,
+					resultChars,
 					...changesDiff,
 					approve: confirmation => this._requestApproval(running, name, callId, confirmation, token),
 					...(nested ? {} : {
@@ -1851,7 +1858,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				}
 			}
 		};
-		const subagentTools = (owner: { id: string; label: string }): ChatToolExecutor => ({
+		const subagentTools = (owner: { id: string; label: string }, modelId: string): ChatToolExecutor => ({
 			get tools() {
 				return source.tools.filter(tool => tool.name !== SUBAGENT_TOOL_NAME
 					&& tool.name !== CLOSE_SUBAGENT_TOOL_NAME
@@ -1861,11 +1868,11 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 					&& tool.name !== LIST_TOOLS_TOOL_NAME
 					&& tool.name !== REQUEST_TOOLS_TOOL_NAME);
 			},
-			invoke: (name, input, token, callId) => invoke(name, input, token, callId, true, owner),
+			invoke: (name, input, token, callId) => invoke(name, input, token, callId, true, owner, this._resultChars(modelId)),
 		});
 		const tools: ChatToolExecutor = {
 			get tools() { return source.tools; },
-			invoke: (name, input, token, callId) => invoke(name, input, token, callId, false, { id: `chat:${running.sessionId}`, label: "Chat" }),
+			invoke: (name, input, token, callId) => invoke(name, input, token, callId, false, { id: `chat:${running.sessionId}`, label: "Chat" }, this._resultChars(model.id)),
 		};
 		let stopped = false;
 		try {
@@ -1877,6 +1884,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			// A model switch compacts the cleaned history, and only when it is still over the switch limit.
 			const current: ChatMessage = { id: running.message.id, role: "assistant", turn, createdAt: running.message.createdAt, parts: [...cleaned] };
 			const initialParts = [...cleaned, ...await this._compactForModel(running, model, cleaned.length > 0 ? [...history, current] : history, fixedTokens)];
+			this._recordBreakdown(running, model, history, initialParts.length > 0 ? [...history, { ...current, parts: [...initialParts] }] : history, system, source.tools, fixedTokens);
 			await runAgentTurn({
 				backend: this._deps.backend,
 				model,
@@ -1953,11 +1961,21 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 	 * Runs a subagent task. A one-off subagent ends with its report; one started with keepOpen, or continued with
 	 * subagentId, keeps its conversation and terminals until close_subagent or the panel closes it.
 	 */
+	/** Characters of one tool result the model's provider forwards uncut, so tools that page fit it. */
+	private _resultChars(modelId: string): number | undefined {
+		try {
+			const limit = this._deps.backend.toolResultCharLimit?.(modelId);
+			return typeof limit === "number" && Number.isFinite(limit) && limit > 0 ? limit : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	private async _runSubagent(
 		running: RunningTurn,
 		callId: string,
 		request: SubagentRequest,
-		toolsFor: (owner: { id: string; label: string }) => ChatToolExecutor,
+		toolsFor: (owner: { id: string; label: string }, modelId: string) => ChatToolExecutor,
 		token: vscode.CancellationToken,
 		prepared?: { entry?: OpenSubagent; model: vscode.LanguageModelChatInformation },
 	): Promise<string> {
@@ -1978,7 +1996,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 		const withId = (run: ChatSubagentRun): ChatSubagentRun => entry ? { ...run, subagentId: entry.id } : run;
 		const files = new SubagentFiles();
-		const executor = toolsFor(owner);
+		const executor = toolsFor(owner, model.id);
 		const source = this._deps.tools;
 		const wrapped: ChatToolExecutor = {
 			get tools() { return executor.tools; },
@@ -2005,6 +2023,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				hostContext: this._turnContext(),
 				...(memory ? { memory } : {}),
 				...(entry ? { history: entry.history, invocationId: `chat-subagent-${runtime.meta.id}-${entry.id}` } : {}),
+				cleaningBudget: this._deps.compaction?.cleaningBudget?.() ?? 0,
 				onHistory: value => {
 					history = value;
 				},
@@ -2394,6 +2413,39 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 		}
 	}
 
+	/** What the turn's first request spends its tokens on, for Session Quality and the log; never fails the turn. */
+	private _recordBreakdown(
+		running: RunningTurn,
+		model: vscode.LanguageModelChatInformation,
+		history: readonly ChatMessage[],
+		sent: readonly ChatMessage[],
+		system: string | undefined,
+		tools: readonly vscode.LanguageModelChatTool[],
+		fixedTokens: number,
+	): void {
+		try {
+			const event = chatRequestBreakdown(sent, system, tools, {
+				conversationId: running.sessionId,
+				modelId: model.id,
+				imageInput: model.capabilities?.imageInput === true,
+				// The last report covers the history before this turn's cleaning.
+				scale: providerTokenScale(history, fixedTokens),
+			});
+			this._log("chat.request.breakdown", {
+				model: model.id,
+				total: event.total,
+				...event.tokens,
+				scale: event.scale,
+				messages: event.messages,
+				stubbedResults: event.stubbedResults,
+				shortenedArguments: event.shortenedArguments,
+			});
+			this._deps.compaction?.onRequestBreakdown?.(event);
+		} catch (error) {
+			this._log("chat.request.breakdown_failed", { message: errorMessage(error) });
+		}
+	}
+
 	/**
 	 * A new request over the chat context budget first cleans the history: stale tool results become stubs, then
 	 * older turns are summarized until the chat is at CONTEXT_CLEANING_TARGET_RATIO of the budget. The next request
@@ -2431,16 +2483,23 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 						writer: this._summaryWriters(model),
 						transcriptPath: this._deps.store.logPath(running.sessionId),
 						staleResults: plan.staleResults,
+						staleArguments: plan.staleArguments,
 					});
 					if (summary) {
 						const before = activeCompaction(history)?.part.summarizedMessages ?? 0;
 						const fresh = new Set(plan.freshResults);
+						const freshArguments = new Set(plan.freshArguments);
+						const shortened = (summary.staleArguments ?? []).filter(callId => freshArguments.has(callId)).length;
 						part = {
 							...summary,
 							tokensBefore: scaled(plan.tokensBefore),
 							tokensAfter: scaled(summary.tokensAfter),
 							// Results of the summarized messages reach the model as the summary, not as stubs.
-							cleaning: { staleResults: (summary.staleResults ?? []).filter(callId => fresh.has(callId)).length, summary: true, summarizedMessages: Math.max(0, summary.summarizedMessages - before), budgetTokens: budget },
+							cleaning: {
+								staleResults: (summary.staleResults ?? []).filter(callId => fresh.has(callId)).length,
+								...(shortened > 0 ? { staleArguments: shortened } : {}),
+								summary: true, summarizedMessages: Math.max(0, summary.summarizedMessages - before), budgetTokens: budget,
+							},
 						};
 					}
 				} catch (error) {
@@ -2455,7 +2514,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				}
 			}
 		}
-		part ??= plan.newStale > 0 || plan.newStaleMemoryIndex > 0 ? staleOnlyCompaction(history, plan) : undefined;
+		part ??= plan.newStale > 0 || plan.newStaleMemoryIndex > 0 || plan.freshArguments.length > 0 ? staleOnlyCompaction(history, plan) : undefined;
 		if (!part || !cleaningPaysOff(part, budget)) {
 			this._log("chat.cleaning.skipped", {
 				reason: part ? "small_saving" : "nothing_to_clean",
@@ -2463,6 +2522,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				tokensBefore: scaled(plan.tokensBefore),
 				...(part ? { tokensAfter: part.tokensAfter } : {}),
 				staleResults: plan.newStale,
+				staleArguments: plan.freshArguments.length,
 			});
 			return [];
 		}
@@ -2476,6 +2536,8 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 			estimateAfterStubs: plan.tokensAfterStubs,
 			staleResults: part.cleaning?.staleResults ?? 0,
 			stubbedTotal: part.staleResults?.length ?? 0,
+			staleArguments: part.cleaning?.staleArguments ?? 0,
+			shortenedTotal: part.staleArguments?.length ?? 0,
 			staleMemoryIndex: part.staleMemoryIndex?.length ?? 0,
 			summary: part.cleaning?.summary ?? false,
 			summarizedMessages: part.cleaning?.summarizedMessages ?? 0,
@@ -2492,6 +2554,7 @@ export class ChatController implements ChatWebviewBridge, vscode.Disposable {
 				tokensBefore: part.tokensBefore,
 				tokensAfter: part.tokensAfter,
 				staleResults: part.cleaning?.staleResults ?? 0,
+				...(part.cleaning?.staleArguments ? { staleArguments: part.cleaning.staleArguments } : {}),
 				summary: part.cleaning?.summary ?? false,
 				summarizedMessages: part.cleaning?.summarizedMessages ?? 0,
 				durationMs: Date.now() - startedAt,

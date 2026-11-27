@@ -367,6 +367,23 @@ suite("session quality panel", () => {
 		assert.match(nativeCacheHtml, /cache write 97 \(9\.7%\)/); assert.match(nativeCacheHtml, /fresh 3/);
 		assert.ok(!nativeCacheHtml.includes("Claude session &amp; cache"));
 
+		// Cleanings with shortened arguments and the request breakdown.
+		const tokens = { system: 3_000, tools: 6_000, summary: 0, memory: 500, requests: 1_000, answers: 2_000, toolArguments: 4_000, toolResults: 20_000, images: 0 };
+		const breakdownHtml = (sandbox.renderCacheTab as (value: unknown) => string)({
+			...data,
+			cleanings: [{ conversationId: "chat-1", modelId: "claude::opus", budgetTokens: 200_000, tokensBefore: 210_000, tokensAfter: 120_000, staleResults: 12, staleArguments: 3, summary: false, summarizedMessages: 0, durationMs: 40, at: 1_700_000_000_000 }],
+			breakdowns: [
+				{ conversationId: "chat-1", modelId: "claude::opus", at: 1_700_000_000_000, tokens, total: 36_500, scale: 0.5, messages: 40, stubbedResults: 12, shortenedArguments: 3 },
+				{ conversationId: "chat-1", modelId: "claude::opus", at: 1_700_000_100_000, tokens: { ...tokens, toolResults: 40_000 }, total: 56_500, scale: 0.5, messages: 44, stubbedResults: 12, shortenedArguments: 3 },
+			],
+		});
+		assert.match(breakdownHtml, /<td title="[^"]*arguments[^"]*">12 · 3 args<\/td>/);
+		assert.match(breakdownHtml, /<h2>Request breakdown<\/h2>/);
+		assert.match(breakdownHtml, /12 stubbed results · 3 shortened arguments · average of 2 turns/);
+		assert.match(breakdownHtml, /<td>Tool results<\/td><td class="compact-number" title="40,000 tokens">40K<\/td><td>70\.8%<\/td><td class="compact-number" title="30,000 tokens">30K<\/td><td>64\.5%<\/td>/);
+		assert.match(breakdownHtml, /<td>Tool arguments<\/td>/);
+		assert.ok(!(sandbox.renderCacheTab as (value: unknown) => string)({ ...data, breakdowns: [] }).includes("Request breakdown"), "no section without data");
+
 		// Performance tab (lazily rendered on switch).
 		const perfHtml = call("renderPerfTab");
 		assert.match(perfHtml, /Gap med \/ p95/);
