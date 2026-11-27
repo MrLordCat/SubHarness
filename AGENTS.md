@@ -110,7 +110,7 @@ code --install-extension llama-vscode-chat-{version}.vsix
 - Автоматически выполняет `npm run vscode:prepublish` (clean + compile + `scripts/build-extension.mjs`:
   esbuild собирает `out/extension.js` и все его модули `out/` в один файл на месте; npm-пакеты и `vscode`
   остаются внешними). Тесты и разработка работают с пофайловым выводом `tsc`; проверить бандл в тестовом
-  хосте: `npm run compile; node scripts/build-extension.mjs; npx vscode-test`.
+  хосте: `npm run compile; node scripts/build-extension.mjs; node scripts/run-vscode-test.mjs`.
 - Рантайм Claude (`claude.exe`) в VSIX не входит: он скачивается при первом использовании
   (`src/claude/runtime-installer.ts`), как Codex CLI.
 - Упаковывает только файлы, перечисленные в `.vscodeignore`
@@ -144,7 +144,7 @@ console.log('version:', ext?.version, 'source:', ext?.metadata?.source);
 | `npm run package` | `vsce package` |
 | `npm run clean` | удалить `out/` |
 | `npm run lint` | eslint |
-| `npm test` | compile + vscode-test |
+| `npm test` | compile + vscode-test (через `scripts/run-vscode-test.mjs`) |
 | `npm run format` | prettier --write . |
 
 ## Вспомогательные скрипты

@@ -1362,7 +1362,7 @@
 		"watch": "tsc -watch -p ./",
 		"watch:webview": "node scripts/build-webview.mjs --dev --watch",
 		"test:chat-repair": "node --test scripts/repair-chat-sessions.test.mjs",
-		"test": "npm run compile && npm run test:chat-repair && vscode-test"
+		"test": "npm run compile && npm run test:chat-repair && node scripts/run-vscode-test.mjs"
 	},
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",

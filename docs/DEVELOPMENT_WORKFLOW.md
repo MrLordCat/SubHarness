@@ -10,7 +10,13 @@ For local verification run `npm run check:metadata`, `npm run lint` and
 `npm test` (VS Code 1.143.1, pinned in `.vscode-test.mjs`). To check the
 minimum supported host, run `npm test -- --code-version 1.131.0`. Provider,
 cache, transport and delegated tool contract suites are part of the full
-extension-host test suite.
+extension-host test suite. To run a part of it without compiling, use
+`node scripts/run-vscode-test.mjs --grep "<suite or test>"`, not
+`npx vscode-test`: on Windows every VS Code start takes over `vscode://`
+links, and the script gives them back to the installed VS Code after the run,
+so a click on a chat notification does not open the test build.
+`node scripts/run-vscode-test.mjs --restore-only` repairs the link handler
+without running tests.
 
 After deleting or renaming TypeScript sources, run `npm run clean` before
 testing. Compilation does not remove old JavaScript files from `out/`, so a
