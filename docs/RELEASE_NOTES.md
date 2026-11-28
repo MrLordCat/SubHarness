@@ -1,100 +1,81 @@
-# SubHarness 2.1.0
+# SubHarness 2.1.3
 
-A stable release that consolidates the 2.0.12 and 2.0.13 development builds.
-A long chat now keeps its own context small instead of asking for a new one,
-Claude gets several subscriptions like Codex, approvals can be given once per
-kind of action, and subagents learn about a used-up limit before they start.
+A patch release on the 2.1 line that also brings the 2.1.1 and 2.1.2
+development builds. It works on the three goals of the line: a lighter
+extension, fewer tokens per answer, and tools that agents use without
+guessing. The VSIX shrinks from 115 MB to 10.6 MB, tool results fit what the
+model takes in, and long subagent reports reach the agent whole.
 
-Earlier notes: [2.0.11](https://github.com/MrLordCat/SubHarness/blob/735491b20d8b60155738e0fcd96d40c9fe711540/docs/RELEASE_NOTES.md),
-[2.0.10](https://github.com/MrLordCat/SubHarness/blob/92bb7436ad7b54ef57b4740914103b38362b6662/docs/RELEASE_NOTES.md),
-[2.0.9](https://github.com/MrLordCat/SubHarness/blob/45c7d70994819938282a405b537762bceb05cac2/docs/RELEASE_NOTES.md),
-[2.0.8](https://github.com/MrLordCat/SubHarness/blob/f32974ca423e04fc1ea7ee5b6ec2c3085e92f252/docs/RELEASE_NOTES.md),
-[2.0.7](https://github.com/MrLordCat/SubHarness/blob/33675edc3537267930e58d6799931e6090269b2d/docs/RELEASE_NOTES.md),
-[2.0.5, everything since 1.21.0](https://github.com/MrLordCat/SubHarness/blob/2aaade62a5422ee4ff4ae490441f3604424b1d0f/docs/RELEASE_NOTES.md).
+Earlier notes: [2.1.0 and before](https://github.com/MrLordCat/SubHarness/blob/1d11dd2682eb41be560d7ae9c7f271c90b55def3/docs/RELEASE_NOTES.md).
 Every change is listed in the [changelog](https://github.com/MrLordCat/SubHarness/blob/main/CHANGELOG.md).
 
 ## Upgrade notes
 
-- 2.0.5 and later offer 2.1.0 at their next update check; Quick Access →
+- 2.0.5 and later offer 2.1.3 at their next update check; Quick Access →
   **SubHarness** → **Install Update** installs it right away. Versions before
   2.0.5 need one manual install from
   https://github.com/MrLordCat/SubHarness/releases/latest
-  (`llama-vscode-chat-v2.1.0-win32-x64.vsix` or
-  `llama-vscode-chat-v2.1.0-linux-x64.vsix`), then **Developer: Reload
+  (`llama-vscode-chat-v2.1.3-win32-x64.vsix` or
+  `llama-vscode-chat-v2.1.3-linux-x64.vsix`), then **Developer: Reload
   Window**.
-- Context cleaning is on by default: `llamacpp.chatContextBudget` is 200,000
-  tokens, and 0 turns it off.
-- **Allow without asking…** beside external tool groups is gone. It never
-  stopped VS Code's own dialog for calls from this chat. Tools that may change
-  something, such as MCP tools not marked read-only, still ask in that dialog.
-- The 2.0.x patch releases leave the Releases page with this release; their
-  notes stay reachable through the links above.
+- The Claude runtime (`claude.exe`, about 100 MB) is no longer inside the
+  VSIX. Signed-in Claude users get it in the background a few seconds after
+  the update; otherwise Claude sign-in offers it, and **SubHarness: Install
+  Claude Runtime** installs it. Quick Access shows **Claude Runtime: Not
+  installed** while it is missing. The Claude Code extension's binary and
+  `llamacpp.claudeCliPath` still come first.
+- DeepSeek session state moves from one `session-state.json` to one file per
+  conversation; the old file is split once and then deleted. DeepSeek
+  reasoning moves from VS Code's state database to
+  `deepseek-reasoning-map.json` in the extension's global storage.
 
-## A chat that cleans itself
+## A lighter extension
 
-- Over the budget, a new request first replaces stale tool results of earlier
-  requests with a one-line stub (a file read that was edited or read again, a
-  command or check that ran again, an old search or listing, a large result
-  two requests old), then summarizes older turns, down to about 60% of the
-  budget. Sizes are counted in the provider's own tokens.
-- A **Context cleaned** card shows what left the context; the messages stay in
-  the chat. The provider's session starts once from the cleaned history, so
-  the cache is rebuilt once per cleaning.
-- A model switch compacts the cleaned history only when it is still over
-  `llamacpp.providerSwitchContextTokens`, and the cleaned history fits
-  Claude's replay whole, with the chat's summary kept.
-- The summary is written by DeepSeek, then a local llama.cpp model, then the
-  chat model; an empty DeepSeek balance is remembered for 30 minutes.
+- The VSIX is 10.6 MB instead of 115 MB. The extension loads from one bundled
+  file (module loading takes about 104 ms instead of 225 ms), and unused SDK
+  builds left the package.
+- Nothing large is read at startup: the 68 MB DeepSeek session state used to
+  be parsed twice, about 0.6 s. A conversation's state file is read the first
+  time it is used.
+- Provider usage is refreshed when it is needed instead of every minute; an
+  idle window sent about 47 such requests an hour. The DeepSeek balance, Codex
+  status and Claude usage refresh at startup, after requests, when Quick
+  Access opens (at most every 5 minutes) and every 15 minutes otherwise; API
+  catalog probes run every 15 minutes instead of 5.
+- Storage is cleaned in the background: logs start a new file every 16 MB and
+  stay under 60 MB, snapshot repositories are packed, and Cursor agents,
+  provider transcripts and temp files unused for 30 days are removed. Chat
+  logs are never removed.
 
-## Subscriptions and limits
+## Fewer tokens
 
-- **Several Claude subscriptions.** Quick Access → Claude → **Add Claude
-  Account…** gives an account its own `CLAUDE_CONFIG_DIR`. The picker shows a
-  group per account with its own limits, and subagents start on an account
-  with room.
-- **Continue on another subscription.** When a limit stops an answer and
-  another account of the same provider has room, the limit card offers
-  **Continue on Claude 2** or **Continue on Codex 2**.
-- **Weekly limits.** The reset time comes from the provider's own report and
-  understands dates, so auto-continue no longer wakes up into the same limit.
-  The **Continue automatically after the reset** box stays on the card for a
-  weekly limit, cleared; long waits read in days.
+- Tools fit their output to what the model's provider takes in one result,
+  instead of the provider dropping its middle. `read_file` stops early and
+  names the `startLine` to continue from, the terminal tools return less of
+  the newest output, and `changes_diff` names the files it left out.
+- Subagent reports reach the agent whole, up to 60,000 characters, on Claude,
+  Codex and HTTP models; Claude used to cut them to 16,000.
+- Self-cleaning also removes old images and older copies of the memory index,
+  shortens long `content`, `oldString`/`newString` and `prompt` arguments of
+  earlier edits and subagent tasks, and counts the tool schemas in the budget.
+- An open subagent is cleaned like the chat before its next task; its panel
+  shows **Earlier tasks cleaned**.
+- The system prompt is 605 characters shorter.
+- Session Quality → **Request breakdown** shows what the first request of each
+  turn spends its tokens on.
 
-## Approvals
+## Tools that agents use without guessing
 
-- **Always allow** on an approval card covers the kind of action, not one
-  file or command line: every change outside the workspace, every folder
-  deletion, or every command of one dangerous-command rule. Approvals hold in
-  every workspace and are saved in the user setting
-  `llamacpp.chat.alwaysAllow`.
-- **Always allowed** at the end of the Tools list and the command
-  **SubHarness: Manage Always Allowed Actions** show and revoke them. A command
-  that matches several rules runs without a card only once all of them are
-  allowed.
+- Every built-in tool schema lists exactly the arguments it takes. A call with
+  an unknown argument still runs without it, and the result names the
+  argument and the accepted ones, on Claude too.
+- Errors say what to do next: a missing tool points to `list_tools` and
+  `request_tools`, and edit, rename, binary-file, web, `run_checks` and
+  round-limit errors name the fix.
+- A terminal result in the state `running` says how to wait for it with
+  `read_terminal` and `waitMs` instead of starting it again.
 
-## Subagents and tools
+## Fixes
 
-- A subagent call to a model whose limit is used up on every account starts
-  nothing and answers at once with the reset time and the models that can
-  run, instead of `Unknown subagent model`.
-- A subagent stops after 1000 tool rounds instead of 100.
-- **`changes_diff`** returns a diff of the agent's changes from the Keep/Undo
-  snapshots, for the running turn or everything waiting for Keep or Undo; a
-  cheap reviewer subagent can call it.
-- One bad tool call no longer ends the turn for local and API models: an
-  argument the schema does not list is dropped when the call works without
-  it, and a bad call next to good ones is skipped with a note the model can
-  act on.
-
-## Local server
-
-- With the local server off, background probes back off from 15 seconds to
-  5 minutes. A success, a changed server setting, **Refresh Models** or
-  **Run Provider Health Check** resets the pause; a chat request always tries.
-
-## Documentation
-
-- The docs keep one current reference per topic. Finished plans, old audits
-  and incident notes were removed, their valid facts moved into the reference
-  documents, and the remaining texts no longer describe the removed Copilot
-  Chat integration.
+- A Codex window whose reset time has passed no longer counts as used up, and
+  the Codex limit text names the window that blocks with its own percent.

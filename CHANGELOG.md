@@ -1,6 +1,8 @@
 # Changelog
 
-## 2.1.3 (development build) - 2026-11-27
+## 2.1.3 (stable release) - 2026-11-28
+
+Also brings the 2.1.1 and 2.1.2 development builds below.
 
 - Changed: tools fit their output to what the model's provider takes in one
   result, instead of the provider dropping its middle (Claude at 16,000
